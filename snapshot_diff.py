@@ -4,6 +4,8 @@ Examples:
     py snapshot_diff.py A:\\ElectricSheep\\xml
     py snapshot_diff.py A:\\ElectricSheep -n 5
     py snapshot_diff.py A:\\ElectricSheep -n 5 --group
+    py snapshot_diff.py 6351d2d2 149d9d24
+    py snapshot_diff.py 149d9d24
 """
 
 import argparse
@@ -29,6 +31,9 @@ RESET = '\033[0m'
 DIFF_FILE = re.compile(r'^(added|removed) file \./(.*) \((\d+) bytes\)$')
 DIFF_DIR = re.compile(r'^(added|removed) directory \./(.*)$')
 DIFF_CHANGED = re.compile(r'^changed \./(.*) at \d{4}-\d\d-\d\d .* \(size (\d+) -> (\d+)\)$')
+
+# Snapshot IDs are 32 hex characters, but the start of one is enough if it's unique
+SNAPSHOT_ID = re.compile(r'^[0-9a-fA-F]{6,32}$')
 
 
 def kopia(*args):
@@ -337,11 +342,42 @@ def print_section(label, changes, target_name, use_colour):
         print()
 
 
+def is_snapshot_id(arg):
+    return SNAPSHOT_ID.match(arg) is not None and not os.path.exists(arg)
+
+
+def find_snapshots_by_id(prefixes):
+    """Find the snapshots matching the ID prefixes.
+
+    Returns their source, the source's snapshots sorted oldest first, and the
+    positions of the matched snapshots in that list, also oldest first.
+    """
+    snapshots = json.loads(kopia('snapshot', 'list', '--json'))
+    found = []
+    for prefix in prefixes:
+        matches = [s for s in snapshots if s['id'].startswith(prefix.lower())]
+        if not matches:
+            raise SystemExit(f'No snapshot ID starts with {prefix}')
+        if len(matches) > 1:
+            raise SystemExit(f'More than one snapshot ID starts with {prefix}, so give more of it')
+        found.append(matches[0])
+
+    source = found[0]['source']['path']
+    if any(snap['source']['path'] != source for snap in found):
+        raise SystemExit('The snapshots are from different sources: '
+                         + ', '.join(snap['source']['path'] for snap in found))
+
+    matched = sorted((s for s in snapshots if s['source']['path'] == source), key=lambda s: s['startTime'])
+    return source, matched, sorted(matched.index(snap) for snap in found)
+
+
 def main():
     parser = argparse.ArgumentParser(description='List files added, removed and modified between kopia snapshots.')
-    parser.add_argument('path', help='folder or file inside a snapshot source (need not exist locally)')
-    parser.add_argument('-n', '--count', type=int, default=1,
-                        help='number of snapshots to go back from the latest (default: 1)')
+    parser.add_argument('targets', nargs='+', metavar='path_or_id',
+                        help='folder or file inside a snapshot source (need not exist locally), '
+                             'or one or two snapshot IDs (or the start of them)')
+    parser.add_argument('-n', '--count', type=int,
+                        help='number of snapshots to go back from the latest, or from the given snapshot (default: 1)')
     parser.add_argument('-a', '--all', action='store_true', help='go back through every snapshot')
     parser.add_argument('-g', '--group', action='store_true',
                         help='combine all changes into a single net result per file')
@@ -354,21 +390,43 @@ def main():
     parser.add_argument('--no-colour', action='store_true', help='disable coloured output')
     args = parser.parse_args()
 
-    if args.count < 1:
+    if args.count is not None and args.count < 1:
         parser.error('--count must be at least 1')
 
-    # Kopia paths are case-sensitive, so take the real case from disk where the path exists
-    target = os.path.abspath(args.path)
-    real = os.path.realpath(target)
-    if os.path.normcase(real) == os.path.normcase(target):
-        target = real
+    ids = [t for t in args.targets if is_snapshot_id(t)]
+    if len(args.targets) > 2 or ids and len(ids) != len(args.targets) or not ids and len(args.targets) > 1:
+        parser.error('give either one path, or one or two snapshot IDs')
 
-    source, snapshots = find_snapshots(target)
-    if len(snapshots) < 2:
-        raise SystemExit(f'Source {source} has fewer than 2 snapshots')
+    if ids:
+        source, snapshots, positions = find_snapshots_by_id(ids)
+        target = source
+        if len(ids) == 2:
+            if args.count is not None or args.all:
+                parser.error('--count and --all only apply to a single snapshot ID')
+            first, last = positions
+            if first == last:
+                raise SystemExit('Both IDs are the same snapshot')
+        else:
+            last = positions[0]
+            if last == 0:
+                raise SystemExit(f'{ids[0]} is the oldest snapshot of {source}, so there is nothing to compare it with')
+            first = 0 if args.all else max(0, last - (args.count or 1))
+        snapshots = snapshots[first:last + 1]
+        count = len(snapshots) - 1
 
-    count = len(snapshots) - 1 if args.all else min(args.count, len(snapshots) - 1)
-    snapshots = snapshots[-(count + 1):]
+    else:
+        # Kopia paths are case-sensitive, so take the real case from disk where the path exists
+        target = os.path.abspath(args.targets[0])
+        real = os.path.realpath(target)
+        if os.path.normcase(real) == os.path.normcase(target):
+            target = real
+
+        source, snapshots = find_snapshots(target)
+        if len(snapshots) < 2:
+            raise SystemExit(f'Source {source} has fewer than 2 snapshots')
+
+        count = len(snapshots) - 1 if args.all else min(args.count or 1, len(snapshots) - 1)
+        snapshots = snapshots[-(count + 1):]
 
     rel = os.path.relpath(target, source)
     parts = [] if rel == '.' else rel.split(os.sep)
