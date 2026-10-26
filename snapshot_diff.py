@@ -44,24 +44,35 @@ def kopia(*args):
     return result.stdout
 
 
-def find_snapshots(target):
-    """Find the snapshot source containing target, and its snapshots sorted oldest first."""
-    snapshots = json.loads(kopia('snapshot', 'list', '--json'))
+def list_snapshots(*args, include_incomplete=False):
+    """List snapshots, leaving out incomplete ones (checkpoints of a snapshot still in progress) by default."""
+    # --no-incomplete doesn't apply to JSON output, so they're filtered here
+    snapshots = json.loads(kopia('snapshot', 'list', *args, '--json'))
+    return [snap for snap in snapshots if include_incomplete or not snap.get('incomplete')]
+
+
+def find_sources(target):
+    """Find every snapshot source containing target, as (source, snapshots sorted oldest first), deepest first."""
+    snapshots = list_snapshots()
     norm_target = os.path.normcase(target)
 
-    best = None
+    sources = {}
     for snap in snapshots:
         source = snap['source']['path']
         norm_source = os.path.normcase(source)
         if norm_target == norm_source or norm_target.startswith(norm_source.rstrip(os.sep) + os.sep):
-            if best is None or len(source) > len(best):
-                best = source
-    if best is None:
-        raise SystemExit(f'No snapshot source contains {target}')
+            sources.setdefault(source, []).append(snap)
+    for source_snapshots in sources.values():
+        source_snapshots.sort(key=lambda s: s['startTime'])
+    return sorted(sources.items(), key=lambda item: len(item[0]), reverse=True)
 
-    matched = [s for s in snapshots if s['source']['path'] == best]
-    matched.sort(key=lambda s: s['startTime'])
-    return best, matched
+
+def find_snapshots(target):
+    """Find the deepest snapshot source containing target, and its snapshots sorted oldest first."""
+    sources = find_sources(target)
+    if not sources:
+        raise SystemExit(f'No snapshot source contains {target}')
+    return sources[0]
 
 
 def glob_to_regex(pattern):
@@ -352,12 +363,12 @@ def find_snapshots_by_id(prefixes):
     Returns their source, the source's snapshots sorted oldest first, and the
     positions of the matched snapshots in that list, also oldest first.
     """
-    snapshots = json.loads(kopia('snapshot', 'list', '--json'))
+    snapshots = list_snapshots()
     found = []
     for prefix in prefixes:
         matches = [s for s in snapshots if s['id'].startswith(prefix.lower())]
         if not matches:
-            raise SystemExit(f'No snapshot ID starts with {prefix}')
+            raise SystemExit(f'No complete snapshot ID starts with {prefix}')
         if len(matches) > 1:
             raise SystemExit(f'More than one snapshot ID starts with {prefix}, so give more of it')
         found.append(matches[0])

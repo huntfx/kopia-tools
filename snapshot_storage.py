@@ -15,12 +15,11 @@ Examples:
 """
 
 import argparse
-import json
 import math
 import os
 import sys
 
-from snapshot_diff import HEADER_COLOUR, RESET, find_snapshots, format_size, kopia, snapshot_label
+from snapshot_diff import HEADER_COLOUR, RESET, find_snapshots, format_size, list_snapshots, snapshot_label
 
 DIM_COLOUR = '\033[90m'
 WARNING_COLOUR = '\033[93m'
@@ -53,6 +52,8 @@ def gradient_positions(amounts):
     is still the reddest without pushing the rest to the bottom. Equal amounts
     always get the same position.
     """
+    if not amounts:
+        return {}
     logs = {math.log10(amount) for amount in amounts}
     logs = sorted(logs | {min(min(logs), max(logs) - MIN_RANGE)})
     scaled = {logs[0]: 0}
@@ -70,14 +71,19 @@ def print_source(source, snapshots, count, use_colour):
         return f'{code}{text}{RESET}' if use_colour else text
 
     snapshots.sort(key=lambda s: s['startTime'])
-    # Stats are computed over every snapshot, as each depends on those before it
-    shown = snapshots[-count:] if count else snapshots
+    # Stats are computed over every snapshot, as each depends on those before it.
+    # Snapshots still in progress are included in kopia's stats, so they're shown
+    # separately with what they've stored so far, to keep the totals adding up.
+    complete = [snap for snap in snapshots if not snap.get('incomplete')]
+    in_progress = [snap for snap in snapshots if snap.get('incomplete')]
+    shown = complete[-count:] if count else complete
     label_width = len(snapshot_label(snapshots[0]))
     print(colour(f'Source: {source}', HEADER_COLOUR))
     print(colour(f'  {"Snapshot":<{label_width}}' + ''.join(f'{c:>11}' for c in COLUMNS), HEADER_COLOUR))
 
     # Colour the amounts each snapshot added relative to the others shown
-    positions = gradient_positions([new[key] for snap in shown for key in ('originalContentBytes', 'packedContentBytes')
+    positions = gradient_positions([new[key] for snap in shown + in_progress
+                                    for key in ('originalContentBytes', 'packedContentBytes')
                                     if (new := snap['storageStats']['newData'])[key]])
 
     def size_cell(size, graded=False):
@@ -86,17 +92,26 @@ def print_source(source, snapshots, count, use_colour):
             text = f'{" " * (11 - len(text))}{colour(text, gradient_colour(positions[size]))}'
         return f'{text:>11}'
 
-    for snap in shown:
+    def print_row(snap):
         new = snap['storageStats']['newData']
         # Snapshots that added nothing are dimmed as a whole instead
         dim = not new['packedContentBytes']
+        # Kopia only records the size of a snapshot once it completes
+        size = f'{"partial":>11}' if snap.get('incomplete') else size_cell(snap['stats']['totalSize'])
         line = (f'  {snapshot_label(snap)}'
-                + size_cell(snap['stats']['totalSize'])
+                + size
                 + f'{new["fileObjects"]:>11,}'
                 + size_cell(new['originalContentBytes'], graded=not dim)
                 + size_cell(new['packedContentBytes'], graded=not dim)
                 + size_cell(snap['storageStats']['runningTotal']['packedContentBytes']))
         print(colour(line, DIM_COLOUR) if dim else line)
+
+    for snap in shown:
+        print_row(snap)
+    if in_progress:
+        print(colour('  In progress (partial, stored so far):', WARNING_COLOUR))
+        for snap in in_progress:
+            print_row(snap)
     print()
 
 
@@ -123,9 +138,11 @@ def main():
                        f'    {os.path.basename(sys.argv[0])} "{source}"')
             raise SystemExit(f'{WARNING_COLOUR}{warning}{RESET}' if sys.stderr.isatty() and not args.no_colour
                              else warning)
-        snapshots = json.loads(kopia('snapshot', 'list', source, '--storage-stats', '--json'))
+        # Kopia also lists the snapshots of sources above this one, so keep just this source
+        snapshots = [snap for snap in list_snapshots(source, '--storage-stats', include_incomplete=True)
+                     if snap['source']['path'] == source]
     else:
-        snapshots = json.loads(kopia('snapshot', 'list', '--storage-stats', '--json'))
+        snapshots = list_snapshots('--storage-stats', include_incomplete=True)
 
     sources = {}
     for snap in snapshots:
