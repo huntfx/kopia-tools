@@ -1,0 +1,570 @@
+<title>Kopia Retention Preview</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: settings column on the left, results (summary, timeline, snapshot list) on the right; stacks on phones. */
+:root {
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --ink: #12161c;
+  --ink-2: #4a5361;
+  --muted: #7b8492;
+  --line: #e2e6ec;
+  --axis: #c5ccd6;
+  --accent: #2a78d6;
+  --warn-bg: #fff6e0;
+  --warn-line: #eda100;
+  --s-latest: #2a78d6;
+  --s-hourly: #eb6834;
+  --s-daily: #1baf7a;
+  --s-weekly: #eda100;
+  --s-monthly: #e87ba4;
+  --s-annual: #008300;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1216; --surface: #171b21; --ink: #eef1f5; --ink-2: #b9c1cc; --muted: #8a93a0;
+    --line: #262c35; --axis: #38404b; --accent: #3987e5; --warn-bg: #2a2310; --warn-line: #c98500;
+    --s-latest: #3987e5; --s-hourly: #d95926; --s-daily: #199e70; --s-weekly: #c98500;
+    --s-monthly: #d55181; --s-annual: #008300;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1216; --surface: #171b21; --ink: #eef1f5; --ink-2: #b9c1cc; --muted: #8a93a0;
+  --line: #262c35; --axis: #38404b; --accent: #3987e5; --warn-bg: #2a2310; --warn-line: #c98500;
+  --s-latest: #3987e5; --s-hourly: #d95926; --s-daily: #199e70; --s-weekly: #c98500;
+  --s-monthly: #d55181; --s-annual: #008300;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--font-ui); font-size: 14px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 48px;
+}
+.page { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
+header h1 { font-size: 1.6rem; font-weight: 600; margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+header p { margin: 4px 0 0; color: var(--ink-2); max-width: 68ch; }
+.layout { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 24px; align-items: start; }
+@media (max-width: 860px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; min-width: 0; }
+.stack { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+h2 { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 10px; }
+
+/* Settings */
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field + .field { margin-top: 12px; }
+label { font-weight: 500; }
+.hint { color: var(--muted); font-size: 0.8rem; }
+input, select, button { font: inherit; color: var(--ink); }
+input, select {
+  background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 6px 8px; min-width: 0;
+}
+input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row input[type="datetime-local"], .row input[type="date"] { flex: 1 1 170px; }
+button {
+  background: var(--surface); border: 1px solid var(--axis); border-radius: 6px; padding: 6px 12px; cursor: pointer;
+}
+button:hover { border-color: var(--ink-2); }
+#every { width: 5.5em; }
+
+.rules { display: flex; flex-direction: column; }
+.rule { display: grid; grid-template-columns: 12px minmax(0, 1fr) 4.6em; gap: 4px 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.rule:first-child { border-top: 0; padding-top: 0; }
+.rule .sw { width: 10px; height: 10px; border-radius: 50%; }
+.rule label { font-weight: 600; }
+.rule input { text-align: right; font-family: var(--font-data); width: 100%; }
+.rule .desc { grid-column: 2 / 4; color: var(--ink-2); font-size: 0.82rem; }
+.rule .stat { grid-column: 2 / 4; color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.rule .stat b { color: var(--ink); font-weight: 600; }
+
+.cmd { display: flex; gap: 8px; align-items: stretch; }
+.cmd code {
+  flex: 1; min-width: 0; font-family: var(--font-data); font-size: 0.78rem; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 8px; overflow-wrap: anywhere; user-select: all;
+}
+
+/* Summary */
+.summary { display: flex; flex-wrap: wrap; gap: 8px 32px; align-items: baseline; }
+.big { font-size: 2.6rem; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+.big small { font-size: 1rem; font-weight: 500; color: var(--ink-2); letter-spacing: 0; margin-left: 6px; }
+.facts { display: flex; flex-wrap: wrap; gap: 4px 28px; color: var(--ink-2); }
+.facts b { color: var(--ink); font-weight: 500; }
+.notice { margin-top: 14px; background: var(--warn-bg); border-left: 3px solid var(--warn-line); border-radius: 4px; padding: 10px 12px; color: var(--ink); font-size: 0.88rem; }
+.error { color: var(--ink); background: var(--warn-bg); border-radius: 6px; padding: 10px 12px; }
+
+/* Timeline */
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; touch-action: pan-y; }
+.chart text { font-family: var(--font-ui); font-size: 11px; fill: var(--muted); }
+.chart .lane-label { fill: var(--ink-2); font-size: 12px; }
+.tip {
+  position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--axis); border-radius: 8px;
+  padding: 8px 10px; font-size: 0.82rem; box-shadow: 0 4px 16px rgb(0 0 0 / 0.12); white-space: nowrap; z-index: 2;
+}
+.tip .t { font-weight: 600; }
+.tip .a { color: var(--muted); }
+.chart-note { color: var(--muted); font-size: 0.8rem; margin-top: 6px; }
+
+/* Snapshot list */
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 0 12px 8px 0; white-space: nowrap; }
+td { padding: 6px 12px 6px 0; border-top: 1px solid var(--line); vertical-align: top; }
+td.when { font-family: var(--font-data); font-size: 0.82rem; white-space: nowrap; }
+td.num { font-family: var(--font-data); font-size: 0.82rem; color: var(--ink-2); white-space: nowrap; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-data); font-size: 0.78rem; color: var(--ink-2); white-space: nowrap; }
+.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+tr.gap-row td { border-top: 0; padding-block: 0 4px; }
+.gap-mark { font-size: 0.75rem; color: var(--muted); font-style: italic; }
+
+/* Explainer */
+.explain ol { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 8px; max-width: 72ch; color: var(--ink-2); }
+.explain b { color: var(--ink); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="page">
+  <header>
+    <h1>Kopia Retention Preview</h1>
+    <p>See which snapshots kopia would still be keeping at a given moment, if it had been taking snapshots on a fixed schedule for as long as you like. This mirrors kopia's own retention code, including its quirks.</p>
+  </header>
+
+  <div class="layout">
+    <div class="stack">
+      <section class="panel" aria-labelledby="h-schedule">
+        <h2 id="h-schedule">Schedule</h2>
+        <div class="field">
+          <label for="now">Preview as of</label>
+          <div class="row">
+            <input type="datetime-local" id="now">
+            <button type="button" id="now-btn">Now</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="every">Snapshot every</label>
+          <div class="row">
+            <input type="number" id="every" min="1" step="1" value="10">
+            <select id="every-unit" aria-label="Interval unit">
+              <option value="1">minutes</option>
+              <option value="60">hours</option>
+            </select>
+          </div>
+          <span class="hint">Snapshots are assumed to run on the clock from midnight, e.g. 00:00, 00:10, 00:20.</span>
+        </div>
+        <div class="field">
+          <label for="started">First snapshot taken</label>
+          <div class="row">
+            <input type="date" id="started">
+            <button type="button" id="started-clear">Forever</button>
+          </div>
+          <span class="hint" id="started-hint">Leave empty to assume snapshots have always been running.</span>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-rules">
+        <h2 id="h-rules">Retention rules</h2>
+        <div class="rules" id="rules"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-cmd">
+        <h2 id="h-cmd">Apply with kopia</h2>
+        <div class="cmd">
+          <code id="cmd"></code>
+          <button type="button" id="copy">Copy</button>
+        </div>
+        <p class="hint" style="margin:8px 0 0">Replace <code>--global</code> with a folder path to set it for one source only.</p>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel" aria-labelledby="h-summary">
+        <h2 id="h-summary">Result</h2>
+        <div id="summary"></div>
+        <div id="notice"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-timeline">
+        <h2 id="h-timeline">Timeline</h2>
+        <div class="chart" id="chart"></div>
+        <p class="chart-note">Age of each kept snapshot, on a log scale so recent hours and old years both fit. Hover or tap to inspect.</p>
+      </section>
+
+      <section class="panel" aria-labelledby="h-list">
+        <h2 id="h-list">Snapshots kept</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Snapshot</th><th>Age</th><th>Gap to next</th><th>Kept by</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel explain" aria-labelledby="h-explain">
+        <h2 id="h-explain">How kopia decides</h2>
+        <ol>
+          <li><b>Latest N</b> keeps the N newest snapshots, however close together they are.</li>
+          <li>Every other rule keeps <b>the newest snapshot in each period</b>: the last one taken in each clock hour, calendar day, week (Monday to Sunday), calendar month or calendar year. Kopia counts hours, days, months and years in <b>UTC</b> but weeks in local time, so in summer a UK "day" runs from 01:00 to 01:00 (<a href="https://github.com/kopia/kopia/issues/5348">issue #5348</a>).</li>
+          <li>Each rule only <b>looks back that far from the newest snapshot</b>: daily 7 covers 7 days, weekly 4 covers 28 days, monthly 24 covers 24 months. A period that falls outside that window is ignored even if the count isn't used up.</li>
+          <li>A snapshot is kept if <b>any rule</b> keeps it, and one snapshot often satisfies several rules (the last snapshot on a Sunday night is the newest of its hour, day and week). That's why the total is far less than the sum of the numbers.</li>
+          <li>Kopia applies the rules each time it takes a snapshot and <b>deletes everything no rule keeps</b>. A deleted snapshot never comes back, so this list is also what you'd see in <code>kopia snapshot list</code>.</li>
+        </ol>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- Retention logic: a port of kopia snapshot/policy/retention_policy.go ----
+// Like kopia, hour/day/month/year keys are formatted in UTC (UTCTimestamp.Format) while the ISO
+// week comes from local time (ToTime().ISOWeek()). Keys share one namespace across rule types,
+// as in kopia, so weekly "2027-01" (ISO week 1) collides with monthly "2027-01" (January).
+
+const HOUR = 3600e3;
+const pad = (n, w = 2) => String(n).padStart(w, "0");
+
+function isoWeek(d) {
+  const t = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  t.setDate(t.getDate() + 3 - ((t.getDay() + 6) % 7)); // Thursday of this ISO week
+  const jan4 = new Date(t.getFullYear(), 0, 4);
+  const week = 1 + Math.round(((t - jan4) / 864e5 - 3 + ((jan4.getDay() + 6) % 7)) / 7);
+  return [t.getFullYear(), week];
+}
+
+const keyCache = new Map();
+function periodKeys(ms) {
+  let k = keyCache.get(ms);
+  if (k) return k;
+  const d = new Date(ms);
+  const Y = d.getUTCFullYear(), M = pad(d.getUTCMonth() + 1), D = pad(d.getUTCDate()), H = pad(d.getUTCHours());
+  const [wy, wk] = isoWeek(d); // local time
+  k = { annual: `${Y}`, monthly: `${Y}-${M}`, weekly: `${pad(wy, 4)}-${pad(wk)}`, daily: `${Y}-${M}-${D}`, hourly: `${Y}-${M}-${D} ${H}` };
+  if (keyCache.size > 500000) keyCache.clear();
+  keyCache.set(ms, k);
+  return k;
+}
+
+// Go's time.AddDate in the local zone.
+function addDate(ms, years, months, days) {
+  const d = new Date(ms);
+  d.setFullYear(d.getFullYear() + years, d.getMonth() + months, d.getDate() + days);
+  return d.getTime();
+}
+
+function cutoffs(base, p) {
+  return {
+    annual: addDate(base, -p.annual, 0, 0),
+    monthly: addDate(base, 0, -p.monthly, 0),
+    weekly: addDate(base, 0, 0, -7 * p.weekly),
+    daily: addDate(base, 0, 0, -p.daily),
+    hourly: base - p.hourly * HOUR,
+  };
+}
+
+const TYPES = ["latest", "annual", "monthly", "weekly", "daily", "hourly"]; // kopia's evaluation order
+
+// times: newest first. Returns each snapshot's reasons, plus claims a rule lost to another rule's identical key.
+function computeRetention(times, p) {
+  if (!times.length) return { snaps: [], collisions: [] };
+  const cut = cutoffs(times[0], p);
+  const ids = new Map();
+  const counters = { latest: 0, annual: 0, monthly: 0, weekly: 0, daily: 0, hourly: 0 };
+  const collisions = [];
+  const snaps = times.map((t, i) => {
+    const keys = periodKeys(t);
+    const reasons = [];
+    for (const type of TYPES) {
+      const max = p[type];
+      const id = type === "latest" ? String(i) : keys[type];
+      if (type !== "latest" && t < cut[type]) continue;
+      if (ids.has(id)) {
+        const owner = ids.get(id);
+        if (owner !== type && counters[type] < max) collisions.push({ type, id, owner, time: t });
+        continue;
+      }
+      if (counters[type] < max) {
+        ids.set(id, type);
+        counters[type]++;
+        reasons.push([type, counters[type]]);
+      }
+    }
+    return { time: t, reasons };
+  });
+  return { snaps, collisions };
+}
+
+// Only the snapshots that can matter: the newest `latest` individually, then the newest in each
+// 15-minute UTC bucket (every local hour boundary in every time zone falls on one) back to the
+// oldest cutoff. Verified against a full snapshot-by-snapshot simulation with expiry after each one.
+function candidateTimes(now, intervalMs, p, startedAt) {
+  const mid = new Date(now); mid.setHours(0, 0, 0, 0);
+  const anchor = mid.getTime();
+  const align = (ms) => anchor + Math.floor((ms - anchor) / intervalMs) * intervalMs;
+  const newest = align(now);
+  const c = cutoffs(newest, p);
+  const oldest = Math.max(startedAt, Math.min(c.annual, c.monthly, c.weekly, c.daily, c.hourly) - intervalMs);
+  const Q = 15 * 60e3;
+  const out = [];
+  let t = newest;
+  while (t >= startedAt && (out.length < p.latest || t >= oldest)) {
+    out.push(t);
+    t = out.length < p.latest ? t - intervalMs : align(Math.floor(t / Q) * Q - 1);
+  }
+  return out;
+}
+
+// ---- Page ----
+
+const RULES = [
+  { type: "latest", name: "Latest", def: 10, desc: "The N most recent snapshots, whenever they were taken." },
+  { type: "hourly", name: "Hourly", def: 48, desc: "Newest snapshot from each of the last N clock hours." },
+  { type: "daily", name: "Daily", def: 7, desc: "Newest snapshot from each of the last N days." },
+  { type: "weekly", name: "Weekly", def: 4, desc: "Newest snapshot from each of the last N weeks (Mon–Sun)." },
+  { type: "monthly", name: "Monthly", def: 24, desc: "Newest snapshot from each of the last N calendar months." },
+  { type: "annual", name: "Annual", def: 3, desc: "Newest snapshot from each of the last N calendar years." },
+];
+const color = (type) => `var(--s-${type})`;
+const $ = (id) => document.getElementById(id);
+
+const timeFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+const fmtTime = (ms) => timeFmt.format(ms);
+
+function dur(ms) {
+  const m = Math.round(ms / 60e3);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60), mm = m % 60;
+  if (h < 48) return mm ? `${h}h ${mm}m` : `${h}h`;
+  const d = Math.floor(h / 24), hh = h % 24;
+  if (d < 60) return hh ? `${d}d ${hh}h` : `${d}d`;
+  if (d < 730) return `${Math.round(d / 30.44)} mo`;
+  return `${(d / 365.25).toFixed(1)} yr`;
+}
+
+function toLocalInput(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Build rule inputs.
+$("rules").innerHTML = RULES.map((r) => `
+  <div class="rule">
+    <span class="sw" style="background:${color(r.type)}"></span>
+    <label for="keep-${r.type}">${r.name}</label>
+    <input type="number" id="keep-${r.type}" min="0" max="1000" step="1" value="${r.def}" inputmode="numeric">
+    <span class="desc">${r.desc}</span>
+    <span class="stat" id="stat-${r.type}"></span>
+  </div>`).join("");
+
+// Restore the viewer's last settings, if the browser allows storage.
+const FIELDS = ["every", "every-unit", "started", ...RULES.map((r) => `keep-${r.type}`)];
+try {
+  const saved = JSON.parse(localStorage.getItem("kopia-retention") || "{}");
+  for (const id of FIELDS) if (saved[id] != null) $(id).value = saved[id];
+} catch {}
+$("now").value = toLocalInput(Date.now());
+
+function readSettings() {
+  const num = (id, lo, hi) => {
+    const v = Math.floor(Number($(id).value));
+    return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null;
+  };
+  const p = {};
+  for (const r of RULES) p[r.type] = num(`keep-${r.type}`, 0, 1000) ?? 0;
+  const every = num("every", 1, 100000);
+  const now = new Date($("now").value).getTime();
+  const started = $("started").value ? new Date($("started").value + "T00:00").getTime() : -Infinity;
+  return { p, intervalMs: (every || 10) * Number($("every-unit").value) * 60e3, every: every || 10, unit: $("every-unit").value, now, started };
+}
+
+let last = null;
+
+function render() {
+  const s = readSettings();
+  try {
+    const saved = {};
+    for (const id of FIELDS) saved[id] = $(id).value;
+    localStorage.setItem("kopia-retention", JSON.stringify(saved));
+  } catch {}
+
+  const interval = s.unit === "60" ? `${s.every}h` : `${s.every}m`;
+  $("cmd").textContent = `kopia policy set --global --snapshot-interval ${interval} ` +
+    RULES.map((r) => `--keep-${r.type} ${s.p[r.type]}`).join(" ");
+
+  if (!Number.isFinite(s.now)) {
+    $("summary").innerHTML = `<p class="error">Enter a date and time to preview.</p>`;
+    return;
+  }
+  if (s.started > s.now) {
+    $("summary").innerHTML = `<p class="error">The first snapshot is after the preview time. Pick an earlier start date or a later preview time.</p>`;
+    $("rows").innerHTML = ""; $("chart").innerHTML = ""; $("notice").innerHTML = "";
+    return;
+  }
+
+  const { snaps, collisions } = computeRetention(candidateTimes(s.now, s.intervalMs, s.p, s.started), s.p);
+  const kept = snaps.filter((x) => x.reasons.length);
+  last = { kept, s };
+
+  // Per-rule stats: how many each rule keeps, and how many only that rule keeps.
+  for (const r of RULES) {
+    const mine = kept.filter((x) => x.reasons.some(([t]) => t === r.type));
+    const only = mine.filter((x) => x.reasons.length === 1).length;
+    $(`stat-${r.type}`).innerHTML = s.p[r.type]
+      ? `Keeps <b>${mine.length}</b> · <b>${only}</b> that no other rule keeps`
+      : `Off`;
+  }
+
+  const oldest = kept[kept.length - 1];
+  const newest = kept[0];
+  $("summary").innerHTML = kept.length ? `
+    <div class="summary">
+      <div class="big">${kept.length}<small>snapshot${kept.length === 1 ? "" : "s"} kept</small></div>
+      <div class="facts">
+        <span>Newest <b>${fmtTime(newest.time)}</b></span>
+        <span>Oldest <b>${fmtTime(oldest.time)}</b> (${dur(s.now - oldest.time)} ago)</span>
+      </div>
+    </div>` : `<p class="error">No snapshots are kept with these rules. Set at least one rule above zero.</p>`;
+
+  // Kopia bug: weekly keys like "2027-01" (week 1) collide with monthly keys like "2027-01" (January).
+  const lostWeeks = new Map(), lostOther = new Map();
+  for (const c of collisions) {
+    if (c.type === "weekly") {
+      const [y, w] = c.id.split("-");
+      if (!lostWeeks.has(y)) lostWeeks.set(y, new Set());
+      lostWeeks.get(y).add(Number(w));
+    } else lostOther.set(c.type + c.id, c);
+  }
+  const weekText = [...lostWeeks].map(([y, ws]) => {
+    const list = [...ws].sort((a, b) => a - b);
+    return `week${list.length > 1 ? "s" : ""} ${list.join(", ")} of ${y}`;
+  }).join(" and ");
+  $("notice").innerHTML = lostWeeks.size || lostOther.size ? `<div class="notice">
+      <b>Kopia bug in effect.</b>
+      ${lostWeeks.size ? `The weekly rule keeps nothing for ${weekText}. Kopia names week 1 <code>2027-01</code>, the same as January, and the monthly rule has already used that name. Weeks 1–12 of a year are affected whenever the monthly rule covers the matching month (issues <a href="https://github.com/kopia/kopia/issues/2964">#2964</a>, <a href="https://github.com/kopia/kopia/issues/5096">#5096</a>).` : ""}
+      ${[...lostOther.values()].map((c) => `The ${c.type} rule skipped <code>${c.id}</code> because the ${c.owner} rule already used that name.`).join(" ")}
+      The preview reproduces this.
+    </div>` : "";
+
+  renderRows(kept, s);
+  drawChart();
+}
+
+function chipsFor(reasons) {
+  return `<div class="chips">${reasons.map(([t, n]) => `<span class="chip"><i style="background:${color(t)}"></i>${t}-${n}</span>`).join("")}</div>`;
+}
+
+function renderRows(kept, s) {
+  const order = RULES.map((r) => r.type);
+  $("rows").innerHTML = kept.map((x, i) => {
+    const next = kept[i + 1];
+    const reasons = [...x.reasons].sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+    return `<tr>
+      <td class="when">${fmtTime(x.time)}</td>
+      <td class="num">${dur(s.now - x.time)}</td>
+      <td class="num">${next ? dur(x.time - next.time) : "–"}</td>
+      <td>${chipsFor(reasons)}</td>
+    </tr>`;
+  }).join("");
+}
+
+// Timeline: one lane per rule plus an "All kept" lane, x = log(age).
+function drawChart() {
+  const el = $("chart");
+  if (!last || !last.kept.length) { el.innerHTML = ""; return; }
+  const { kept, s } = last;
+  const W = Math.max(280, el.clientWidth);
+  const left = 78, right = 14, top = 8, laneH = 26, axisH = 26;
+  const lanes = [{ type: "all", name: "All kept" }, ...RULES.filter((r) => s.p[r.type])];
+  const H = top + lanes.length * laneH + axisH;
+  const I = s.intervalMs;
+  const maxAge = Math.max(s.now - kept[kept.length - 1].time, 864e5);
+  const lo = Math.log(I), hi = Math.log(maxAge + I);
+  const x = (age) => left + ((Math.log(age + I) - lo) / (hi - lo)) * (W - left - right);
+  const laneY = (i) => top + i * laneH + laneH / 2;
+
+  const tickDefs = [[10 * 60e3, "10m"], [HOUR, "1h"], [6 * HOUR, "6h"], [24 * HOUR, "1d"], [7 * 864e5, "1w"],
+    [30.44 * 864e5, "1mo"], [182.6 * 864e5, "6mo"], [365.25 * 864e5, "1y"], [2 * 365.25 * 864e5, "2y"],
+    [3 * 365.25 * 864e5, "3y"], [5 * 365.25 * 864e5, "5y"], [10 * 365.25 * 864e5, "10y"]];
+  const ticks = tickDefs.filter(([a]) => a >= I && a <= maxAge + I);
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="Timeline of kept snapshots by age and rule">`;
+  for (const [a, label] of ticks) {
+    const tx = x(a);
+    svg += `<line x1="${tx}" x2="${tx}" y1="${top}" y2="${H - axisH}" stroke="var(--line)" stroke-width="1"/>`;
+    svg += `<text x="${tx}" y="${H - axisH + 16}" text-anchor="middle">${label}</text>`;
+  }
+  svg += `<line x1="${left}" x2="${W - right}" y1="${H - axisH}" y2="${H - axisH}" stroke="var(--axis)" stroke-width="1"/>`;
+  lanes.forEach((ln, i) => {
+    const y = laneY(i);
+    svg += `<text class="lane-label" x="${left - 10}" y="${y + 4}" text-anchor="end">${ln.name}</text>`;
+    svg += `<line x1="${left}" x2="${W - right}" y1="${y}" y2="${y}" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 4"/>`;
+  });
+  svg += `<line id="cross" x1="0" x2="0" y1="${top}" y2="${H - axisH}" stroke="var(--ink-2)" stroke-width="1" visibility="hidden"/>`;
+  for (const k of kept) {
+    const cx = x(s.now - k.time);
+    lanes.forEach((ln, i) => {
+      if (ln.type === "all" || k.reasons.some(([t]) => t === ln.type)) {
+        const fill = ln.type === "all" ? "var(--ink)" : color(ln.type);
+        svg += `<circle cx="${cx}" cy="${laneY(i)}" r="4" fill="${fill}" stroke="var(--surface)" stroke-width="1.5"/>`;
+      }
+    });
+  }
+  svg += `<rect id="hit" x="${left}" y="0" width="${W - left - right}" height="${H - axisH}" fill="transparent"/></svg>`;
+  el.innerHTML = svg + `<div class="tip" id="tip" hidden></div>`;
+
+  // Crosshair: snap to the nearest kept snapshot along x.
+  const xs = kept.map((k) => x(s.now - k.time));
+  const svgEl = el.querySelector("svg"), cross = el.querySelector("#cross"), tip = el.querySelector("#tip");
+  const hide = () => { cross.setAttribute("visibility", "hidden"); tip.hidden = true; };
+  const show = (evt) => {
+    const box = svgEl.getBoundingClientRect();
+    const px = (evt.clientX - box.left) * (W / box.width);
+    let best = 0;
+    for (let i = 1; i < xs.length; i++) if (Math.abs(xs[i] - px) < Math.abs(xs[best] - px)) best = i;
+    if (Math.abs(xs[best] - px) > 24) return hide();
+    const k = kept[best];
+    cross.setAttribute("x1", xs[best]); cross.setAttribute("x2", xs[best]); cross.setAttribute("visibility", "visible");
+    const order = RULES.map((r) => r.type);
+    const reasons = [...k.reasons].sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+    tip.innerHTML = `<div class="t">${fmtTime(k.time)}</div><div class="a">${dur(s.now - k.time)} ago</div>${chipsFor(reasons)}`;
+    tip.hidden = false;
+    const scale = box.width / W;
+    const tx = xs[best] * scale, tw = tip.offsetWidth;
+    tip.style.left = `${Math.min(Math.max(0, tx + 12 + tw > box.width ? tx - tw - 12 : tx + 12), Math.max(0, box.width - tw))}px`;
+    tip.style.top = `${top}px`;
+  };
+  const hit = el.querySelector("#hit");
+  hit.addEventListener("pointermove", show);
+  hit.addEventListener("pointerdown", show);
+  hit.addEventListener("pointerleave", hide);
+}
+
+let timer;
+const schedule = () => { clearTimeout(timer); timer = setTimeout(render, 120); };
+for (const id of ["now", ...FIELDS]) $(id).addEventListener("input", schedule);
+$("now-btn").addEventListener("click", () => { $("now").value = toLocalInput(Date.now()); render(); });
+$("started-clear").addEventListener("click", () => { $("started").value = ""; render(); });
+$("copy").addEventListener("click", async () => {
+  const btn = $("copy");
+  try {
+    await navigator.clipboard.writeText($("cmd").textContent);
+    btn.textContent = "Copied";
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents($("cmd"));
+    getSelection().removeAllRanges(); getSelection().addRange(range);
+    btn.textContent = "Selected";
+  }
+  setTimeout(() => (btn.textContent = "Copy"), 1500);
+});
+new ResizeObserver(() => drawChart()).observe($("chart"));
+render();
+</script>
