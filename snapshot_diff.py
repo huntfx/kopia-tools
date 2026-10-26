@@ -59,7 +59,104 @@ def find_snapshots(target):
     return best, matched
 
 
-def diff_snapshots(old_snap, new_snap, parts, start):
+def glob_to_regex(pattern):
+    """Convert a gitignore-style glob to a regex."""
+    out = []
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if pattern.startswith('**/', i):
+            out.append('(?:.*/)?')
+            i += 3
+        elif pattern.startswith('**', i):
+            out.append('.*')
+            i += 2
+        elif char == '*':
+            out.append('[^/]*')
+            i += 1
+        elif char == '?':
+            out.append('[^/]')
+            i += 1
+        elif char == '[' and (end := pattern.find(']', i + 2)) != -1:
+            body = pattern[i + 1:end].replace('\\', '\\\\')
+            out.append('[' + ('^' + body[1:] if body.startswith('!') else body) + ']')
+            i = end + 1
+        elif char == '\\' and i + 1 < len(pattern):
+            out.append(re.escape(pattern[i + 1]))
+            i += 2
+        else:
+            out.append(re.escape(char))
+            i += 1
+    return ''.join(out)
+
+
+def parse_ignore_rule(line):
+    """Parse a gitignore-style line into (negate, dir_only, regex), or None if it has no rule."""
+    line = re.sub(r'(?<!\\)\s+$', '', line)
+    if not line or line.startswith('#'):
+        return None
+    negate = line.startswith('!')
+    line = line.removeprefix('!')
+    dir_only = line.endswith('/')
+    line = line.rstrip('/')
+    # A slash anywhere but the end anchors the pattern to the rule's directory
+    regex = glob_to_regex(line.lstrip('/'))
+    if '/' not in line:
+        regex = '(?:.*/)?' + regex
+    # Kopia matches case-sensitively, even on Windows
+    return negate, dir_only, re.compile(regex)
+
+
+class KopiaIgnore:
+    """Matches paths against kopia's ignore rules: the policy's, plus the ignore files on disk."""
+
+    def __init__(self, source, policy):
+        """policy is a future for the source's policy JSON, so it can load in the background."""
+        self.source = source
+        self._policy = policy
+        self._rules = {}
+        self._dirs = {}
+
+    def _load(self, dir_parts):
+        """Get the rules that apply from a directory, as (negate, dir_only, regex)."""
+        key = tuple(dir_parts)
+        if key not in self._rules:
+            files = self._policy.result().get('files', {})
+            # Policy rules apply from the source root, before its ignore files
+            lines = [] if dir_parts else list(files.get('ignore') or [])
+            for name in files.get('ignoreDotFiles') or []:
+                try:
+                    with open(os.path.join(self.source, *dir_parts, name), encoding='utf-8-sig') as f:
+                        lines += f.read().splitlines()
+                except OSError:
+                    pass
+            self._rules[key] = [rule for rule in map(parse_ignore_rule, lines) if rule is not None]
+        return self._rules[key]
+
+    def ignored(self, parts, is_dir):
+        """Check if a path below the source root is ignored, either directly or by a parent directory."""
+        parts = tuple(parts)
+        return bool(parts) and (self._dir_ignored(parts[:-1]) or self._matches(parts, is_dir))
+
+    def _dir_ignored(self, parts):
+        # Cached, as most paths share their parent directories
+        if parts not in self._dirs:
+            self._dirs[parts] = self.ignored(parts, True)
+        return self._dirs[parts]
+
+    def _matches(self, parts, is_dir):
+        """Check the rules against the path itself, where the last matching rule wins."""
+        matched = False
+        # Rules in deeper ignore files come later, so take precedence
+        for i in range(len(parts)):
+            path = '/'.join(parts[i:])
+            for negate, dir_only, regex in self._load(parts[:i]):
+                if (is_dir or not dir_only) and regex.fullmatch(path):
+                    matched = not negate
+        return matched
+
+
+def diff_snapshots(old_snap, new_snap, parts, start, is_ignored=None):
     """Diff the target between two snapshots.
 
     parts is the target's path below the snapshot root. The diff starts at
@@ -67,7 +164,8 @@ def diff_snapshots(old_snap, new_snap, parts, start):
     happens when the path is missing from either snapshot or is a file.
     Returns changes as (kind, path, old_entry, new_entry), with paths relative
     to the target. Directory paths end with a slash, the target directory
-    itself is './' and a target file is ''.
+    itself is './' and a target file is ''. Removals are skipped where
+    is_ignored(path, is_dir) is true for the path relative to the target.
     """
     for level in range(start, -1, -1):
         sub = ''.join(f'/{p}' for p in parts[:level])
@@ -89,18 +187,21 @@ def diff_snapshots(old_snap, new_snap, parts, start):
             return path[len(prefix) + 1:]
         return None
 
+    def skip(kind, path, is_dir):
+        return path is None or kind == REMOVED and is_ignored is not None and is_ignored(path, is_dir)
+
     changes = []
     dirs = {}
     for line in output.splitlines():
         if match := DIFF_FILE.match(line):
             kind, path, size = match.groups()
             entry = {'type': 'f', 'size': int(size)}
-            if (path := relative(path)) is not None:
+            if not skip(kind, path := relative(path), False):
                 changes.append((kind, path, entry if kind == REMOVED else None, entry if kind == ADDED else None))
         elif match := DIFF_DIR.match(line):
             kind, path = match.groups()
             entry = {'type': 'd', 'summ': {'size': 0, 'files': 0}}
-            if (path := relative(path)) is not None:
+            if not skip(kind, path := relative(path), True):
                 dirs[kind, path] = entry
                 changes.append((kind, f'{path}/' if path else './', None if kind == ADDED else entry,
                                 entry if kind == ADDED else None))
@@ -246,6 +347,9 @@ def main():
                         help='combine all changes into a single net result per file')
     parser.add_argument('-t', '--transient', action='store_true',
                         help='with --group, also show files that only existed between the first and last snapshot')
+    parser.add_argument('--show-ignored', action='store_true',
+                        help="show removals matched by kopia's current ignore rules (policy and .kopiaignore), "
+                             'which are hidden by default as the files were most likely ignored, not deleted')
     parser.add_argument('-j', '--jobs', type=int, default=8, help='parallel kopia calls (default: 8)')
     parser.add_argument('--no-colour', action='store_true', help='disable coloured output')
     args = parser.parse_args()
@@ -272,7 +376,15 @@ def main():
     start = len(parts) - 1 if os.path.isfile(target) else len(parts)
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        change_lists = list(pool.map(lambda i: diff_snapshots(snapshots[i], snapshots[i + 1], parts, start),
+        is_ignored = None
+        if not args.show_ignored:
+            # Hide files removed because they're now ignored rather than deleted.
+            # The policy is submitted first, so it runs before any diff can wait on it.
+            policy = pool.submit(lambda: json.loads(kopia('policy', 'show', source, '--json')))
+            ignore = KopiaIgnore(source, policy)
+            is_ignored = lambda path, is_dir: ignore.ignored(parts + (path.split('/') if path else []), is_dir)
+
+        change_lists = list(pool.map(lambda i: diff_snapshots(snapshots[i], snapshots[i + 1], parts, start, is_ignored),
                                      range(count)))
 
     use_colour = sys.stdout.isatty() and not args.no_colour
