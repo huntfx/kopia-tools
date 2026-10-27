@@ -1,0 +1,584 @@
+"""Browse kopia snapshots in a web page: backup locations, their snapshots, folder contents, what changed
+between snapshots, and file histories, and restore files and folders from any snapshot.
+
+Runs a small local web server for the page in explorer/, fetching from kopia as you browse. Diffs and
+folder listings never change for a given snapshot, so they're cached on disk, in kopia-explorer in the
+temp folder (TEMP).
+
+Example:
+    py kopia_explorer.py
+    py kopia_explorer.py --port 9000 --no-browser
+"""
+
+import argparse
+import itertools
+import json
+import os
+import queue
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+import tkinter
+import traceback
+import webbrowser
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from tkinter import filedialog, messagebox
+from urllib.parse import parse_qs, urlparse
+
+from snapshot_diff import ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, kopia, list_snapshots
+
+PAGE_DIR = Path(__file__).parent / 'explorer'
+# In the temp folder, as it can be thrown away and can get big
+CACHE_DIR = Path(tempfile.gettempdir()) / 'kopia-explorer'
+SYMBOL = {ADDED: '+', REMOVED: '-', MODIFIED: '~'}
+
+pool = ThreadPoolExecutor(max_workers=8)
+
+
+class DiskCache:
+    """JSON values on disk, one file per key, for things that never change once known. Each is worked out
+    once at a time, as several requests can want the same one together."""
+
+    def __init__(self, folder):
+        self.folder = CACHE_DIR / folder
+        self.folder.mkdir(parents=True, exist_ok=True)
+        self.locks = {}
+        self.locks_lock = threading.Lock()
+
+    def get(self, key, compute):
+        path = self.folder / f'{key}.json'
+        if path.exists():
+            return self.read(path)
+        with self.locks_lock:
+            lock = self.locks.setdefault(key, threading.Lock())
+        with lock:
+            # Another request may have worked it out while this one waited
+            if path.exists():
+                return self.read(path)
+            value = compute()
+            # Written to a temporary file of its own first, so a half-written file is never read back
+            partial = path.with_name(f'{key}.{threading.get_ident()}.tmp')
+            partial.write_text(json.dumps(value, separators=(',', ':')), encoding='utf-8')
+            self.replace(partial, path)
+        with self.locks_lock:
+            self.locks.pop(key, None)
+        return value
+
+    @staticmethod
+    def read(path):
+        # Windows won't open a file while it's being replaced, so that's given a moment
+        for attempt in range(5):
+            try:
+                return json.loads(path.read_text(encoding='utf-8'))
+            except PermissionError:
+                time.sleep(0.05 * (attempt + 1))
+        return json.loads(path.read_text(encoding='utf-8'))
+
+    @staticmethod
+    def replace(partial, path):
+        # Windows won't replace a file while it's being read, so that's given a moment too
+        for attempt in range(5):
+            try:
+                return partial.replace(path)
+            except PermissionError:
+                time.sleep(0.05 * (attempt + 1))
+        # Still in use: it's already there, so this copy isn't needed
+        partial.unlink(missing_ok=True)
+
+
+diff_cache = DiskCache('diffs')
+listing_cache = DiskCache('listings')
+dates_cache = DiskCache('dates')
+
+
+class Repository:
+    """The repository's snapshots, kept up to date, with storage stats recalculated only for sources
+    that have new snapshots, as those take a while."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stats_path = CACHE_DIR / 'storage.json'
+        self.stats = json.loads(self.stats_path.read_text(encoding='utf-8')) if self.stats_path.exists() else {}
+        self.snapshots = {}   # id -> kopia's snapshot JSON, for diffs and downloads
+        self.ignores = {}     # source -> its ignore rules, read once
+        self.progress = {}    # What storage() is doing, for the page to show while it waits
+        status = json.loads(kopia('repository', 'status', '--json'))
+        self.info = {
+            'description': status['clientOptions'].get('description', ''),
+            'path': status['storage'].get('config', {}).get('path', ''),
+            'host': status['clientOptions'].get('hostname', ''),
+            'user': status['clientOptions'].get('username', ''),
+        }
+
+    def storage(self):
+        """Every source with its snapshots, oldest first, as the page wants them."""
+        with self.lock:
+            self.progress = {'step': 'Reading the snapshots'}
+            snapshots = list_snapshots(include_incomplete=True)
+            by_source = {}
+            for snap in snapshots:
+                by_source.setdefault(snap['source']['path'], []).append(snap)
+                self.snapshots[snap['id']] = snap
+
+            # Storage stats depend on every snapshot of a source, so they're redone when its snapshots change
+            stale = [source for source, snaps in by_source.items()
+                     if sorted(s['id'] for s in snaps) != self.stats.get(source, {}).get('ids')]
+            if stale:
+                print(f'Working out storage for {len(stale)} source(s)...', flush=True)
+                started = time.time()
+                self.progress = {'step': 'Working out storage for locations with new snapshots', 'done': 0, 'total': len(stale)}
+                futures = {pool.submit(source_stats, source): source for source in stale}
+                for future in as_completed(futures):
+                    source = futures[future]
+                    self.stats[source] = {'ids': sorted(s['id'] for s in by_source[source]), 'stats': future.result()}
+                    self.progress['done'] += 1
+                print(f'  done in {time.time() - started:.0f}s', flush=True)
+                for source in [s for s in self.stats if s not in by_source]:
+                    del self.stats[source]
+                self.stats_path.write_text(json.dumps(self.stats, separators=(',', ':')), encoding='utf-8')
+
+            result = []
+            for source, snaps in sorted(by_source.items(), key=lambda item: item[0].casefold()):
+                snaps.sort(key=lambda s: s['startTime'])
+                stats = self.stats[source]['stats']
+                result.append({'path': source, 'host': snaps[0]['source']['host'], 'user': snaps[0]['source']['userName'],
+                               'snapshots': [snapshot_info(s, stats.get(s['id'], {})) for s in snaps]})
+            self.progress = {}
+            return {'repository': self.info, 'locations': result}
+
+    def ignore(self, source):
+        """The ignore rules for a source, from its policy and the .kopiaignore files on disk, read once
+        while the server runs."""
+        if source not in self.ignores:
+            policy = pool.submit(lambda: json.loads(kopia('policy', 'show', source, '--json')))
+            self.ignores.setdefault(source, KopiaIgnore(source, policy))
+        return self.ignores[source]
+
+
+def source_stats(source):
+    """Storage stats for each snapshot of a source, by snapshot ID."""
+    snapshots = list_snapshots(source, '--storage-stats', include_incomplete=True)
+    return {s['id']: s.get('storageStats') or {} for s in snapshots if s['source']['path'] == source}
+
+
+def snapshot_info(snap, stats):
+    new = stats.get('newData') or {}
+    complete = not snap.get('incomplete')
+    return {
+        'id': snap['id'],
+        'root': snap['rootEntry']['obj'],
+        'mtime': snap['rootEntry'].get('mtime'),
+        'time': snap['startTime'],
+        'incomplete': not complete,
+        'size': snap['rootEntry'].get('summ', {}).get('size', 0) if complete else None,
+        'files': snap['rootEntry'].get('summ', {}).get('files', 0) if complete else None,
+        'newFiles': new.get('fileObjects', 0),
+        'newData': new.get('originalContentBytes', 0),
+        'onDisk': new.get('packedContentBytes', 0),
+        'total': (stats.get('runningTotal') or {}).get('packedContentBytes', 0),
+        # Why kopia's retention policy keeps it, such as latest-1 or daily-3
+        'keep': snap.get('retentionReason') or [],
+    }
+
+
+repository = Repository()
+
+
+def raw_diff(old_id, new_id):
+    """Every change between two snapshots of a source, cached; ignore rules are applied when served."""
+    def compute():
+        old, new = repository.snapshots[old_id], repository.snapshots[new_id]
+        changes = []
+        for kind, path, old_entry, new_entry in diff_snapshots(old, new, [], 0):
+            entry = new_entry or old_entry
+            item = {'k': SYMBOL[kind], 'p': path}
+            if entry['type'] == 'd':
+                item.update(d=1, s=entry['summ']['size'], f=entry['summ']['files'])
+            else:
+                item['s'] = entry.get('size')
+                if kind == MODIFIED:
+                    item['o'] = old_entry.get('size')
+            changes.append(item)
+        return changes
+    return diff_cache.get(f'{old_id}-{new_id}', compute)
+
+
+def served_diff(old_id, new_id):
+    """A diff with removals hidden where kopia's current ignore rules explain them, as the files were most
+    likely ignored rather than deleted."""
+    source = repository.snapshots[new_id]['source']['path']
+    ignore = repository.ignore(source)
+    return [c for c in raw_diff(old_id, new_id)
+            if c['k'] != '-' or not ignore.ignored(c['p'].rstrip('/').split('/'), c['p'].endswith('/'))]
+
+
+DATES_DIFFER = re.compile(r'^\.(?:/(.*?))? modification times differ:')
+
+
+def date_changes(old_id, new_id):
+    """Files whose modified date changed between two snapshots but not their contents, cached. kopia's diff
+    counts these, and names the folders whose dates differ, without naming the files, so only those folders'
+    listings are compared, and none at all when it counts none."""
+    def compute():
+        old_root = repository.snapshots[old_id]['rootEntry']['obj']
+        new_root = repository.snapshots[new_id]['rootEntry']['obj']
+        if old_root == new_root:
+            return []
+        output = kopia('diff', old_root, new_root).splitlines()
+        stats = next((json.loads(line) for line in reversed(output) if line.startswith('{')), {})
+        if not stats.get('fileEntries', {}).get('sameContentButDifferentModificationTime'):
+            return []
+        # The folders named, and the ones they're in, as a named one may be a file's folder or the file itself
+        named = {match.group(1) or '' for line in output if (match := DATES_DIFFER.match(line))}
+        folders = {''} | named | {path.rsplit('/', 1)[0] if '/' in path else '' for path in named}
+        content = {change['p'] for change in raw_diff(old_id, new_id)}
+
+        def folder_obj(root, path):
+            obj = root
+            for part in path.split('/') if path else []:
+                entry = next((e for e in listing(obj) if e['n'] == part and e['t'] == 'd'), None)
+                if not entry:
+                    return None
+                obj = entry['o']
+            return obj
+
+        def files_in(path):
+            before, after = folder_obj(old_root, path), folder_obj(new_root, path)
+            if not before or not after or before == after:
+                return []
+            was = {e['n']: e for e in listing(before) if e['t'] == 'f'}
+            prefix = f'{path}/' if path else ''
+            # kopia leaves out the size of an empty file
+            return [{'k': 'd', 'p': prefix + e['n'], 's': e['s'] or 0, 'from': was[e['n']]['m'], 'to': e['m']}
+                    for e in listing(after)
+                    if e['t'] == 'f' and e['n'] in was and was[e['n']]['m'] != e['m'] and prefix + e['n'] not in content]
+        return sorted((f for found in pool.map(files_in, sorted(folders)) for f in found), key=lambda f: f['p'])
+    return dates_cache.get(f'{old_id}-{new_id}', compute)
+
+
+def listing(obj):
+    """A folder's entries, by its object ID, cached."""
+    def compute():
+        result = []
+        for e in json.loads(kopia('show', obj)).get('entries') or []:
+            item = {'n': e['name'], 't': 'd' if e['type'] == 'd' else 'f', 'm': e.get('mtime')}
+            if item['t'] == 'd':
+                item.update(s=e.get('summ', {}).get('size', 0), f=e.get('summ', {}).get('files', 0), o=e['obj'])
+            else:
+                item['s'] = e.get('size')
+            result.append(item)
+        return result
+    return listing_cache.get(obj, compute)
+
+
+class Dialogs:
+    """Folder pickers and questions, all from one thread kept for them: tkinter isn't reliable when used
+    from a different thread each time, which left later pickers never appearing."""
+
+    def __init__(self):
+        self.requests = queue.Queue()
+        self.thread = None
+
+    def ask(self, show):
+        """Run show(root) on the dialog thread, wait for it, and return what it returns."""
+        if not self.thread:
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
+        answer = Future()
+        self.requests.put((show, answer))
+        return answer.result()
+
+    def run(self):
+        # The dialogs come from the server, so they go on top, or they'd open behind the browser
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        while True:
+            show, answer = self.requests.get()
+            try:
+                root.lift()
+                root.update()
+                answer.set_result(show(root))
+            except Exception as e:
+                answer.set_exception(e)
+
+
+dialogs = Dialogs()
+restored = set()               # Paths restored, which are the only ones the page may show in Explorer
+restores = {}                    # Every restore since the server started, by ID, for the page to follow
+restore_ids = itertools.count(1)
+PROGRESS = re.compile(r'Processed (\d+) \(([\d.]+) (\w+)\) of (\d+) \(([\d.]+) (\w+)\)')
+UNITS = {'B': 1, 'KB': 1e3, 'MB': 1e6, 'GB': 1e9, 'TB': 1e12, 'KiB': 1024, 'MiB': 1024 ** 2, 'GiB': 1024 ** 3, 'TiB': 1024 ** 4}
+
+
+class BusyError(Exception):
+    """Something has to finish before this can be done."""
+
+
+def kopia_reason(error):
+    """Why a kopia command failed, from its error: the last thing kopia said, after the command line."""
+    lines = [line.strip() for line in str(error).strip().splitlines() if line.strip()]
+    if len(lines) > 1:
+        return lines[-1]
+    return f'{lines[0]} (kopia didn\'t say why)' if lines else type(error).__name__
+
+
+def start_restore(snapshot_id, path, is_folder):
+    """Restore a file or folder from a snapshot in the background, returning its progress record."""
+    snap = repository.snapshots[snapshot_id]
+    # One at a time while choosing where, so clicks don't queue up folder pickers behind one another
+    choosing = next((j for j in restores.values() if j['state'] == 'picking'), None)
+    if choosing:
+        raise BusyError(f'Finish choosing where to restore {choosing["name"]} first')
+    source = Path(snap['source']['path'])
+    job = {
+        'id': next(restore_ids), 'name': path.rsplit('/', 1)[-1] if path else source.name,
+        'from': str(source / path) if path else str(source), 'snapshotTime': snap['startTime'],
+        'state': 'picking', 'target': None, 'files': 0, 'totalFiles': None, 'bytes': 0, 'totalBytes': None,
+        'error': None, 'started': time.time(), 'finished': None,
+    }
+    restores[job['id']] = job
+    threading.Thread(target=run_restore, args=(job, snap, path, is_folder), daemon=True).start()
+    return job
+
+
+def run_restore(job, snap, path, is_folder):
+    """Pick where a restore goes, then run it, straight from kopia so it keeps its modified times and
+    attributes, following kopia's progress. It's restored under a temporary name next to where it's going,
+    so something half restored is never mistaken for the real thing, then moved into place once complete."""
+    working = None
+    try:
+        source = f'{snap["rootEntry"]["obj"]}/{path}' if path else snap['rootEntry']['obj']
+        # Make sure kopia can get at it before asking where to put it, so it fails straight away if not
+        kopia('ls', source.rsplit('/', 1)[0] if path else source)
+        target = pick_restore_target(snap, path, job['name'], is_folder)
+        if not target:
+            job['state'] = 'cancelled'
+            return
+        working = target.with_name(f'{target.name}.kopia-restoring')
+        if working.exists():
+            working = target.with_name(f'{target.name}.kopia-restoring-{job["id"]}')
+        job.update(state='restoring', target=str(target), working=str(working))
+        # Progress lines end in carriage returns, which text mode reads as line ends
+        process = subprocess.Popen(['kopia', 'restore', '--progress', source, str(working)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+        last = ''
+        for line in process.stdout:
+            if match := PROGRESS.search(line):
+                files, size, unit, total_files, total, total_unit = match.groups()
+                job.update(files=min(int(files), int(total_files)), totalFiles=int(total_files),
+                           bytes=min(float(size) * UNITS.get(unit, 1), float(total) * UNITS.get(total_unit, 1)),
+                           totalBytes=float(total) * UNITS.get(total_unit, 1))
+            elif line.strip():
+                last = line.strip()
+        if process.wait():
+            raise RuntimeError(last or f'kopia restore failed with exit code {process.returncode}')
+        # Complete, so it can't be half done any more: what's left is moving it into place
+        job.update(state='finishing', files=job['totalFiles'] or job['files'], bytes=job['totalBytes'] or job['bytes'])
+        finished, working = working, None
+        move_into_place(finished, target)
+        job['state'] = 'done'
+        restored.add(str(target))
+    except Exception as e:
+        # Restored completely but not moved into place, it's kept, so say where it is
+        kept = f' (it\'s fully restored as {job["working"]})' if job['state'] == 'finishing' else ''
+        job.update(state='failed', error=kopia_reason(e) + kept)
+        # A partial restore is no use, so it isn't left behind
+        if working and working.exists():
+            shutil.rmtree(working) if working.is_dir() else working.unlink()
+    finally:
+        job['finished'] = time.time()
+
+
+def move_into_place(finished, target):
+    """Move a completed restore to where it was going. A file replaces one already there in one step. A folder
+    restored over an existing one has its files moved in, replacing those with the same names, and its folders'
+    modified times put back, as moving things into a folder changes them."""
+    if not target.exists() or target.is_file():
+        os.replace(finished, target)
+        return
+    folders = []
+    for folder, _, files in os.walk(finished):
+        inside = target / Path(folder).relative_to(finished)
+        inside.mkdir(exist_ok=True)
+        # Its times as restored, before moving its files out changes them
+        times = Path(folder).stat()
+        folders.append((inside, (times.st_atime, times.st_mtime)))
+        for name in files:
+            os.replace(Path(folder) / name, inside / name)
+    # Deepest first, as setting a folder's times doesn't change its parent's
+    for inside, times in reversed(folders):
+        os.utime(inside, times)
+    shutil.rmtree(finished)
+
+
+def pick_restore_target(snap, path, name, is_folder):
+    """Where to restore to, starting where it came from. A file gets a Save As dialog, so it can be renamed,
+    and Windows asks before replacing one. A folder gets a folder picker, then if there's one of that name
+    already, whether to restore over it or keep both. None if cancelled."""
+    source = Path(snap['source']['path'])
+    original = (source / path).parent if path else source.parent
+    start = str(original) if original.is_dir() else None
+
+    def show(root):
+        if not is_folder:
+            picked = filedialog.asksaveasfilename(parent=root, title=f'Restore {name} as...', initialdir=start,
+                                                  initialfile=name, filetypes=[('All files', '*.*')])
+            return Path(picked) if picked else None
+        picked = filedialog.askdirectory(parent=root, title=f'Restore {name} to...', mustexist=True, initialdir=start)
+        if not picked:
+            return None
+        target = Path(picked) / name
+        if target.exists():
+            when = datetime.fromisoformat(snap['startTime'][:19] + '+00:00').astimezone()
+            both = target.with_name(f'{target.name} (restored {when:%Y-%m-%d %H%M})')
+            answer = messagebox.askyesnocancel('Restore', f'{name} already exists in {picked}.\n\n'
+                                               'Yes: restore over it, replacing files with the same names\n'
+                                               f'No: keep both, restoring it as {both.name}\n'
+                                               'Cancel: don\'t restore', parent=root)
+            if answer is None:
+                return None
+            if not answer:
+                target = both
+        return target
+    return dialogs.ask(show)
+
+
+def reveal(path):
+    """Show something in Windows Explorer: a folder opened, or a file selected in its folder. If it's gone,
+    the nearest folder above it that's still there. Only for things restored or inside a backup location."""
+    # Tidied first, so .. can't step out of a backup location; not resolved, as that turns mapped network
+    # drives like S: into \\server\share paths, which then aren't inside the S: backup locations
+    target = Path(os.path.abspath(path))
+    inside = any(target == Path(source) or Path(source) in target.parents for source in repository.stats)
+    if path not in restored and not inside:
+        raise PermissionError('Only things restored or in a backup location can be shown')
+    if target.is_dir():
+        subprocess.Popen(['explorer', str(target)])
+    elif target.exists():
+        subprocess.Popen(f'explorer /select,"{target}"')
+    else:
+        target = next(p for p in target.parents if p.is_dir())
+        subprocess.Popen(['explorer', str(target)])
+    return {'shown': str(target)}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        url = urlparse(self.path)
+        query = {key: values[0] for key, values in parse_qs(url.query).items()}
+        try:
+            if url.path in ('/', '/index.html'):
+                return self.send_file(PAGE_DIR / 'index.html', 'text/html; charset=utf-8')
+            if url.path == '/api/storage':
+                return self.send_json(repository.storage())
+            if url.path == '/api/progress':
+                return self.send_json(repository.progress)
+            if url.path == '/api/diff':
+                return self.send_json(served_diff(query['from'], query['to']))
+            if url.path == '/api/dates':
+                return self.send_json(date_changes(query['from'], query['to']))
+            if url.path == '/api/listing':
+                return self.send_json(listing(query['obj']))
+            if url.path == '/api/restores':
+                return self.send_json(sorted(restores.values(), key=lambda j: -j['id']))
+            if url.path == '/mock-data.js':
+                # Empty, so the page knows it's talking to the server, without an error in the console
+                return self.send_body(b'', 'text/javascript')
+            self.send_error(404)
+        except KeyError as e:
+            self.send_error(400, f'Missing or unknown {e}')
+        except RuntimeError as e:
+            self.send_error(502, kopia_reason(e))
+        except Exception as e:
+            traceback.print_exc()
+            self.send_error(500, f'{type(e).__name__}: {e}')
+
+    def do_POST(self):
+        # Only the explorer's own page sends this header: a web page elsewhere can't without the browser
+        # asking first, which this server never allows, so other sites can't make it restore anything
+        if self.headers.get('X-Kopia-Explorer') != '1':
+            return self.send_error(403, 'Only the explorer page can do that')
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+            if self.path == '/api/restore':
+                return self.send_json(start_restore(body['snapshot'], body['path'], bool(body.get('folder'))))
+            if self.path == '/api/restores/clear':
+                for job in [j for j in restores.values() if j['finished']]:
+                    del restores[job['id']]
+                return self.send_json({})
+            if self.path == '/api/reveal':
+                return self.send_json(reveal(body['path']))
+            self.send_error(404)
+        except KeyError as e:
+            self.send_error(400, f'Missing or unknown {e}')
+        except RuntimeError as e:
+            self.send_error(502, kopia_reason(e))
+        except PermissionError as e:
+            self.send_error(403, str(e))
+        except BusyError as e:
+            self.send_error(409, str(e))
+        except Exception as e:
+            traceback.print_exc()
+            self.send_error(500, f'{type(e).__name__}: {e}')
+
+    def send_error(self, code, message=None, explain=None):
+        # The page shows the message, which goes in the status line, so it has to fit in Latin-1 on one line
+        if message:
+            message = ' '.join(message.split()).encode('latin-1', 'replace').decode('latin-1')
+        super().send_error(code, message, explain)
+
+    def send_json(self, value):
+        self.send_body(json.dumps(value, separators=(',', ':')).encode('utf-8'), 'application/json')
+
+    def send_file(self, path, content_type):
+        self.send_body(path.read_bytes(), content_type)
+
+    def send_body(self, body, content_type):
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        # Only errors are worth printing, with their reason, but not browsers looking for icons that aren't there
+        if format.startswith('code ') and args[0] != 404:
+            super().log_message(format, *args)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Browse kopia snapshots in a web page.')
+    parser.add_argument('--port', type=int, default=8765, help='port to serve on (default: 8765)')
+    parser.add_argument('--no-browser', action='store_true', help="don't open the page in a browser")
+    args = parser.parse_args()
+
+    print('Reading the repository...', flush=True)
+    repository.storage()
+
+    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    url = f'http://localhost:{args.port}/'
+    print(f'Kopia Explorer is at {url} (Ctrl+C to stop)', flush=True)
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except RuntimeError as e:
+        raise SystemExit(str(e))
