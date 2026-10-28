@@ -736,9 +736,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(schedule_of(query['path']))
             if url.path == '/api/jobs':
                 return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
-            if url.path == '/mock-data.js':
-                # Empty, so the page knows it's talking to the server, without an error in the console
-                return self.send_body(b'', 'text/javascript')
             self.send_error(404)
         except KeyError as e:
             self.send_error(400, f'Missing or unknown {e}')

@@ -70,7 +70,7 @@ h2 { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spa
   border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 20;
 }
 .topbar h1 { font-size: 1.1rem; font-weight: 600; margin: 0; white-space: nowrap; }
-.topbar .captured { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+.topbar .repo-status { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
 /* Files as of: a button showing the date, between steps to the snapshot before and after, opening a picker */
 .as-of { position: relative; display: flex; align-items: stretch; margin-left: auto; font-size: 0.85rem; color: var(--ink-2); white-space: nowrap; }
 .as-of > button { background: var(--surface); border: 1px solid var(--axis); padding: 5px 10px; font-size: 0.85rem; color: var(--ink); }
@@ -420,7 +420,7 @@ th[aria-sort] { color: var(--ink); }
 <body>
 <header class="topbar">
   <h1>Kopia Explorer</h1>
-  <span class="captured" id="captured"></span>
+  <span class="repo-status" id="repo-status"></span>
   <div class="as-of" id="as-of" role="group" aria-label="Show files as of a date">
     <button type="button" id="as-of-older" aria-label="Snapshot before">‹</button>
     <button type="button" id="as-of-button" class="when-button" aria-haspopup="dialog" aria-expanded="false" title="Show files as of another date">
@@ -462,15 +462,13 @@ th[aria-sort] { color: var(--ink); }
 <div class="progress" id="progress" role="status" hidden></div>
 <section class="jobs" id="jobs" aria-label="Backups, restores and deletions" aria-live="polite" hidden></section>
 
-<script src="mock-data.js"></script>
 <!-- A module, so it can wait for the snapshots to load before building the page, without freezing it -->
 <script type="module">
 
-/* ---------- Data access: live from kopia_explorer.py, or from mock-data.js when opened as a file ---------- */
+/* ---------- Data access: live from kopia_explorer.py ---------- */
 
-// The server's mock-data.js is empty, so without mock data the page is live
-const LIVE = !window.MOCK;
-const DATA = window.MOCK || { diffs: {}, listings: {}, dates: {} };
+// What's been loaded: the repository, and diffs, folder listings and date-only changes by what they're between
+const DATA = { diffs: {}, listings: {}, dates: {} };
 const requested = new Set();  // Each request is only made once, so a failure isn't retried in a loop
 const pending = new Set();    // Requests in flight, for saying something's loading
 const failures = new Map();   // Requests that failed, with why, until retried
@@ -479,7 +477,7 @@ const progress = { changes: { done: 0, total: 0 }, folders: { done: 0, total: 0 
 
 // Fetch something not loaded yet, and redraw once it arrives. Until then the page says it's loading.
 function load(url, kind, store) {
-  if (!LIVE || requested.has(url)) return;
+  if (requested.has(url)) return;
   requested.add(url);
   pending.add(url);
   progress[kind].total++;
@@ -554,7 +552,6 @@ const api = {
   // Everything else is built from this, so the page waits for it, showing how the server's getting on, as
   // working out storage for locations with new snapshots can take a while
   async storage() {
-    if (!LIVE) return DATA.storage;
     const main = document.getElementById('main');
     const show = (step, done, total) => main.replaceChildren(el('div', { class: 'panel loading', role: 'status' },
       el('p', {}, `${step}…`),
@@ -590,7 +587,7 @@ const api = {
   // request each so they fill in as they come, newest first as those are seen first.
   diff(fromId, toId) {
     let changes = DATA.diffs[`${fromId}..${toId}`];
-    const loc = LIVE && !changes && storage.find(l => l.snapshots.some(s => s.id === fromId));
+    const loc = !changes && storage.find(l => l.snapshots.some(s => s.id === fromId));
     if (loc) {
       const complete = loc.snapshots.filter(s => !s.incomplete);
       for (let i = complete.length - 1; i > 0; i--) {
@@ -605,14 +602,13 @@ const api = {
   },
   // A folder's entries by object ID, loaded if missing unless only peeking, as search does
   listing(obj, fetchIfMissing = true) {
-    const entries = DATA.listings?.[obj];
+    const entries = DATA.listings[obj];
     if (!entries && fetchIfMissing) load(`/api/listing?obj=${obj}`, 'folders', result => { DATA.listings[obj] = result; });
     return entries;
   },
   // Files whose modified date changed but not their contents, between any two snapshots of a location
   dates(fromId, toId) {
     const key = `${fromId}..${toId}`;
-    if (!DATA.dates) return undefined;
     if (!DATA.dates[key]) load(`/api/dates?from=${fromId}&to=${toId}`, 'changes', list => { DATA.dates[key] = list; });
     return DATA.dates[key];
   },
@@ -680,10 +676,8 @@ function backupButton(loc) {
   const job = backupOf(loc);
   const button = el('button', {
     id: 'backup-now', class: 'btn', style: 'font-size:0.8rem;flex:none', 'data-location': loc.path,
-    disabled: !LIVE || job?.state === 'cancelling',
-    title: !LIVE ? 'Backing up needs the server: run kopia_explorer.py'
-      : job ? 'Stop it, keeping what it got through as an incomplete snapshot'
-        : `Take a snapshot of ${loc.path} now, as its schedule would`,
+    disabled: job?.state === 'cancelling',
+    title: job ? 'Stop it, keeping what it got through as an incomplete snapshot' : `Take a snapshot of ${loc.path} now, as its schedule would`,
     onclick: () => (job ? cancelBackup(job) : backUp(loc.path)),
   }, job?.state === 'cancelling' ? 'Cancelling…' : job ? 'Cancel backup' : 'Back up now');
   return button;
@@ -704,7 +698,6 @@ async function cancelBackup(job) {
 // again after one's changed: { interval, times, cron, manual, from, own, inherited }
 const schedules = new Map();
 function scheduleOf(path) {
-  if (!LIVE) return null;
   if (!schedules.has(path.toLowerCase())) loadSchedule(path).then(redrawSoon);
   return schedules.get(path.toLowerCase());
 }
@@ -740,7 +733,7 @@ const scheduleSource = (schedule, here) => (schedule.from ? `Set by ${schedule.f
 // Under the snapshots panel's heading: how often what it's for is backed up, and changing that. A folder
 // inside a location is backed up with it, unless it's given a schedule of its own.
 function scheduleLine(loc, target, rel, isFolder) {
-  if (!LIVE || !isFolder) return null;
+  if (!isFolder) return null;
   const own = scheduleOf(target);
   // It can be changed once what the dialog needs is loaded, so the dialog opens straight away
   const line = (schedule, words, action, mode) => el('div', { class: 'schedule' },
@@ -883,27 +876,24 @@ function fillTotals() {
 // snapshots are read again for them
 let storagePolling = null;
 function followStorage() {
-  if (storagePolling || !storageWorking) return renderCaptured();
-  renderCaptured();
+  if (storagePolling || !storageWorking) return renderRepoStatus();
+  renderRepoStatus();
   storagePolling = setInterval(async () => {
     const progress = await fetch('/api/progress').then(r => r.json()).catch(() => null);
     if (!progress) return;
-    if (progress.step) return renderCaptured(progress);
+    if (progress.step) return renderRepoStatus(progress);
     clearInterval(storagePolling);
     storagePolling = null;
     refreshStorage();
   }, 1500);
 }
 
-function renderCaptured(progress = {}) {
-  const captured = document.getElementById('captured');
-  if (!LIVE) {
-    captured.textContent = `Mockup · data captured ${formatFull(DATA.captured)}`;
-    return;
-  }
-  captured.replaceChildren(`${DATA.repository.description || DATA.repository.path} · live from kopia, read ${formatFull(new Date(storageRead * 1000))}`);
+// The header's line about the repository: which it is, when it was read, and how storage stats are getting on
+function renderRepoStatus(progress = {}) {
+  const status = document.getElementById('repo-status');
+  status.replaceChildren(`${DATA.repository.description || DATA.repository.path} · live from kopia, read ${formatFull(new Date(storageRead * 1000))}`);
   if (storageWorking) {
-    captured.append(el('span', { title: 'Space on disk for new snapshots, which kopia takes a while over' },
+    status.append(el('span', { title: 'Space on disk for new snapshots, which kopia takes a while over' },
       ` · working out storage${progress.total ? ` for ${progress.done} of ${plural(progress.total, 'location')}` : ''}…`));
   }
 }
@@ -1131,18 +1121,16 @@ function backupItem(j) {
     status);
 }
 
-// What to say where something isn't there: still loading, failed, or not captured in the mock data
+// What to say where something isn't there: still loading, or failed
 function notLoaded(what) {
-  if (!LIVE) return `The ${what} weren't captured in the mockup, which only has four locations, two levels deep.`;
   return pending.size ? `Loading the ${what}…` : `The ${what} couldn't be loaded: ${failureReason() || 'no reason given'}`;
 }
 // The repository, for tooltips: its description, where it is, and who's connected to it
 function repositoryTitle() {
   const repo = DATA.repository;
-  if (!repo) return 'Mock data';
   return [repo.description, repo.path, repo.user && `Connected as ${repo.user}@${repo.host}`].filter(Boolean).join('\n');
 }
-const notKnown = () => el('span', { class: 'muted' }, !LIVE ? 'Not known in the mockup' : pending.size ? 'Loading…' : 'Not known');
+const notKnown = () => el('span', { class: 'muted' }, pending.size ? 'Loading…' : 'Not known');
 
 /* ---------- Formatting ---------- */
 
@@ -1341,17 +1329,15 @@ window.addEventListener('popstate', () => {
 const storage = await api.storage();
 fillTotals();
 
-// Restores and backups carry on if the page is reloaded, so pick up any still going
-if (LIVE) {
-  fetch('/api/jobs').then(r => r.json()).then(list => {
-    jobList = list;
-    if (list.some(jobActive)) {
-      jobsShown = true;
-      jobsChanged();
-      followJobs();
-    }
-  }).catch(() => {});
-}
+// Restores, backups and deletes carry on if the page is reloaded, so pick up any still going
+fetch('/api/jobs').then(r => r.json()).then(list => {
+  jobList = list;
+  if (list.some(jobActive)) {
+    jobsShown = true;
+    jobsChanged();
+    followJobs();
+  }
+}).catch(() => {});
 const latest = loc => [...loc.snapshots].reverse().find(s => !s.incomplete) || loc.snapshots[loc.snapshots.length - 1];
 const locationTotal = loc => loc.snapshots.length ? loc.snapshots[loc.snapshots.length - 1].total : 0;
 
@@ -1505,7 +1491,7 @@ const treeItem = node => node.location
   ? { name: node.name, path: node.path, tree: node, owner: node.location, rel: '' }
   : { name: node.name, path: node.path, tree: node, owner: null, rel: '' };
 
-// The folders shown inside an item. Live listings only load once it's opened, so until then it's marked
+// The folders shown inside an item. Listings only load once it's opened, so until then it's marked
 // as maybe having some, to show it can be expanded.
 function sidebarChildren(item) {
   const children = new Map();
@@ -1513,7 +1499,7 @@ function sidebarChildren(item) {
   if (item.owner) {
     const snap = sidebarSnapshot(item.owner);
     const entries = snap && snapshotListing(snap, item.rel, isOpen(item));
-    unknown = LIVE && !!snap && entries === undefined;
+    unknown = !!snap && entries === undefined;
     for (const entry of entries || []) {
       if (entry.t !== 'd') continue;
       children.set(entry.n.toLowerCase(), {
@@ -2230,9 +2216,7 @@ function restorePanel({ selected, rel, present, size, what, facts, buttons = [],
   const loc = storage.find(l => l.snapshots.includes(selected));
   const onDisk = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
   const explorerButton = el('button', {
-    class: 'btn', disabled: !LIVE,
-    title: LIVE ? `Open ${onDisk} in Windows Explorer, as it is now (or the nearest folder above it, if it's gone)`
-      : 'Opening Explorer needs the server: run kopia_explorer.py',
+    class: 'btn', title: `Open ${onDisk} in Windows Explorer, as it is now (or the nearest folder above it, if it's gone)`,
     onclick: () => showInExplorer(onDisk, explorerButton),
   }, 'Show in Explorer');
   return el('section', { class: 'panel' },
@@ -2242,8 +2226,8 @@ function restorePanel({ selected, rel, present, size, what, facts, buttons = [],
     el('dl', { class: `facts${wide ? ' wide' : ''}` }, facts.map(detail)),
     el('div', { class: 'facts-actions' },
       el('button', {
-        class: 'btn primary', disabled: !LIVE || !present || beingDeleted(selected),
-        title: !LIVE ? 'Restoring needs the server: run kopia_explorer.py' : !present ? 'It isn\'t in this snapshot'
+        class: 'btn primary', disabled: !present || beingDeleted(selected),
+        title: !present ? 'It isn\'t in this snapshot'
           : beingDeleted(selected) ? 'This snapshot is being deleted'
           : `${what === 'folder' ? 'Pick a folder to put it in' : 'Pick where to save it'}, keeping modified dates, as it was on ${formatFull(selected.time)}`,
         onclick: () => restoreItem(selected, rel, what === 'folder'),
@@ -2480,8 +2464,8 @@ function locationChurn(loc) {
     }
   });
   const result = steps.some(s => s.captured) ? { root, files, steps, first: complete[0], last: complete[complete.length - 1] } : null;
-  // Live diffs may still be loading, so it's only kept once they're all in
-  if (!LIVE || steps.every(s => s.captured)) churnCache.set(loc.path, result);
+  // Diffs may still be loading, so it's only kept once they're all in
+  if (steps.every(s => s.captured)) churnCache.set(loc.path, result);
   return result;
 }
 
@@ -2551,7 +2535,7 @@ function renderChurn(loc) {
   const strip = (activity, rowKey) => el('span', { class: 'strip' }, churn.steps.map(({ snap, captured }, step) => {
     const tick = activity.steps.get(step);
     const kind = !tick ? '' : tick['~'] || (tick['+'] && tick['-']) ? 'modified' : tick['+'] ? 'added' : 'removed';
-    const what = tick ? ['+', '-', '~'].filter(k => tick[k]).map(k => `${KIND_SYMBOL[k]}${tick[k]}`).join(' ') : captured ? 'no changes' : 'not captured';
+    const what = tick ? ['+', '-', '~'].filter(k => tick[k]).map(k => `${KIND_SYMBOL[k]}${tick[k]}`).join(' ') : captured ? 'no changes' : 'not loaded';
     return el('span', {
       class: `tick ${kind || (captured ? '' : 'unknown')}${snap === viewed ? ' viewed' : ''}`,
       title: `${formatFull(snap.time)} (${timeAgo(snap.time)}): ${what}${tick ? `, ${formatSize(tick.bytes)}` : ''}`,
@@ -2803,8 +2787,8 @@ function renderChanges(loc, selected) {
     : changes;
   // Files whose modified date changed but not their contents, which the server finds, as kopia's diff only
   // counts them; like the other kinds, they're counted whether or not they're shown
-  const dates = LIVE ? dateOnlyChanges(older, newer, state.scope, new Set(inScope.map(c => c.p))) : null;
-  const scoped = dates ? [...inScope, ...dates.found] : inScope;
+  const dates = dateOnlyChanges(older, newer, state.scope, new Set(inScope.map(c => c.p)));
+  const scoped = [...inScope, ...dates.found];
   const tree = buildTree(scoped);
   // Files that only existed between the snapshots compared, which are shown greyed out
   const transient = tree.counts['*'];
@@ -2813,7 +2797,7 @@ function renderChanges(loc, selected) {
   // Modified includes files with only their modified date changed, which their own symbol marks in the tree
   const modified = kindCount('~', kindTotal(tree.counts, '~'));
   if (tree.counts.d) modified.title += `, including ${tree.counts.d.toLocaleString('en-GB')} ${KIND_WORDS.d}`;
-  if (dates && !dates.complete) {
+  if (!dates.complete) {
     modified.append('…');
     modified.title += `, still finding ones ${KIND_WORDS.d}`;
   }
@@ -3115,7 +3099,7 @@ const changedAtAll = change => !!change && !change.identical &&
 // What a step did to the path, as a line under the snapshot
 function describeStep(change, isFolder) {
   if (change === 'first') return el('span', { class: 'muted' }, 'Oldest snapshot');
-  if (change === null) return el('span', { class: 'muted' }, !LIVE ? 'Changes not captured in the mockup' : pending.size ? 'Loading changes…' : 'Changes couldn\'t be loaded (see the bottom of the page)');
+  if (change === null) return el('span', { class: 'muted' }, pending.size ? 'Loading changes…' : 'Changes couldn\'t be loaded (see the bottom of the page)');
   // Nothing changed in it, whether or not anything did elsewhere in the location, which hovering says
   if (change.identical) return el('span', { class: 'muted', title: 'The whole snapshot is identical to the one before' }, 'No changes');
   const kinds = { '+': ['c-added', 'Added'], '-': ['c-removed', 'Removed'], '~': ['c-modified', 'Modified'], i: ['c-ignored', 'Ignored'] };
@@ -3127,7 +3111,7 @@ function describeStep(change, isFolder) {
   }
   if (!changedAtAll(change)) {
     // Until the listings to compare are in, it isn't known which; if they can't be, all that's known is the diff's
-    if (change.touched === undefined) return el('span', { class: 'muted' }, LIVE && pending.size ? 'Checking…' : 'No content changes');
+    if (change.touched === undefined) return el('span', { class: 'muted' }, pending.size ? 'Checking…' : 'No content changes');
     return change.touched
       ? el('span', { class: 'muted', title: 'kopia stored it again because a modified date changed, but no file\'s contents did' },
         isFolder ? 'Dates changed' : 'Date changed')
@@ -3234,7 +3218,7 @@ function renderSide() {
     const name = rel.slice(rel.lastIndexOf('/') + 1);
     const entries = rel ? snapshotListing(snap, parentRel) : undefined;
     const size = !rel ? snap.size : entries?.find(e => e.n === name)?.s;
-    if (size == null) return rel && entries === undefined && LIVE ? el('span', { class: 'disk muted' }, '…') : null;
+    if (size == null) return rel && entries === undefined ? el('span', { class: 'disk muted' }, '…') : null;
     return el('span', { class: 'disk', title: `Size of ${rel ? name : 'the location'} in this snapshot` }, formatSize(size));
   };
 
@@ -3277,7 +3261,7 @@ function renderSide() {
             snap.onDisk ? el('span', { class: 'swatch', style: `background:${fillColour(gradientRgb(positions.get(snap.onDisk)))}` }) : null,
             `+${formatSize(snap.onDisk)}`),
         // Not one still being made, which kopia replaces as it goes
-        LIVE && !deleting && (!snap.incomplete || isCancelled(snap)) ? el('button', {
+        !deleting && (!snap.incomplete || isCancelled(snap)) ? el('button', {
           class: 'delete', 'aria-label': 'Delete this snapshot', title: 'Delete this snapshot…',
           onclick: event => { event.stopPropagation(); confirmDelete(loc, snap, rel, isFolder); },
         }, '×') : null),
@@ -3421,10 +3405,6 @@ function clearFilter() {
 // Adding a backup location: a folder picked in a folder picker, which the server opens, then how often to
 // back it up. One that's already a location is gone to instead.
 const addButton = document.getElementById('add-location');
-if (!LIVE) {
-  addButton.disabled = true;
-  addButton.title = 'Adding locations needs the server: run kopia_explorer.py';
-}
 addButton.addEventListener('click', async () => {
   addButton.disabled = true;
   addButton.textContent = 'Choosing…';
@@ -3610,7 +3590,7 @@ document.addEventListener('copy', event => {
 });
 
 followStorage();
-document.getElementById('captured').title = repositoryTitle();
+document.getElementById('repo-status').title = repositoryTitle();
 readHash();
 reveal(currentFolder());
 renderSort();
