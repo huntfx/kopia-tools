@@ -98,6 +98,8 @@ window.addEventListener('popstate', () => {
   render();
 });
 
-// What's picked, which isn't kept in the URL: the row last clicked, highlighted until something else is, and
-// whether the path picked for the snapshots panel is a folder, when it was picked by clicking something that knows
-export const ui = { pickedRow: null, pickedIsFolder: true };
+// What isn't kept in the URL: the row last clicked, highlighted until something else is; whether the path
+// picked for the snapshots panel is a folder, when it was picked by clicking something that knows; and whether
+// locations with nothing as old as the as-of date are included, at their oldest snapshot, rather than hidden,
+// which the as-of picker remembers in this browser
+export const ui = { pickedRow: null, pickedIsFolder: true, includeOldest: false };

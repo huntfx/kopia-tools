@@ -92,6 +92,8 @@ h2 { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spa
 .as-of-menu li button[aria-current="true"] { background: var(--accent-bg); color: var(--accent); }
 .as-of-menu li .short { color: var(--muted); font-family: var(--font-data); }
 .as-of-menu .custom { display: flex; gap: 6px; align-items: center; padding: 8px 10px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+.as-of-menu .include-oldest { display: flex; align-items: center; gap: 8px; padding: 8px 14px 4px; border-top: 1px solid var(--line); margin-top: 8px; font-size: 0.85rem; }
+.as-of-menu .include-oldest input { width: auto; margin: 0; }
 .as-of-menu .custom button { background: var(--accent); border: 1px solid var(--accent); color: #fff; border-radius: 6px; padding: 5px 12px; font-size: 0.85rem; }
 /* The filter sits at the top of the backup locations */
 .search { display: flex; margin: 0 16px 10px; }

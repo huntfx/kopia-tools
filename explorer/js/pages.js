@@ -5,10 +5,10 @@ import { renderChurn } from './churn.js';
 import { notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
 import { beingDeleted, restoreItem, showInExplorer } from './jobs.js';
-import { compactFolder, diskText, locationTree, locationsBelow, treeNodes, treeTotal } from './sidebar.js';
+import { compactFolder, diskText, locationTree, locationsBelow, shownBelow, treeNodes, treeTotal } from './sidebar.js';
 import { describeStep, openHistory, stepChange } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
-import { asOfSnapshot, backingUpNow, enclosingLocation, isCancelled, locationTotal, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, unfinished } from './storage.js';
+import { asOfSnapshot, backingUpNow, enclosingLocation, hiddenAsOf, isCancelled, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
 import { contentsTable } from './tables.js';
 
 // What's directly inside a folder: merged folder chains and backup locations, like the sidebar
@@ -43,7 +43,7 @@ export function latestSummary(node) {
 
 // A folder page's contents: the folders and backup locations directly inside it, from their latest snapshots
 export function renderContents(node) {
-  const items = [...node.children.values()].map(child => {
+  const items = [...node.children.values()].filter(shownBelow).map(child => {
     const { node: inner, prefix, label } = compactFolder(child);
     const loc = inner.location;
     return {
@@ -106,7 +106,8 @@ export function renderFolder(main) {
     main.replaceChildren(el('div', { class: 'panel empty' }, `${state.folder} isn't a folder with backup locations in it.`));
     return;
   }
-  const below = locationsBelow(node);
+  // Not counting locations hidden for being newer than the as-of date
+  const below = locationsBelow(node).filter(l => !hiddenAsOf(l));
   // The storage chart isn't there with fewer than two locations to compare
   main.replaceChildren(...[
     el('section', { class: 'loc-head' },
@@ -136,18 +137,15 @@ export function renderMain() {
   const selected = selectedSnapshot(loc);
 
   // What's being looked at, at the snapshot being viewed: the folder's size and files, then for the
-  // whole location its space on disk. The snapshot itself is named in the contents heading.
+  // whole location its space on disk by then. The snapshot itself is named in the contents heading. With
+  // nothing as old as the as-of date, that's the oldest, which this is all as of too.
   const here = folderSummary(loc, selected);
   const head = el('section', { class: 'loc-head' },
     locationCrumbs(loc),
     el('div', { class: 'meta' },
       here ? el('span', {}, el('b', {}, formatSize(here.size))) : null,
       here ? el('span', {}, plural(here.files, 'file')) : null,
-      state.scope ? null : el('span', {}, `${diskText(locationTotal(loc))} on disk`),
-      // The as-of date is older than anything kept here, so the oldest snapshot stands in for it
-      tooOld(loc) && !state.snapshot
-        ? el('span', { class: 'badge', title: `Nothing here is as old as ${formatFull(state.asOf)}` }, 'No snapshot that old · showing the oldest')
-        : null));
+      state.scope ? null : el('span', {}, `${diskText(selected.total)} on disk`)));
 
   // The folder as it was in the snapshot, to restore: its own modified time is in the listing of the
   // folder above it, or for the location, the snapshot's

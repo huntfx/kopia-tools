@@ -1,8 +1,9 @@
 // Files as of a date: the picker in the header, and stepping between snapshots
 import { el, formatFull, timeAgo } from './format.js';
 import { locationsBelow, treeNodes } from './sidebar.js';
+import { render } from './render.js';
 import { asOfFor } from './snapshots.js';
-import { navigate, state } from './state.js';
+import { navigate, state, ui } from './state.js';
 import { selectedSnapshot, storage } from './storage.js';
 
 // The input works in local time, as "2026-10-26T12:00", while the state keeps an ISO date
@@ -96,6 +97,21 @@ document.getElementById('as-of-typed').addEventListener('submit', event => {
 document.getElementById('as-of-custom').addEventListener('submit', event => {
   event.preventDefault();
   if (asOfInput.value) applyWhen(new Date(asOfInput.value));
+});
+
+// Including locations with nothing as old as the date, at their oldest snapshot, which are otherwise hidden;
+// remembered in this browser like the sidebar's sort
+const includeOldest = document.getElementById('as-of-include-oldest');
+try {
+  ui.includeOldest = localStorage.getItem('includeOldest') === '1';
+} catch {}
+includeOldest.checked = ui.includeOldest;
+includeOldest.addEventListener('change', () => {
+  ui.includeOldest = includeOldest.checked;
+  try {
+    localStorage.setItem('includeOldest', ui.includeOldest ? '1' : '0');
+  } catch {}
+  render();
 });
 
 // The snapshots to step through with ‹ and ›: the location being viewed's, or on a folder page, every

@@ -3,7 +3,7 @@ import { DATA, repositoryTitle } from './data.js';
 import { el, formatSize, gradientPositions, gradientRgb, textColour } from './format.js';
 import { renderMatches, sidebarFilter } from './search.js';
 import { navigate, state } from './state.js';
-import { asOfSnapshot, backingUpNow, currentFolder, locationOf, locationTotal, selectedSnapshot, snapshotListing, storage } from './storage.js';
+import { asOfSnapshot, backingUpNow, currentFolder, hiddenAsOf, locationOf, selectedSnapshot, snapshotListing, storage, totalAsOf } from './storage.js';
 
 // Build a folder tree from the backup locations: the PC at the top, named after the computer the
 // snapshots were taken on, then its drives, with locations nested inside each other
@@ -38,10 +38,13 @@ export function locationsBelow(node) {
   return found;
 }
 
+// Whether a folder in the tree has any location in it that isn't hidden for being newer than the as-of date
+export const shownBelow = node => locationsBelow(node).some(l => !hiddenAsOf(l));
+
 // On-disk total of a folder: its own if it's a location, otherwise the locations below it,
 // skipping locations nested inside another so they aren't counted twice
 export function treeTotal(node) {
-  if (node.location) return locationTotal(node.location);
+  if (node.location) return totalAsOf(node.location);
   let total = 0;
   for (const child of node.children.values()) {
     const inside = treeTotal(child);
@@ -94,7 +97,7 @@ export function reveal(path) {
 }
 
 // Colour every folder's total on one scale, so colours don't shift as folders are expanded. It's worked
-// out again when the snapshots are read again, as the totals change.
+// out again whenever the sidebar's drawn, as the totals change with the as-of date and new snapshots.
 export function treeScale() {
   const totals = [];
   (function collectTotals(node) {
@@ -191,6 +194,7 @@ export function sidebarChildren(item) {
     }
   }
   for (const child of item.tree?.children.values() || []) {
+    if (!shownBelow(child)) continue;
     const key = child.name.toLowerCase();
     // A nested location is its own owner; other folders on the way to one belong to the location they're in
     children.set(key, child.location ? treeItem(child) : {
@@ -246,7 +250,9 @@ export function itemTarget(item) {
 
 export function renderLocations() {
   if (sidebarFilter) return renderMatches();
-  document.getElementById('sum').textContent = `${storage.length} locations · ${diskText(treeTotal(locationTree))} on disk`;
+  // The sizes, and so their colours, are as of the as-of date
+  rescaleTree();
+  document.getElementById('sum').textContent = `${storage.filter(l => !hiddenAsOf(l)).length} locations · ${diskText(treeTotal(locationTree))} on disk`;
   const direction = sidebarReversed ? -1 : 1;
   const rows = [];
   // In the flat lists the direction is for size or path, so what's inside a location is always A–Z
@@ -306,8 +312,8 @@ export function renderLocations() {
     walk(treeItem(locationTree), 0);
   } else {
     // Every location as a top-level row with its full path, each expandable like in the tree
-    const locations = [...storage].sort(sidebarSort === 'size'
-      ? (a, b) => direction * (locationTotal(b) - locationTotal(a))
+    const locations = storage.filter(l => !hiddenAsOf(l)).sort(sidebarSort === 'size'
+      ? (a, b) => direction * (totalAsOf(b) - totalAsOf(a))
       : (a, b) => direction * a.path.localeCompare(b.path, 'en', { sensitivity: 'base' }));
     for (const loc of locations) {
       const item = treeItem(treeNodes.get(loc.path.toLowerCase()));

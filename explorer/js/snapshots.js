@@ -6,7 +6,7 @@ import { backupButton, beingDeleted, confirmDelete } from './jobs.js';
 import { scheduleLine } from './schedules.js';
 import { diskText, locationsBelow, sidebarSnapshot, treeNodes } from './sidebar.js';
 import { navigate, state, ui } from './state.js';
-import { asOfSnapshot, backingUpNow, currentPath, isCancelled, latest, locationOf, locationTotal, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, unfinished } from './storage.js';
+import { asOfSnapshot, backingUpNow, currentPath, hiddenAsOf, isCancelled, latest, locationOf, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf, unfinished } from './storage.js';
 
 // Viewing a snapshot sets "files as of" to its time, so every location follows; the newest goes back to now
 export const asOfFor = (loc, snap) => (snap === latest(loc) ? null : snap.time);
@@ -127,14 +127,14 @@ export function keptFor(snap) {
 // inside, each with its latest snapshot, so it's clear at a glance which are being backed up
 export function renderFolderSide(aside) {
   const node = treeNodes.get(state.folder.toLowerCase());
-  const locations = node ? locationsBelow(node).sort((a, b) => a.path.localeCompare(b.path, 'en', { sensitivity: 'base' })) : [];
+  const locations = node ? locationsBelow(node).filter(l => !hiddenAsOf(l)).sort((a, b) => a.path.localeCompare(b.path, 'en', { sensitivity: 'base' })) : [];
   aside.replaceChildren(
     el('div', { class: 'history-head' },
       el('div', {}, el('h2', {}, `Backup locations (${locations.length})`), el('div', { class: 'target' }, state.folder))),
     el('ul', { class: 'snaps' }, locations.map(loc => {
       // The snapshot for the as-of date, or with none set, the latest; and what was on disk by then
       const newest = state.asOf ? (tooOld(loc) ? null : asOfSnapshot(loc)) : latest(loc);
-      const onDisk = state.asOf ? newest?.total ?? 0 : locationTotal(loc);
+      const onDisk = totalAsOf(loc);
       const cut = loc.path.lastIndexOf('\\') + 1;
       return el('li', { class: 'snaprow', title: `Open ${loc.path}`, onclick: () => navigate({ location: loc.path, snapshot: null }) },
         el('div', { class: 'top' },

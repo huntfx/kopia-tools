@@ -4,7 +4,7 @@ import { el, formatFull, plural } from './format.js';
 import { jobList } from './jobs.js';
 import { render } from './render.js';
 import { buildSidebarTree, rescaleTree } from './sidebar.js';
-import { navigate, state } from './state.js';
+import { navigate, state, ui } from './state.js';
 
 // Backups and deletes that finished after the snapshots were last read, by the server's clock, applied on
 // top of them: a deleted snapshot taken out, and a new one put in from what kopia said when it made it
@@ -165,6 +165,17 @@ export function asOfSnapshot(loc) {
 
 // Whether a location has no snapshot as old as the as-of date
 export const tooOld = loc => !!state.asOf && loc.snapshots.every(s => s.incomplete || new Date(s.time) > new Date(state.asOf));
+// Left out of the sidebar and folder pages for being newer than the as-of date, unless asked to include them
+export const hiddenAsOf = loc => !ui.includeOldest && tooOld(loc);
+
+// A location's space on disk as of the as-of date: the running total at its last snapshot by then, or with none
+// that old, its oldest if it's included, or none if it's hidden; with no date, as it is now. Like the storage
+// chart, data shared between locations counts in each.
+export function totalAsOf(loc) {
+  if (!state.asOf) return locationTotal(loc);
+  const snap = !hiddenAsOf(loc) && asOfSnapshot(loc);
+  return snap ? snap.total : 0;
+}
 
 // A snapshot picked by hand wins; otherwise it's the one for the as-of date
 export const selectedSnapshot = loc => loc.snapshots.find(s => s.id === state.snapshot) || asOfSnapshot(loc);

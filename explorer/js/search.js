@@ -5,7 +5,7 @@ import { scheduleDialog } from './schedules.js';
 import { diskText, joinRel, renderLocations, treeNodes } from './sidebar.js';
 import { realCase } from './snapshots.js';
 import { navigate } from './state.js';
-import { asOfSnapshot, locationOf, locationTotal, relativeTo, snapshotListing, storage } from './storage.js';
+import { asOfSnapshot, hiddenAsOf, locationOf, relativeTo, snapshotListing, storage, totalAsOf } from './storage.js';
 
 // Go to a typed path: into its folder in the location that contains it, or a folder page above locations
 export function goToPath(typed) {
@@ -57,12 +57,14 @@ export function filterQuery(query) {
 export function findMatches(query) {
   const { q, matches, byPath } = filterQuery(query);
   const results = new Map();
-  for (const loc of storage) {
+  // Not locations hidden for being newer than the as-of date
+  const shown = storage.filter(l => !hiddenAsOf(l));
+  for (const loc of shown) {
     if (byPath ? matches(loc.path, loc.path) : loc.path.toLowerCase().includes(q)) {
       results.set(loc.path.toLowerCase(), { kind: 'location', loc, path: loc.path, name: loc.path });
     }
   }
-  for (const loc of storage) {
+  for (const loc of shown) {
     const snap = asOfSnapshot(loc);
     if (!snap || snap.incomplete) continue;
     const base = loc.path.replace(/\\$/, '');
@@ -117,7 +119,7 @@ export function renderMatches() {
         match.kind === 'location' ? el('span', { class: 'dot', 'aria-hidden': 'true' }) : null,
         cut ? el('span', { class: 'prefix' }, match.kind === 'location' && !byPath ? highlight(match.path.slice(0, cut), marked) : match.path.slice(0, cut)) : null,
         el('span', { class: 'text' }, highlight(own + (match.kind !== 'file' && !own.endsWith('\\') ? '\\' : ''), marked))),
-      el('span', { class: 'total muted' }, match.kind === 'location' ? diskText(locationTotal(match.loc)) : formatSize(match.size)));
+      el('span', { class: 'total muted' }, match.kind === 'location' ? diskText(totalAsOf(match.loc)) : formatSize(match.size)));
   }), ...(matches.length > limit ? [el('div', { class: 'more', style: 'padding:4px 16px' }, `…and ${matches.length - limit} more`)] : []),
   ...(matches.length ? [] : [el('p', { class: 'note', style: 'padding:0 16px' }, 'Nothing matches. Paste a full path to go straight to it.')]));
 }
