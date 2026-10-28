@@ -559,9 +559,10 @@ const api = {
     try {
       const response = await fetch('/api/storage');
       if (!response.ok) throw new Error(response.statusText || `Error ${response.status}`);
-      const { repository, locations, read } = await response.json();
+      const { repository, locations, read, working } = await response.json();
       DATA.repository = repository;
       storageRead = read;
+      storageWorking = working;
       return locations;
     } catch (error) {
       main.replaceChildren(el('div', { class: 'panel empty' }, `Couldn't read the repository: ${
@@ -714,9 +715,7 @@ function confirmDelete(loc, snap, rel, isFolder) {
 }
 
 // Backups and deletes that finished after the snapshots were last read, by the server's clock, applied on
-// top of them: a deleted snapshot taken out, and a new one put in from what kopia said when it made it. Its
-// space on disk isn't known until they're read again, which can take a while, as kopia works out storage
-// stats then, so meanwhile the location's total stays as it was.
+// top of them: a deleted snapshot taken out, and a new one put in from what kopia said when it made it
 let storageRead = 0;
 function applyJobs() {
   for (const j of jobList) {
@@ -724,17 +723,65 @@ function applyJobs() {
     if (!loc) continue;
     if (j.kind === 'delete' && j.state === 'done') loc.snapshots = loc.snapshots.filter(s => s.id !== j.snapshot);
     if (j.kind === 'backup' && j.info && !loc.snapshots.some(s => s.id === j.info.id)) {
-      const made = { ...j.info, onDisk: null, total: locationTotal(loc) };
-      loc.snapshots = [...loc.snapshots, made].sort((a, b) => a.time.localeCompare(b.time));
+      loc.snapshots = [...loc.snapshots, { ...j.info }].sort((a, b) => a.time.localeCompare(b.time));
     }
   }
 }
 
+// Storage stats come after the snapshots, as kopia takes a while over them, so a new snapshot may not have
+// them yet: what it added on disk stays unknown, and the total on disk is taken as unchanged since the one
+// before, until they come. With none known for a location, such as the first time, its total is unknown too.
+let storageWorking = false;
+function fillTotals() {
+  for (const loc of storage) {
+    let total = null;
+    for (const snap of loc.snapshots) {
+      if (snap.onDisk == null) snap.total = total;
+      else total = snap.total;
+    }
+  }
+}
+
+// While the server works out storage stats, the header says how it's getting on; once it's done, the
+// snapshots are read again for them
+let storagePolling = null;
+function followStorage() {
+  if (storagePolling || !storageWorking) return renderCaptured();
+  renderCaptured();
+  storagePolling = setInterval(async () => {
+    const progress = await fetch('/api/progress').then(r => r.json()).catch(() => null);
+    if (!progress) return;
+    if (progress.step) return renderCaptured(progress);
+    clearInterval(storagePolling);
+    storagePolling = null;
+    refreshStorage();
+  }, 1500);
+}
+
+function renderCaptured(progress = {}) {
+  const captured = document.getElementById('captured');
+  if (!LIVE) {
+    captured.textContent = `Mockup · data captured ${formatFull(DATA.captured)}`;
+    return;
+  }
+  captured.replaceChildren(`${DATA.repository.description || DATA.repository.path} · live from kopia, read ${formatFull(new Date(storageRead * 1000))}`);
+  if (storageWorking) {
+    captured.append(el('span', { title: 'Space on disk for new snapshots, which kopia takes a while over' },
+      ` · working out storage${progress.total ? ` for ${progress.done} of ${plural(progress.total, 'location')}` : ''}…`));
+  }
+}
+
 // After the snapshots have changed: everything redrawn, with viewing or comparing with a snapshot that's
-// been deleted going back to the default
+// been deleted going back to the default, and anything that failed to load for a deleted one forgotten
 function snapshotsChanged() {
+  fillTotals();
   treePositions = treeScale();
-  const gone = id => id && !storage.some(l => l.snapshots.some(s => s.id === id));
+  const known = new Set(storage.flatMap(l => l.snapshots.map(s => s.id)));
+  for (const url of [...failures.keys()]) {
+    if ([...url.matchAll(/[?&](?:from|to)=([0-9a-f]+)/g)].some(m => !known.has(m[1]))) failures.delete(url);
+  }
+  showProgress();
+  const gone = id => id && !known.has(id);
   if (gone(state.snapshot) || gone(state.compare)) {
     return navigate({ snapshot: gone(state.snapshot) ? null : state.snapshot, compare: gone(state.compare) ? null : state.compare }, true);
   }
@@ -758,7 +805,7 @@ function refreshStorage() {
       try {
         const response = await fetch('/api/storage');
         if (!response.ok) return;
-        const { locations, read } = await response.json();
+        const { locations, read, working } = await response.json();
         for (const fresh of locations) {
           const loc = storage.find(l => l.path === fresh.path);
           if (!loc) continue;
@@ -766,8 +813,10 @@ function refreshStorage() {
           loc.snapshots = fresh.snapshots.map(s => Object.assign(known.get(s.id) || {}, s));
         }
         storageRead = read;
+        storageWorking = working;
         applyJobs();
         snapshotsChanged();
+        followStorage();
       } catch {
         // It's read again after the next backup or delete, or when the page is reloaded
         return;
@@ -1141,6 +1190,7 @@ window.addEventListener('popstate', () => {
 /* ---------- Locations ---------- */
 
 const storage = await api.storage();
+fillTotals();
 
 // Restores and backups carry on if the page is reloaded, so pick up any still going
 if (LIVE) {
@@ -1193,9 +1243,16 @@ function locationsBelow(node) {
 function treeTotal(node) {
   if (node.location) return locationTotal(node.location);
   let total = 0;
-  for (const child of node.children.values()) total += treeTotal(child);
+  for (const child of node.children.values()) {
+    const inside = treeTotal(child);
+    // Not known until a location's storage stats are
+    if (inside == null) return null;
+    total += inside;
+  }
   return total;
 }
+// A size on disk, or … while it's being worked out
+const diskText = size => (size == null ? '…' : formatSize(size));
 
 // Folders that aren't locations and lead to a single folder are merged into one row
 function compactFolder(node) {
@@ -1363,7 +1420,7 @@ function itemTarget(item) {
 
 function renderLocations() {
   if (sidebarFilter) return renderMatches();
-  document.getElementById('sum').textContent = `${storage.length} locations · ${formatSize(treeTotal(locationTree))} on disk`;
+  document.getElementById('sum').textContent = `${storage.length} locations · ${diskText(treeTotal(locationTree))} on disk`;
   const direction = sidebarReversed ? -1 : 1;
   const rows = [];
   // In the flat lists the direction is for size or path, so what's inside a location is always A–Z
@@ -1376,7 +1433,8 @@ function renderLocations() {
     const expandable = children.length > 0 || children.unknown;
     const open = expandable && isOpen(item);
     // Sizes on disk for locations and the folders above them; plain sizes, greyed, for folders inside
-    const total = item.tree && (loc || !item.owner) ? treeTotal(item.tree) : null;
+    const onDisk = item.tree && (loc || !item.owner);
+    const total = onDisk ? treeTotal(item.tree) : null;
     rows.push(el('div', {
       class: `fsrow${loc ? '' : ' group'}`, 'aria-current': isCurrent(item) ? 'true' : 'false',
       style: `padding-left:${6 + depth * 12}px`,
@@ -1401,9 +1459,10 @@ function renderLocations() {
         el('span', { class: 'text' }, item.tree?.root || label.endsWith('\\') ? label : `${label}\\`),
         loc && backingUpNow(loc) ? el('span', { class: 'badge', title: 'A snapshot is in progress' }, 'Live') : null),
       // The PC's total is everything, so it's left off the colour scale
-      total != null
-        ? el('span', { class: 'total', style: total && !item.tree.root ? `color:${textColour(gradientRgb(treePositions.get(total)))}` : null }, formatSize(total))
-        : el('span', { class: 'total muted' }, item.size != null ? formatSize(item.size) : '')));
+      onDisk && total == null ? el('span', { class: 'total muted', title: 'Working out space on disk…' }, '…')
+        : total != null
+          ? el('span', { class: 'total', style: total && !item.tree.root ? `color:${textColour(gradientRgb(treePositions.get(total)))}` : null }, formatSize(total))
+          : el('span', { class: 'total muted' }, item.size != null ? formatSize(item.size) : '')));
     if (open) for (const child of sorted(children)) walk(child, depth + 1);
   };
 
@@ -1535,7 +1594,7 @@ function renderFolder(main) {
     el('section', { class: 'loc-head' },
       pathCrumbs(node.path),
       el('div', { class: 'meta' },
-        el('span', {}, el('b', {}, formatSize(treeTotal(node))), ' on disk'),
+        el('span', {}, el('b', {}, diskText(treeTotal(node))), ' on disk'),
         el('span', {}, plural(below.length, 'backup location')))),
     renderContents(node),
     renderStorageChart(node));
@@ -1855,7 +1914,7 @@ function renderMain() {
     el('div', { class: 'meta' },
       here ? el('span', {}, el('b', {}, formatSize(here.size))) : null,
       here ? el('span', {}, plural(here.files, 'file')) : null,
-      state.scope ? null : el('span', {}, `${formatSize(locationTotal(loc))} on disk`),
+      state.scope ? null : el('span', {}, `${diskText(locationTotal(loc))} on disk`),
       // The as-of date is older than anything kept here, so the oldest snapshot stands in for it
       tooOld(loc) && !state.snapshot
         ? el('span', { class: 'badge', title: `Nothing here is as old as ${formatFull(state.asOf)}` }, 'No snapshot that old · showing the oldest')
@@ -2917,7 +2976,7 @@ function renderFolderSide(aside) {
             el('span', { class: 'lead' }, loc.path.slice(node.root ? 0 : state.folder.replace(/\\$/, '').length + 1, cut)),
             el('span', { class: 'own' }, `${loc.path.slice(cut)}\\`)),
           backingUpNow(loc) ? el('span', { class: 'badge' }, 'Live') : null,
-          newest ? el('span', { class: 'disk', title: state.asOf ? 'On disk as of this snapshot' : 'On disk' }, formatSize(onDisk)) : null),
+          newest ? el('span', { class: 'disk', title: state.asOf ? 'On disk as of this snapshot' : 'On disk' }, diskText(onDisk)) : null),
         el('div', { class: 'what' },
           newest ? el('span', {}, `${state.asOf ? 'Snapshot' : 'Latest'} ${formatFull(newest.time)}`)
             : el('span', { class: 'muted' }, state.asOf ? 'No snapshot that old' : 'No snapshots'),
@@ -3108,7 +3167,7 @@ function renderMatches() {
         match.kind === 'location' ? el('span', { class: 'dot', 'aria-hidden': 'true' }) : null,
         cut ? el('span', { class: 'prefix' }, match.kind === 'location' ? highlight(match.path.slice(0, cut), sidebarFilter) : match.path.slice(0, cut)) : null,
         el('span', { class: 'text' }, highlight(own + (match.kind !== 'file' && !own.endsWith('\\') ? '\\' : ''), sidebarFilter))),
-      el('span', { class: 'total muted' }, match.kind === 'location' ? formatSize(locationTotal(match.loc)) : formatSize(match.size)));
+      el('span', { class: 'total muted' }, match.kind === 'location' ? diskText(locationTotal(match.loc)) : formatSize(match.size)));
   }), ...(matches.length > limit ? [el('div', { class: 'more', style: 'padding:4px 16px' }, `…and ${matches.length - limit} more`)] : []),
   ...(matches.length ? [] : [el('p', { class: 'note', style: 'padding:0 16px' }, 'Nothing matches. Paste a full path to go straight to it.')]));
 }
@@ -3285,9 +3344,7 @@ document.addEventListener('copy', event => {
   event.preventDefault();
 });
 
-document.getElementById('captured').textContent = LIVE
-  ? `${DATA.repository.description || DATA.repository.path} · live from kopia, read ${formatFull(new Date())}`
-  : `Mockup · data captured ${formatFull(DATA.captured)}`;
+followStorage();
 document.getElementById('captured').title = repositoryTitle();
 readHash();
 reveal(currentFolder());

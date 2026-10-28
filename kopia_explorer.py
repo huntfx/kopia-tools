@@ -101,15 +101,17 @@ dates_cache = DiskCache('dates')
 
 class Repository:
     """The repository's snapshots, kept up to date, with storage stats recalculated only for sources
-    that have new snapshots, as those take a while."""
+    that have new snapshots, in the background, as those take a while."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.stats_path = CACHE_DIR / 'storage.json'
         self.stats = json.loads(self.stats_path.read_text(encoding='utf-8')) if self.stats_path.exists() else {}
+        self.stats_thread = None
+        self.sources = set()  # Every backup location's path
         self.snapshots = {}   # id -> kopia's snapshot JSON, for diffs and downloads
         self.ignores = {}     # source -> its ignore rules, read once
-        self.progress = {}    # What storage() is doing, for the page to show while it waits
+        self.progress = {}    # How working out storage stats is getting on, for the page to show
         status = json.loads(kopia('repository', 'status', '--json'))
         self.info = {
             'description': status['clientOptions'].get('description', ''),
@@ -119,9 +121,10 @@ class Repository:
         }
 
     def storage(self):
-        """Every source with its snapshots, oldest first, as the page wants them."""
+        """Every source with its snapshots, oldest first, as the page wants them, straight away. Storage stats
+        are whatever's known so far: for sources with new snapshots they're worked out in the background, and
+        until then, new snapshots have none. 'working' says whether that's going on, to ask again after."""
         with self.lock:
-            self.progress = {'step': 'Reading the snapshots'}
             # When they were read, so the page knows which backups and deletes since then it still has to apply
             read = time.time()
             snapshots = list_snapshots(include_incomplete=True)
@@ -129,32 +132,46 @@ class Repository:
             for snap in snapshots:
                 by_source.setdefault(snap['source']['path'], []).append(snap)
                 self.snapshots[snap['id']] = snap
+            self.sources = set(by_source)
+            for source in [s for s in self.stats if s not in by_source]:
+                del self.stats[source]
 
             # Storage stats depend on every snapshot of a source, so they're redone when its snapshots change
-            stale = [source for source, snaps in by_source.items()
-                     if sorted(s['id'] for s in snaps) != self.stats.get(source, {}).get('ids')]
-            if stale:
-                print(f'Working out storage for {len(stale)} source(s)...', flush=True)
-                started = time.time()
-                self.progress = {'step': 'Working out storage for locations with new snapshots', 'done': 0, 'total': len(stale)}
-                futures = {pool.submit(source_stats, source): source for source in stale}
-                for future in as_completed(futures):
-                    source = futures[future]
-                    self.stats[source] = {'ids': sorted(s['id'] for s in by_source[source]), 'stats': future.result()}
-                    self.progress['done'] += 1
-                print(f'  done in {time.time() - started:.0f}s', flush=True)
-                for source in [s for s in self.stats if s not in by_source]:
-                    del self.stats[source]
-                self.stats_path.write_text(json.dumps(self.stats, separators=(',', ':')), encoding='utf-8')
+            ids = {source: sorted(s['id'] for s in snaps) for source, snaps in by_source.items()}
+            stale = [source for source in by_source if ids[source] != self.stats.get(source, {}).get('ids')]
+            if stale and not self.working():
+                self.stats_thread = threading.Thread(target=self.work_out_stats, args=({s: ids[s] for s in stale},), daemon=True)
+                self.stats_thread.start()
 
             result = []
             for source, snaps in sorted(by_source.items(), key=lambda item: item[0].casefold()):
                 snaps.sort(key=lambda s: s['startTime'])
-                stats = self.stats[source]['stats']
+                stats = self.stats.get(source, {}).get('stats', {})
                 result.append({'path': source, 'host': snaps[0]['source']['host'], 'user': snaps[0]['source']['userName'],
-                               'snapshots': [snapshot_info(s, stats.get(s['id'], {})) for s in snaps]})
+                               'snapshots': [snapshot_info(s, stats.get(s['id'])) for s in snaps]})
+            return {'repository': self.info, 'locations': result, 'read': read, 'working': self.working()}
+
+    def working(self):
+        return bool(self.stats_thread and self.stats_thread.is_alive())
+
+    def work_out_stats(self, stale):
+        """Storage stats for sources whose snapshots have changed, given with their snapshot IDs, several at once."""
+        print(f'Working out storage for {len(stale)} source(s)...', flush=True)
+        started = time.time()
+        self.progress = {'step': 'Working out storage', 'done': 0, 'total': len(stale)}
+        try:
+            futures = {pool.submit(source_stats, source): source for source in stale}
+            for future in as_completed(futures):
+                source = futures[future]
+                try:
+                    self.stats[source] = {'ids': stale[source], 'stats': future.result()}
+                except Exception as e:
+                    print(f'  {source}: {kopia_reason(e)}', flush=True)
+                self.progress['done'] += 1
+            self.stats_path.write_text(json.dumps(dict(self.stats), separators=(',', ':')), encoding='utf-8')
+            print(f'  done in {time.time() - started:.0f}s', flush=True)
+        finally:
             self.progress = {}
-            return {'repository': self.info, 'locations': result, 'read': read}
 
     def ignore(self, source):
         """The ignore rules for a source, from its policy and the .kopiaignore files on disk, read once
@@ -172,8 +189,11 @@ def source_stats(source):
 
 
 def snapshot_info(snap, stats):
-    new = stats.get('newData') or {}
+    """What the page wants to know about a snapshot. Without storage stats, as they're still being worked out,
+    what it added on disk and the running total are None."""
+    new = (stats or {}).get('newData') or {}
     complete = not snap.get('incomplete')
+    unknown = stats is None
     return {
         'id': snap['id'],
         'root': snap['rootEntry']['obj'],
@@ -183,10 +203,10 @@ def snapshot_info(snap, stats):
         'incomplete': snap.get('incomplete') or False,
         'size': snap['rootEntry'].get('summ', {}).get('size', 0) if complete else None,
         'files': snap['rootEntry'].get('summ', {}).get('files', 0) if complete else None,
-        'newFiles': new.get('fileObjects', 0),
-        'newData': new.get('originalContentBytes', 0),
-        'onDisk': new.get('packedContentBytes', 0),
-        'total': (stats.get('runningTotal') or {}).get('packedContentBytes', 0),
+        'newFiles': None if unknown else new.get('fileObjects', 0),
+        'newData': None if unknown else new.get('originalContentBytes', 0),
+        'onDisk': None if unknown else new.get('packedContentBytes', 0),
+        'total': None if unknown else (stats.get('runningTotal') or {}).get('packedContentBytes', 0),
         # Why kopia's retention policy keeps it, such as latest-1 or daily-3
         'keep': snap.get('retentionReason') or [],
     }
@@ -473,7 +493,7 @@ def pick_restore_target(snap, path, name, is_folder):
 def start_backup(source):
     """Take a snapshot of a backup location now, in the background, returning its progress record. kopia
     applies the location's policy as it would for a scheduled one, including expiring old snapshots after."""
-    if source not in repository.stats:
+    if source not in repository.sources:
         raise KeyError(source)
     running = next((j for j in jobs.values() if j['kind'] == 'backup' and j['source'] == source and not j['finished']), None)
     if running:
@@ -521,7 +541,7 @@ def run_backup(job, process):
         # Known straight away, so it can be browsed, and the page can show it, before the snapshots are read
         # again, which waits on storage stats; those aren't known yet
         repository.snapshots[result['id']] = result
-        job['info'] = snapshot_info(result, {})
+        job['info'] = snapshot_info(result, None)
         summary = result['rootEntry'].get('summ', {})
         job.update(files=summary.get('files', job['files']), bytes=summary.get('size', job['bytes']),
                    errors=summary.get('numFailed', 0))
@@ -592,7 +612,7 @@ def reveal(path):
     # Tidied first, so .. can't step out of a backup location; not resolved, as that turns mapped network
     # drives like S: into \\server\share paths, which then aren't inside the S: backup locations
     target = Path(os.path.abspath(path))
-    inside = any(target == Path(source) or Path(source) in target.parents for source in repository.stats)
+    inside = any(target == Path(source) or Path(source) in target.parents for source in repository.sources)
     if path not in restored and not inside:
         raise PermissionError('Only things restored or in a backup location can be shown')
     if target.is_dir():
