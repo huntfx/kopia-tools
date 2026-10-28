@@ -1,5 +1,5 @@
 """Browse kopia snapshots in a web page: backup locations, their snapshots, folder contents, what changed
-between snapshots, and file histories, and restore files and folders from any snapshot.
+between snapshots, and file histories, restore files and folders from any snapshot, and back up a location now.
 
 Runs a small local web server for the page in explorer/, fetching from kopia as you browse. Diffs and
 folder listings never change for a given snapshot, so they're cached on disk, in kopia-explorer in the
@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -175,7 +176,8 @@ def snapshot_info(snap, stats):
         'root': snap['rootEntry']['obj'],
         'mtime': snap['rootEntry'].get('mtime'),
         'time': snap['startTime'],
-        'incomplete': not complete,
+        # Why it's incomplete, such as canceled, or a checkpoint of one still going
+        'incomplete': snap.get('incomplete') or False,
         'size': snap['rootEntry'].get('summ', {}).get('size', 0) if complete else None,
         'files': snap['rootEntry'].get('summ', {}).get('files', 0) if complete else None,
         'newFiles': new.get('fileObjects', 0),
@@ -311,10 +313,24 @@ class Dialogs:
 
 dialogs = Dialogs()
 restored = set()               # Paths restored, which are the only ones the page may show in Explorer
-restores = {}                    # Every restore since the server started, by ID, for the page to follow
-restore_ids = itertools.count(1)
+jobs = {}                        # Every restore and backup since the server started, by ID, for the page to follow
+job_ids = itertools.count(1)
+backup_processes = {}            # Backups still running, by job ID, so they can be cancelled
 PROGRESS = re.compile(r'Processed (\d+) \(([\d.]+) (\w+)\) of (\d+) \(([\d.]+) (\w+)\)')
 UNITS = {'B': 1, 'KB': 1e3, 'MB': 1e6, 'GB': 1e9, 'TB': 1e12, 'KiB': 1024, 'MiB': 1024 ** 2, 'GiB': 1024 ** 3, 'TiB': 1024 ** 4}
+# The parts of kopia's backup progress line, such as
+# " * 3 hashing, 120 hashed (1.2 GB), 4000 cached (30 GB), uploaded 1.1 GB, estimated 40 GB (78.0%) 1m30s left"
+BACKUP_PROGRESS = {
+    'hashed': re.compile(r'(\d+) hashed \(([\d.]+) (\w+)\)'),
+    'cached': re.compile(r'(\d+) cached \(([\d.]+) (\w+)\)'),
+    'uploaded': re.compile(r'uploaded ([\d.]+) (\w+)'),
+    'estimated': re.compile(r'estimated ([\d.]+) (\w+) \(([\d.]+)%\) (\S+) left'),
+    'errors': re.compile(r'\((\d+) (?:fatal errors|errors ignored)\)'),
+}
+
+
+def size_of(number, unit):
+    return float(number) * UNITS.get(unit, 1)
 
 
 class BusyError(Exception):
@@ -333,17 +349,17 @@ def start_restore(snapshot_id, path, is_folder):
     """Restore a file or folder from a snapshot in the background, returning its progress record."""
     snap = repository.snapshots[snapshot_id]
     # One at a time while choosing where, so clicks don't queue up folder pickers behind one another
-    choosing = next((j for j in restores.values() if j['state'] == 'picking'), None)
+    choosing = next((j for j in jobs.values() if j['state'] == 'picking'), None)
     if choosing:
         raise BusyError(f'Finish choosing where to restore {choosing["name"]} first')
     source = Path(snap['source']['path'])
     job = {
-        'id': next(restore_ids), 'name': path.rsplit('/', 1)[-1] if path else source.name,
+        'id': next(job_ids), 'kind': 'restore', 'name': path.rsplit('/', 1)[-1] if path else source.name,
         'from': str(source / path) if path else str(source), 'snapshotTime': snap['startTime'],
         'state': 'picking', 'target': None, 'files': 0, 'totalFiles': None, 'bytes': 0, 'totalBytes': None,
         'error': None, 'started': time.time(), 'finished': None,
     }
-    restores[job['id']] = job
+    jobs[job['id']] = job
     threading.Thread(target=run_restore, args=(job, snap, path, is_folder), daemon=True).start()
     return job
 
@@ -373,8 +389,7 @@ def run_restore(job, snap, path, is_folder):
             if match := PROGRESS.search(line):
                 files, size, unit, total_files, total, total_unit = match.groups()
                 job.update(files=min(int(files), int(total_files)), totalFiles=int(total_files),
-                           bytes=min(float(size) * UNITS.get(unit, 1), float(total) * UNITS.get(total_unit, 1)),
-                           totalBytes=float(total) * UNITS.get(total_unit, 1))
+                           bytes=min(size_of(size, unit), size_of(total, total_unit)), totalBytes=size_of(total, total_unit))
             elif line.strip():
                 last = line.strip()
         if process.wait():
@@ -450,6 +465,84 @@ def pick_restore_target(snap, path, name, is_folder):
     return dialogs.ask(show)
 
 
+def start_backup(source):
+    """Take a snapshot of a backup location now, in the background, returning its progress record. kopia
+    applies the location's policy as it would for a scheduled one, including expiring old snapshots after."""
+    if source not in repository.stats:
+        raise KeyError(source)
+    running = next((j for j in jobs.values() if j['kind'] == 'backup' and j['source'] == source and not j['finished']), None)
+    if running:
+        raise BusyError(f'{source} is already being backed up')
+    job = {
+        'id': next(job_ids), 'kind': 'backup', 'name': source, 'source': source, 'state': 'running',
+        'files': 0, 'bytes': 0, 'uploaded': 0, 'estimated': None, 'percent': None, 'left': None, 'errors': 0,
+        'snapshot': None, 'error': None, 'started': time.time(), 'finished': None,
+    }
+    # In a process group of its own, so it can be sent Ctrl+Break to cancel it without stopping this server
+    process = subprocess.Popen(['kopia', 'snapshot', 'create', '--progress', '--json', source], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace',
+                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    backup_processes[job['id']] = process
+    jobs[job['id']] = job
+    threading.Thread(target=run_backup, args=(job, process), daemon=True).start()
+    return job
+
+
+def run_backup(job, process):
+    """Follow a backup's progress until it ends: complete, cancelled, or failed. Progress lines end in carriage
+    returns, which text mode reads as line ends, and the snapshot made comes last, as JSON."""
+    result, last = None, ''
+    try:
+        for line in process.stdout:
+            line = line.strip()
+            if line.startswith('{'):
+                result = json.loads(line)
+            elif 'hashing,' in line:
+                found = {key: pattern.search(line) for key, pattern in BACKUP_PROGRESS.items()}
+                hashed, cached = found['hashed'], found['cached']
+                if hashed and cached:
+                    job.update(files=int(hashed[1]) + int(cached[1]),
+                               bytes=size_of(*hashed.groups()[1:]) + size_of(*cached.groups()[1:]))
+                if found['uploaded']:
+                    job['uploaded'] = size_of(*found['uploaded'].groups())
+                if estimated := found['estimated']:
+                    job.update(estimated=size_of(estimated[1], estimated[2]), percent=float(estimated[3]), left=estimated[4])
+                job['errors'] = sum(int(count) for count in BACKUP_PROGRESS['errors'].findall(line))
+            elif line and not line.startswith('Snapshotting '):
+                last = line
+        if process.wait() or not result:
+            raise RuntimeError(last or f'kopia snapshot create failed with exit code {process.returncode}')
+        job['snapshot'] = result['id']
+        summary = result['rootEntry'].get('summ', {})
+        job.update(files=summary.get('files', job['files']), bytes=summary.get('size', job['bytes']),
+                   errors=summary.get('numFailed', 0))
+        if not result.get('incomplete'):
+            job.update(state='done', percent=100, left=None)
+        elif job['state'] == 'cancelling':
+            job['state'] = 'cancelled'
+        else:
+            job.update(state='failed', error=f'It stopped before finishing ({result["incomplete"]})')
+    except Exception as e:
+        job.update(state='failed', error=kopia_reason(e))
+    finally:
+        backup_processes.pop(job['id'], None)
+        job['finished'] = time.time()
+
+
+def cancel_backup(job_id):
+    """Ask a backup to stop, as Ctrl+C would: kopia saves what it got through as an incomplete snapshot, so
+    nothing uploaded so far has to be uploaded again. If it hasn't stopped after a minute, it's ended outright."""
+    job = jobs[job_id]
+    process = backup_processes.get(job_id)
+    if process and job['state'] == 'running':
+        job['state'] = 'cancelling'
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+        timer = threading.Timer(60, lambda: process.poll() is None and process.kill())
+        timer.daemon = True
+        timer.start()
+    return job
+
+
 def reveal(path):
     """Show something in Windows Explorer: a folder opened, or a file selected in its folder. If it's gone,
     the nearest folder above it that's still there. Only for things restored or inside a backup location."""
@@ -486,8 +579,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(date_changes(query['from'], query['to']))
             if url.path == '/api/listing':
                 return self.send_json(listing(query['obj']))
-            if url.path == '/api/restores':
-                return self.send_json(sorted(restores.values(), key=lambda j: -j['id']))
+            if url.path == '/api/jobs':
+                return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
             if url.path == '/mock-data.js':
                 # Empty, so the page knows it's talking to the server, without an error in the console
                 return self.send_body(b'', 'text/javascript')
@@ -502,16 +595,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         # Only the explorer's own page sends this header: a web page elsewhere can't without the browser
-        # asking first, which this server never allows, so other sites can't make it restore anything
+        # asking first, which this server never allows, so other sites can't make it restore or back up anything
         if self.headers.get('X-Kopia-Explorer') != '1':
             return self.send_error(403, 'Only the explorer page can do that')
         try:
             body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
             if self.path == '/api/restore':
                 return self.send_json(start_restore(body['snapshot'], body['path'], bool(body.get('folder'))))
-            if self.path == '/api/restores/clear':
-                for job in [j for j in restores.values() if j['finished']]:
-                    del restores[job['id']]
+            if self.path == '/api/backup':
+                return self.send_json(start_backup(body['source']))
+            if self.path == '/api/backup/cancel':
+                return self.send_json(cancel_backup(body['id']))
+            if self.path == '/api/jobs/clear':
+                for job in [j for j in jobs.values() if j['finished']]:
+                    del jobs[job['id']]
                 return self.send_json({})
             if self.path == '/api/reveal':
                 return self.send_json(reveal(body['path']))
@@ -575,6 +672,14 @@ def main():
     finally:
         server.server_close()
         pool.shutdown(wait=False, cancel_futures=True)
+        # Backups would carry on without anything following them, so they're stopped, saving what they got through
+        for job_id, process in list(backup_processes.items()):
+            print(f'Cancelling the backup of {jobs[job_id]["source"]}...', flush=True)
+            cancel_backup(job_id)
+            try:
+                process.wait(60)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 if __name__ == '__main__':

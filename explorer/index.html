@@ -323,7 +323,7 @@ th[aria-sort] { color: var(--ink); }
 .panel.loading p { margin: 0 0 10px; }
 .loading-bar { display: flex; align-items: center; gap: 12px; font-size: 0.85rem; }
 .loading-bar .bar { width: 240px; height: 6px; border-radius: 3px; background: var(--axis); overflow: hidden; }
-.progress .fill, .restores .fill, .loading-bar .fill { height: 100%; background: var(--accent); transition: width 0.2s; }
+.progress .fill, .jobs .fill, .loading-bar .fill { height: 100%; background: var(--accent); transition: width 0.2s; }
 
 /* Space on disk over time: stacked bands, separated by a hairline of the panel's colour */
 .storage-chart { position: relative; }
@@ -362,25 +362,27 @@ th[aria-sort] { color: var(--ink); }
 .chart-legend .hidden-item .swatch { background: none; border: 1px solid var(--axis); }
 .chart-legend .hidden-item .name { text-decoration: line-through; }
 
-/* Restores, in a panel at the bottom right: each with its progress, then where it went */
-.restores {
+/* Restores and backups, in a panel at the bottom right: each with its progress, then how it went */
+.jobs {
   position: fixed; right: 16px; bottom: 16px; z-index: 15; width: min(460px, calc(100vw - 32px)); max-height: 50vh; overflow-y: auto;
   background: var(--surface); border: 1px solid var(--axis); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
   font-size: 0.85rem;
 }
-.restores[hidden] { display: none; }
-.restores-head { display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); }
-.restores-head h2 { margin: 0 auto 0 0; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-2); }
-.restores-head .btn { padding: 1px 8px; }
-.restores ul { list-style: none; margin: 0; padding: 0; }
-.restores li { padding: 8px 14px; border-bottom: 1px solid var(--line); }
-.restores li:last-child { border-bottom: 0; }
+.jobs[hidden] { display: none; }
+.jobs-head { display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); }
+.jobs-head h2 { margin: 0 auto 0 0; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-2); }
+.jobs-head .btn { padding: 1px 8px; }
+.jobs ul { list-style: none; margin: 0; padding: 0; }
+.jobs li { padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.jobs li:last-child { border-bottom: 0; }
 /* Still going: marked down the side */
-.restores li.active { box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-bg); }
-.restores .what { overflow-wrap: anywhere; }
-.restores .status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 3px; color: var(--ink-2); overflow-wrap: anywhere; }
-.restores .status b { color: var(--ink); font-family: var(--font-data); font-weight: 500; }
-.restores .bar { flex: 1 1 120px; height: 6px; border-radius: 3px; background: var(--axis); overflow: hidden; }
+.jobs li.active { box-shadow: inset 3px 0 0 var(--accent); background: var(--accent-bg); }
+.jobs .what { overflow-wrap: anywhere; }
+.jobs .status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 3px; color: var(--ink-2); overflow-wrap: anywhere; }
+.jobs .status b { color: var(--ink); font-family: var(--font-data); font-weight: 500; }
+/* Amounts in a sentence stand out by colour and weight, in the sentence's own font, so they sit in it evenly */
+.jobs .status .amount { color: var(--ink); font-weight: 600; }
+.jobs .bar { flex: 1 1 120px; height: 6px; border-radius: 3px; background: var(--axis); overflow: hidden; }
 </style>
 </head>
 <body>
@@ -423,7 +425,7 @@ th[aria-sort] { color: var(--ink); }
   <aside class="history" id="history" hidden></aside>
 </div>
 <div class="progress" id="progress" role="status" hidden></div>
-<section class="restores" id="restores" aria-label="Restores" aria-live="polite" hidden></section>
+<section class="jobs" id="jobs" aria-label="Restores and backups" aria-live="polite" hidden></section>
 
 <script src="mock-data.js"></script>
 <!-- A module, so it can wait for the snapshots to load before building the page, without freezing it -->
@@ -583,30 +585,95 @@ const api = {
   }).then(response => (response.ok ? response.json() : Promise.reject(new Error(response.statusText || `Error ${response.status}`)))),
 };
 
-/* ---------- Restores ---------- */
+/* ---------- Restores and backups ---------- */
 
-// Restore a file or folder (rel inside the location, '' for all of it) as it was in a snapshot. The server
-// asks where in a folder picker, then has kopia write it there, so it keeps its modified times; the
-// restores panel at the bottom follows it.
-let restoreList = [];
-let restoresShown = false;
-let restorePolling = null;
-let restoresUnreachable = false;  // The server stopped answering while following restores
-// Still going: choosing where, restoring, or moving the finished restore into place
-const restoreActive = r => r.state === 'picking' || r.state === 'restoring' || r.state === 'finishing';
+// Restores and backups run on the server, and the panel at the bottom follows them. A restore asks where in
+// a folder picker, then has kopia write it there, so it keeps its modified times; a backup takes a snapshot
+// of a location now, as a scheduled one would.
+let jobList = [];
+let jobsShown = false;
+let jobPolling = null;
+let jobsUnreachable = false;  // The server stopped answering while following them
+// Still going: choosing where, restoring, moving the finished restore into place, backing up, or cancelling
+const jobActive = j => ['picking', 'restoring', 'finishing', 'running', 'cancelling'].includes(j.state);
+// A location's backup still going, if there is one
+const backupOf = loc => jobList.find(j => j.kind === 'backup' && j.source === loc.path && jobActive(j));
 
-async function restoreItem(snap, rel, folder) {
-  restoresShown = true;
+// Restore a file or folder (rel inside the location, '' for all of it) as it was in a snapshot
+function restoreItem(snap, rel, folder) {
+  jobsShown = true;
   // One at a time while choosing where: the panel shows the one waiting instead of queueing another
-  if (restoreList.some(r => r.state === 'picking')) return renderRestores();
+  if (jobList.some(j => j.state === 'picking')) return renderJobs();
+  startJob('/api/restore', { snapshot: snap.id, path: rel, folder },
+    { kind: 'restore', name: rel.split('/').pop() || 'this location', snapshotTime: snap.time });
+}
+
+function backUp(loc) {
+  jobsShown = true;
+  startJob('/api/backup', { source: loc.path }, { kind: 'backup', name: loc.path, source: loc.path });
+}
+
+// Start a restore or backup, or if the server won't, list it as failed, saying why
+async function startJob(url, body, job) {
   try {
-    restoreList = [await api.post('/api/restore', { snapshot: snap.id, path: rel, folder }), ...restoreList];
+    jobList = [...jobList, await api.post(url, body)];
   } catch (error) {
-    restoreList = [{ id: `failed-${Date.now()}`, name: rel.split('/').pop() || 'this location', state: 'failed',
-      error: error instanceof TypeError ? 'Can\'t reach the server' : error.message, snapshotTime: snap.time }, ...restoreList];
+    jobList = [...jobList, { ...job, id: `failed-${Date.now()}`, state: 'failed',
+      error: error instanceof TypeError ? 'Can\'t reach the server' : error.message }];
   }
-  renderRestores();
-  followRestores();
+  jobsChanged();
+  followJobs();
+}
+
+// The panel at the bottom, and the snapshots panel's backup button, which says whether one's going
+function jobsChanged() {
+  renderJobs();
+  const button = document.getElementById('backup-now');
+  const loc = button && storage.find(l => l.path === button.dataset.location);
+  if (loc) button.replaceWith(backupButton(loc));
+}
+
+// Back up a location now, or while it's being backed up, cancel that
+function backupButton(loc) {
+  const job = backupOf(loc);
+  const button = el('button', {
+    id: 'backup-now', class: 'btn', style: 'font-size:0.8rem;flex:none', 'data-location': loc.path,
+    disabled: !LIVE || job?.state === 'cancelling',
+    title: !LIVE ? 'Backing up needs the server: run kopia_explorer.py'
+      : job ? 'Stop it, keeping what it got through as an incomplete snapshot'
+        : `Take a snapshot of ${loc.path} now, as its schedule would`,
+    onclick: () => (job ? cancelBackup(job) : backUp(loc)),
+  }, job?.state === 'cancelling' ? 'Cancelling…' : job ? 'Cancel backup' : 'Back up now');
+  return button;
+}
+
+async function cancelBackup(job) {
+  try {
+    Object.assign(job, await api.post('/api/backup/cancel', { id: job.id }));
+  } catch (error) {
+    job.error = `Couldn't cancel: ${error instanceof TypeError ? 'can\'t reach the server' : error.message}`;
+  }
+  jobsChanged();
+}
+
+// Read the snapshots again, quietly, as a backup has made one. Each location's list is replaced in place,
+// with the snapshots already known kept as the same objects, so everything holding on to them still finds
+// them. A location that's new shows when the page is reloaded.
+async function refreshStorage() {
+  try {
+    const response = await fetch('/api/storage');
+    if (!response.ok) return;
+    for (const fresh of (await response.json()).locations) {
+      const loc = storage.find(l => l.path === fresh.path);
+      if (!loc) continue;
+      const known = new Map(loc.snapshots.map(s => [s.id, s]));
+      loc.snapshots = fresh.snapshots.map(s => Object.assign(known.get(s.id) || {}, s));
+    }
+    treePositions = treeScale();
+    render();
+  } catch {
+    // It's read again on the next backup, or when the page is reloaded
+  }
 }
 
 // Open something in Windows Explorer, via the server; if that fails, the button says why
@@ -617,35 +684,42 @@ function showInExplorer(path, button) {
   });
 }
 
-// While a restore is going, ask the server how it's getting on every second
-function followRestores() {
-  if (restorePolling) return;
-  restorePolling = setInterval(async () => {
+// While a restore or backup is going, ask the server how it's getting on every second
+function followJobs() {
+  if (jobPolling) return;
+  jobPolling = setInterval(async () => {
+    let list;
     try {
-      restoreList = await fetch('/api/restores').then(r => r.json());
-      restoresUnreachable = false;
+      list = await fetch('/api/jobs').then(r => r.json());
+      jobsUnreachable = false;
     } catch {
       // Keep trying, as it may be restarting, but say so
-      if (!restoresUnreachable) {
-        restoresUnreachable = true;
-        renderRestores();
+      if (!jobsUnreachable) {
+        jobsUnreachable = true;
+        renderJobs();
       }
       return;
     }
-    renderRestores();
-    if (!restoreList.some(restoreActive)) {
-      clearInterval(restorePolling);
-      restorePolling = null;
+    // A backup that's just ended has made a snapshot, even if cancelled
+    const ended = list.some(j => j.kind === 'backup' && !jobActive(j) && jobList.some(o => o.id === j.id && jobActive(o)));
+    jobList = list;
+    jobsChanged();
+    if (ended) refreshStorage();
+    if (!jobList.some(jobActive)) {
+      clearInterval(jobPolling);
+      jobPolling = null;
     }
   }, 1000);
 }
 
-function renderRestores() {
-  const panel = document.getElementById('restores');
-  panel.hidden = !restoresShown || !restoreList.length;
+function renderJobs() {
+  const panel = document.getElementById('jobs');
+  // Oldest first, so the latest is at the bottom, which it stays scrolled to unless scrolled up to look back
+  const atBottom = panel.hidden || panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 4;
+  panel.hidden = !jobsShown || !jobList.length;
   if (panel.hidden) return;
-  const active = restoreList.filter(restoreActive).length;
   const item = r => {
+    if (r.kind === 'backup') return backupItem(r);
     const percent = r.totalBytes ? 100 * r.bytes / r.totalBytes : 0;
     const status = {
       // After a few seconds, the picker may well have opened behind something
@@ -664,38 +738,76 @@ function renderRestores() {
       failed: () => el('div', { class: 'status c-removed' }, `Failed: ${r.error}`),
       cancelled: () => el('div', { class: 'status muted' }, 'Cancelled'),
     }[r.state]();
-    return el('li', { class: `${r.state}${restoreActive(r) ? ' active' : ''}` },
+    return el('li', { class: `${r.state}${jobActive(r) ? ' active' : ''}` },
       el('div', { class: 'what' }, el('b', {}, r.name),
         el('span', { class: 'muted' }, ` as of ${formatFull(r.snapshotTime)}`)),
       status);
   };
+
+  // What's going, of each kind, or if nothing is, what's listed
+  const of = kind => jobList.filter(j => j.kind === kind);
+  const going = kind => of(kind).filter(jobActive).length;
+  const active = jobList.filter(jobActive).length;
+  const heading = [
+    going('backup') && `Backing up ${plural(going('backup'), 'location')}`,
+    going('restore') && `Restoring ${going('restore')} of ${of('restore').length}`,
+  ].filter(Boolean).join(' · ')
+    || `${!of('backup').length ? 'Restores' : !of('restore').length ? 'Backups' : 'Backups and restores'} (${jobList.length})`;
   panel.replaceChildren(
-    el('div', { class: 'restores-head' },
-      el('h2', {}, active ? `Restoring ${active} of ${restoreList.length}` : `Restores (${restoreList.length})`),
-      restoresUnreachable ? el('span', { class: 'c-removed', title: 'Is kopia_explorer.py still running?' }, 'Can\'t reach the server') : null,
-      restoreList.length > active ? el('button', {
-        class: 'linklike', title: 'Remove finished restores from the list',
+    el('div', { class: 'jobs-head' },
+      el('h2', {}, heading),
+      jobsUnreachable ? el('span', { class: 'c-removed', title: 'Is kopia_explorer.py still running?' }, 'Can\'t reach the server') : null,
+      jobList.length > active ? el('button', {
+        class: 'linklike', title: 'Remove finished ones from the list',
         onclick: async () => {
-          await api.post('/api/restores/clear', {});
-          restoreList = restoreList.filter(restoreActive);
-          renderRestores();
+          await api.post('/api/jobs/clear', {});
+          jobList = jobList.filter(jobActive);
+          renderJobs();
         },
       }, 'Clear finished') : null,
       // It stays open until everything's finished
-      active ? null : el('button', { class: 'btn', 'aria-label': 'Close', title: 'Close', onclick: () => { restoresShown = false; renderRestores(); } }, '×')),
-    el('ul', {}, restoreList.map(item)));
+      active ? null : el('button', { class: 'btn', 'aria-label': 'Close', title: 'Close', onclick: () => { jobsShown = false; renderJobs(); } }, '×')),
+    el('ul', {}, jobList.map(item)));
+  if (atBottom) panel.scrollTop = panel.scrollHeight;
 }
 
-// Restores carry on if the page is reloaded, so pick up any still going
-if (LIVE) {
-  fetch('/api/restores').then(r => r.json()).then(list => {
-    restoreList = list;
-    if (list.some(restoreActive)) {
-      restoresShown = true;
-      renderRestores();
-      followRestores();
-    }
-  }).catch(() => {});
+// A backup in the panel at the bottom: how far it's got, which kopia can only say once it's worked out
+// roughly how much there is, then what it made
+function backupItem(j) {
+  const errors = j.errors ? el('span', { class: 'c-removed' }, ` · ${plural(j.errors, 'error')}`) : null;
+  const loc = storage.find(l => l.path === j.source);
+  const made = j.snapshot && loc?.snapshots.find(s => s.id === j.snapshot);
+  // kopia can take a while to estimate how much there is, so until then, it's going by the last snapshot
+  const last = loc && latest(loc);
+  const about = j.estimated ?? (last && !last.incomplete ? last.size : null);
+  const percent = j.percent ?? (about ? Math.min(99, 100 * j.bytes / about) : null);
+  const status = {
+    running: () => [
+      el('div', { class: 'status' },
+        el('span', { class: 'bar' }, el('span', { class: 'fill', style: `display:block;width:${percent ?? 0}%` })),
+        percent != null
+          ? el('span', { title: j.estimated == null ? 'Going by the size of the last snapshot, until kopia has estimated it' : null },
+            `${formatSize(j.bytes)} of about ${formatSize(about)} · ${Math.floor(percent)}%${j.left ? ` · ${j.left} left` : ''}`)
+          : `${plural(j.files, 'file')} checked, ${formatSize(j.bytes)}`,
+        el('button', { class: 'linklike', onclick: () => cancelBackup(j) }, 'Cancel')),
+      el('div', { class: 'status muted' }, el('span', {}, `${formatSize(j.uploaded)} uploaded`, errors,
+        j.error ? el('span', { class: 'c-removed' }, ` · ${j.error}`) : null)),
+    ],
+    cancelling: () => el('div', { class: 'status muted' }, 'Cancelling, keeping what it got through…'),
+    done: () => el('div', { class: 'status' },
+      el('span', { class: 'c-added' }, '✓ Backed up'),
+      el('span', {}, el('span', { class: 'amount' }, formatSize(j.bytes)), ` in ${plural(j.files, 'file')}, `,
+        el('span', { class: 'amount' }, formatSize(j.uploaded)), ' uploaded', errors),
+      // Once the snapshots have been read again, it can be gone to
+      made ? el('button', { class: 'linklike', onclick: () => navigate({ location: j.source, snapshot: made.id, asOf: null, scope: '', file: null }) }, 'View snapshot') : null),
+    failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
+    cancelled: () => el('div', { class: 'status muted', title: 'kopia keeps what it got through as an incomplete snapshot, so the next backup doesn\'t upload it again' },
+      `Cancelled after ${formatSize(j.uploaded)} uploaded`),
+  }[j.state]();
+  return el('li', { class: `${j.state}${jobActive(j) ? ' active' : ''}` },
+    el('div', { class: 'what' }, el('span', { class: 'muted' }, 'Backup of '), el('b', {}, j.source),
+      j.started ? el('span', { class: 'muted' }, `, started ${formatTime(new Date(j.started * 1000))}`) : null),
+    status);
 }
 
 // What to say where something isn't there: still loading, failed, or not captured in the mock data
@@ -738,6 +850,10 @@ function timeAgo(iso) {
 }
 const formatFull = iso => fullFormat.format(new Date(iso));
 const shortId = id => id.slice(0, 8);
+// kopia keeps a backup stopped part way as an incomplete snapshot, saying why: cancelled, or a checkpoint
+// of one still going
+const isCancelled = snap => snap.incomplete === 'canceled';
+const unfinished = snap => (isCancelled(snap) ? 'was cancelled before it finished' : 'is still in progress');
 const plural = (n, word) => `${n.toLocaleString('en-GB')} ${word}${n === 1 ? '' : 's'}`;
 // Append children, skipping empty optional ones (append() would print null as text)
 const appendAll = (parent, ...children) => parent.append(...children.flat(Infinity).filter(c => c != null && c !== false));
@@ -900,6 +1016,18 @@ window.addEventListener('popstate', () => {
 /* ---------- Locations ---------- */
 
 const storage = await api.storage();
+
+// Restores and backups carry on if the page is reloaded, so pick up any still going
+if (LIVE) {
+  fetch('/api/jobs').then(r => r.json()).then(list => {
+    jobList = list;
+    if (list.some(jobActive)) {
+      jobsShown = true;
+      jobsChanged();
+      followJobs();
+    }
+  }).catch(() => {});
+}
 const latest = loc => [...loc.snapshots].reverse().find(s => !s.incomplete) || loc.snapshots[loc.snapshots.length - 1];
 const locationTotal = loc => loc.snapshots.length ? loc.snapshots[loc.snapshots.length - 1].total : 0;
 
@@ -976,15 +1104,19 @@ function reveal(path) {
   }
 }
 
-// Colour every folder's total on one scale, so colours don't shift as folders are expanded
-const treeTotals = [];
-(function collectTotals(node) {
-  for (const child of node.children.values()) {
-    treeTotals.push(treeTotal(child));
-    collectTotals(child);
-  }
-})(locationTree);
-const treePositions = gradientPositions(treeTotals.filter(Boolean));
+// Colour every folder's total on one scale, so colours don't shift as folders are expanded. It's worked
+// out again when the snapshots are read again, as the totals change.
+function treeScale() {
+  const totals = [];
+  (function collectTotals(node) {
+    for (const child of node.children.values()) {
+      totals.push(treeTotal(child));
+      collectTotals(child);
+    }
+  })(locationTree);
+  return gradientPositions(totals.filter(Boolean));
+}
+let treePositions = treeScale();
 
 // How the sidebar is sorted, remembered in this browser. Clicking the current sort again reverses it.
 const SORTS = { tree: 'Folders', size: 'Size', name: 'Name' };
@@ -1142,7 +1274,7 @@ function renderLocations() {
         prefix ? el('span', { class: 'prefix' }, prefix) : null,
         // Folders end in a backslash, like drives and the contents tables; the PC isn't a folder
         el('span', { class: 'text' }, item.tree?.root || label.endsWith('\\') ? label : `${label}\\`),
-        loc?.snapshots.some(s => s.incomplete) ? el('span', { class: 'badge', title: 'A snapshot is in progress' }, 'Live') : null),
+        loc?.snapshots.some(s => s.incomplete && !isCancelled(s)) ? el('span', { class: 'badge', title: 'A snapshot is in progress' }, 'Live') : null),
       // The PC's total is everything, so it's left off the colour scale
       total != null
         ? el('span', { class: 'total', style: total && !item.tree.root ? `color:${textColour(gradientRgb(treePositions.get(total)))}` : null }, formatSize(total))
@@ -1613,7 +1745,7 @@ function renderMain() {
     : snapshotListing(selected, parts.slice(0, -1).join('/'))?.find(e => e.n === parts[parts.length - 1] && e.t === 'd')?.m;
   const restore = restorePanel({
     selected, rel: state.scope, present: !!here, size: here?.size, what: 'folder', wide: true,
-    facts: selected.incomplete ? [['Status', 'Still in progress']] : [
+    facts: selected.incomplete ? [['Status', isCancelled(selected) ? 'Cancelled before it finished' : 'Still in progress']] : [
       ['Size', here ? formatSize(here.size) : notKnown()],
       ['Files', here ? plural(here.files, 'file') : notKnown()],
       ['Modified', modified ? `${formatFull(modified)}, ${timeAgo(modified)}` : notKnown()],
@@ -1808,7 +1940,7 @@ function renderSnapshotContents(loc, selected) {
     el('h2', {}, 'Contents'),
     el('span', { class: 'legend' }, `At ${formatFull(selected.time)}, ${timeAgo(selected.time)} (${shortId(selected.id)})`));
   if (selected.incomplete) {
-    appendAll(panel, head, el('p', { class: 'note' }, 'This snapshot is still in progress, so its contents aren\'t shown.'));
+    appendAll(panel, head, el('p', { class: 'note' }, `This snapshot ${unfinished(selected)}, so its contents aren't shown.`));
     return panel;
   }
   const entries = snapshotListing(selected, state.scope);
@@ -2259,7 +2391,7 @@ function compareTarget(loc, selected) {
 function renderChanges(loc, selected) {
   const panel = el('section', { class: 'panel' });
   if (selected.incomplete) {
-    panel.append(el('h2', {}, 'Changes'), el('p', { class: 'note' }, 'This snapshot is still in progress, so its changes aren\'t shown.'));
+    panel.append(el('h2', {}, 'Changes'), el('p', { class: 'note' }, `This snapshot ${unfinished(selected)}, so its changes aren't shown.`));
     return panel;
   }
   const complete = loc.snapshots.filter(s => !s.incomplete);
@@ -2721,7 +2853,7 @@ function renderSide() {
         : navigate({ location: loc.path, asOf: asOfFor(loc, snap), scope: rel, file: null, history: null });
     return el('li', {
       class: classes.filter(Boolean).join(' '),
-      title: snap.incomplete ? 'Still in progress' : here ? 'Click to view · Shift-click to compare with it' : 'Click to open at this snapshot',
+      title: snap.incomplete ? `This snapshot ${unfinished(snap)}` : here ? 'Click to view · Shift-click to compare with it' : 'Click to open at this snapshot',
       onclick: snap.incomplete ? null : event => (here && event.shiftKey ? pickSnapshot(snap, selected, true) : open()),
     },
       el('div', { class: 'top' },
@@ -2729,7 +2861,7 @@ function renderSide() {
         el('span', { class: 'when' }, formatFull(snap.time)),
         snap === latest(loc) ? el('span', { class: 'tag' }, 'latest') : null,
         snap === other ? el('span', { class: 'tag' }, 'compared') : null,
-        snap.incomplete ? el('span', { class: 'badge' }, 'In progress') : null,
+        snap.incomplete ? el('span', { class: 'badge' }, isCancelled(snap) ? 'Cancelled' : 'In progress') : null,
         sizeAt(snap),
         // Space the snapshot added on disk is for the whole location, so it's only shown for the location
         // itself; for anything inside, the row's own change says what happened to it
@@ -2763,7 +2895,8 @@ function renderSide() {
           pickedIsFolder = true;
           navigate({ history: above.toLowerCase() === currentPath().toLowerCase() ? null : above });
         },
-      }, '↑ Up') : null),
+      }, '↑ Up') : null,
+      backupButton(loc)),
     el('ul', { class: 'snaps' }, inProgress.map(s => row(s, null, 'partial')), rows),
     elsewhere.length ? el('div', { class: 'elsewhere' }, 'Also backed up in ',
       elsewhere.map((l, i) => [i ? ', ' : '', el('button', {
