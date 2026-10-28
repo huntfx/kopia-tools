@@ -2,9 +2,9 @@
 between snapshots, and file histories, restore files and folders from any snapshot, back up a location now,
 delete snapshots, and set how often a folder is backed up.
 
-Runs a small local web server for the page in explorer/, fetching from kopia as you browse. Diffs and
-folder listings never change for a given snapshot, so they're cached on disk, in kopia-explorer in the
-temp folder (TEMP).
+Runs a small local web server for the page in explorer/ (index.html, style.css and the modules in js/),
+fetching from kopia as you browse. Diffs and folder listings never change for a given snapshot, so they're
+cached on disk, in kopia-explorer in the temp folder (TEMP).
 
 Example:
     py kopia_explorer.py
@@ -722,6 +722,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path in ('/', '/index.html'):
                 return self.send_file(PAGE_DIR / 'index.html', 'text/html; charset=utf-8')
+            # The page's stylesheet and scripts, and nothing else from its folder
+            if match := re.fullmatch(r'/(style\.css|js/[\w-]+\.js)', url.path):
+                content_type = 'text/css' if url.path.endswith('.css') else 'text/javascript'
+                if (PAGE_DIR / match[1]).is_file():
+                    return self.send_file(PAGE_DIR / match[1], f'{content_type}; charset=utf-8')
             if url.path == '/api/storage':
                 return self.send_json(repository.storage())
             if url.path == '/api/progress':
