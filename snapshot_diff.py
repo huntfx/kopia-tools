@@ -134,19 +134,22 @@ class KopiaIgnore:
         self._dirs = {}
 
     def _load(self, dir_parts):
-        """Get the rules that apply from a directory, as (negate, dir_only, regex)."""
+        """Get the rules that apply from a directory, as (negate, dir_only, regex, line, origin), where origin is
+        the ignore file the line is in, or None for the policy."""
         key = tuple(dir_parts)
         if key not in self._rules:
             files = self._policy.result().get('files', {})
             # Policy rules apply from the source root, before its ignore files
-            lines = [] if dir_parts else list(files.get('ignore') or [])
+            lines = [] if dir_parts else [(line, None) for line in files.get('ignore') or []]
             for name in files.get('ignoreDotFiles') or []:
+                path = os.path.join(self.source, *dir_parts, name)
                 try:
-                    with open(os.path.join(self.source, *dir_parts, name), encoding='utf-8-sig') as f:
-                        lines += f.read().splitlines()
+                    with open(path, encoding='utf-8-sig') as f:
+                        lines += [(line, path) for line in f.read().splitlines()]
                 except OSError:
                     pass
-            self._rules[key] = [rule for rule in map(parse_ignore_rule, lines) if rule is not None]
+            self._rules[key] = [(*rule, line.strip(), origin) for line, origin in lines
+                                if (rule := parse_ignore_rule(line)) is not None]
         return self._rules[key]
 
     def ignored(self, parts, is_dir):
@@ -162,14 +165,31 @@ class KopiaIgnore:
 
     def _matches(self, parts, is_dir):
         """Check the rules against the path itself, where the last matching rule wins."""
-        matched = False
+        rule = self._rule(parts, is_dir)
+        return bool(rule) and not rule[0]
+
+    def _rule(self, parts, is_dir):
+        """The last rule matching the path itself, which is the one that decides, or None."""
+        found = None
         # Rules in deeper ignore files come later, so take precedence
         for i in range(len(parts)):
             path = '/'.join(parts[i:])
-            for negate, dir_only, regex in self._load(parts[:i]):
+            for rule in self._load(parts[:i]):
+                negate, dir_only, regex = rule[:3]
                 if (is_dir or not dir_only) and regex.fullmatch(path):
-                    matched = not negate
-        return matched
+                    found = rule
+        return found
+
+    def why(self, parts, is_dir):
+        """Why a path is ignored, as (the rule's line, the ignore file it's in or None for the policy), from the
+        outermost ignored folder it's in, or itself; None if it isn't ignored."""
+        parts = tuple(parts)
+        for end in range(1, len(parts) + 1):
+            here = parts[:end]
+            if self._matches(here, is_dir or end < len(parts)):
+                _, _, _, line, origin = self._rule(here, is_dir or end < len(parts))
+                return line, origin
+        return None
 
 
 def diff_snapshots(old_snap, new_snap, parts, start, is_ignored=None):

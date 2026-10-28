@@ -235,12 +235,19 @@ def raw_diff(old_id, new_id):
 
 
 def served_diff(old_id, new_id):
-    """A diff with removals hidden where kopia's current ignore rules explain them, as the files were most
-    likely ignored rather than deleted."""
+    """A diff with removals that kopia's current ignore rules explain marked as ignored (i), as the files were
+    most likely left out of backups from then on rather than deleted, with the rule that did it: its line and
+    the ignore file it's in (None for the policy)."""
     source = repository.snapshots[new_id]['source']['path']
     ignore = repository.ignore(source)
-    return [c for c in raw_diff(old_id, new_id)
-            if c['k'] != '-' or not ignore.ignored(c['p'].rstrip('/').split('/'), c['p'].endswith('/'))]
+    changes = []
+    for change in raw_diff(old_id, new_id):
+        parts, is_dir = change['p'].rstrip('/').split('/'), change['p'].endswith('/')
+        if change['k'] == '-' and ignore.ignored(parts, is_dir):
+            rule, origin = ignore.why(parts, is_dir)
+            change = {**change, 'k': 'i', 'why': {'rule': rule, 'file': origin}}
+        changes.append(change)
+    return changes
 
 
 DATES_DIFFER = re.compile(r'^\.(?:/(.*?))? modification times differ:')

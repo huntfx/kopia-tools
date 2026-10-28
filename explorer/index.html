@@ -26,6 +26,7 @@
   --added: #1a8f5c;
   --removed: #c9372c;
   --modified: #a87400;
+  --ignored: #6250d6;
   /* Chart series, in a fixed order checked for colour blindness, then grey for everything else */
   --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
   --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6; --series-other: #a8a69e;
@@ -36,7 +37,7 @@
   :root:not([data-theme="light"]) {
     --bg: #0f1216; --surface: #171b21; --surface-2: #1b2027; --ink: #eef1f5; --ink-2: #b9c1cc; --muted: #8a93a0;
     --line: #262c35; --axis: #38404b; --accent: #3987e5; --accent-bg: #172638; --warn-bg: #2a2310; --warn-line: #c98500;
-    --added: #5ac87e; --removed: #f0675a; --modified: #e6c25a;
+    --added: #5ac87e; --removed: #f0675a; --modified: #e6c25a; --ignored: #9085e9;
     --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
     --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-other: #5a5955;
     color-scheme: dark;
@@ -45,7 +46,7 @@
 :root[data-theme="dark"] {
   --bg: #0f1216; --surface: #171b21; --surface-2: #1b2027; --ink: #eef1f5; --ink-2: #b9c1cc; --muted: #8a93a0;
   --line: #262c35; --axis: #38404b; --accent: #3987e5; --accent-bg: #172638; --warn-bg: #2a2310; --warn-line: #c98500;
-  --added: #5ac87e; --removed: #f0675a; --modified: #e6c25a;
+  --added: #5ac87e; --removed: #f0675a; --modified: #e6c25a; --ignored: #9085e9;
   --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
   --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-other: #5a5955;
   color-scheme: dark;
@@ -230,6 +231,8 @@ th[aria-sort] { color: var(--ink); }
 .changes-head .compare { flex: 0 1 380px; }
 .counts { display: inline-flex; gap: 10px; font-family: var(--font-data); font-size: 0.9rem; }
 .c-added { color: var(--added); } .c-removed { color: var(--removed); } .c-modified { color: var(--modified); }
+/* No longer backed up, as kopia's ignore rules leave it out: not red, as nothing on disk was lost */
+.c-ignored { color: var(--ignored); }
 .filters { display: inline-flex; gap: 4px; flex: none; }
 .filters button {
   border: 1px solid var(--axis); background: var(--surface); border-radius: 5px; padding: 1px 9px; font-family: var(--font-data);
@@ -237,7 +240,7 @@ th[aria-sort] { color: var(--ink); }
 .filters button[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
 /* A file whose modified date changed but not its contents: a small dot, and quieter text, but not greyed out
    like things that only existed in between */
-.node.date-only .name { color: var(--ink-2); }
+.node.date-only .name, .node.ignored .name { color: var(--ink-2); }
 .filter-text { background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 8px; font-size: 0.85rem; flex: 1 1 160px; min-width: 0; }
 .compare { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 0.85rem; flex: 1; min-width: 0; }
 .compare select { background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font-size: 0.85rem; flex: 1; min-width: 0; }
@@ -1110,8 +1113,9 @@ const fillColour = rgb => `rgb(${rgb.join(' ')})`;
 const state = {
   location: null, folder: null, scope: '', file: null, snapshot: null, compare: null, history: null,
   // * is for things that only existed between two snapshots compared, which are always shown, greyed out;
-  // d is for files whose modified date changed but not their contents
-  filters: { '+': true, '-': true, '~': true, '*': true, d: true }, filterText: '',
+  // d is for files whose modified date changed but not their contents; i (⊘) is for things that went from one
+  // snapshot to the next because kopia's ignore rules leave them out
+  filters: { '+': true, '-': true, '~': true, '*': true, d: true, i: true }, filterText: '',
 };
 
 function readHash() {
@@ -2015,14 +2019,14 @@ function fileInfo(loc, rel, selected) {
   const listing = snapshotListing(selected, parent);
   const entry = listing?.find(e => e.n === name && e.t === 'f');
   // There if it's listed, otherwise going by its last change; if it never changed, it was there all along
-  const present = listing ? !!entry : lastStep ? lastStep.kind !== '-' : !(steps[0]?.kind === '+');
+  const present = listing ? !!entry : lastStep ? !isGone(lastStep.kind) : !(steps[0]?.kind === '+');
   return {
     present, captured, steps,
-    size: entry?.s ?? (lastStep && lastStep.kind !== '-' ? lastStep.size : null),
+    size: entry?.s ?? (lastStep && !isGone(lastStep.kind) ? lastStep.size : null),
     modified: entry?.m ?? null,
     here: at > 0 ? stepChange(complete[at - 1], selected, rel, false) : 'first',
     firstSeen: steps[0]?.kind === '+' ? steps[0].snap : null,
-    lastChanged: [...steps].reverse().find(s => s.kind !== '-')?.snap ?? null,
+    lastChanged: [...steps].reverse().find(s => !isGone(s.kind))?.snap ?? null,
     snapshots: complete.length,
   };
 }
@@ -2040,7 +2044,7 @@ function renderFilePage(main, loc) {
 
   const info = fileInfo(loc, rel, selected);
   const when = snap => `${formatFull(snap.time)}, ${timeAgo(snap.time)}`;
-  const changedIn = info.steps.filter(s => s.kind !== '-').length;
+  const changedIn = info.steps.filter(s => !isGone(s.kind)).length;
   // Back to the folder, with the file picked there so its row is highlighted
   const showInFolder = () => { pickedRow = full; pickedIsFolder = false; navigate({ file: null, history: full }); };
 
@@ -2308,7 +2312,8 @@ function locationChurn(loc) {
   const steps = complete.slice(1).map((snap, i) => ({ snap, captured: !!api.diff(complete[i].id, snap.id) }));
   steps.forEach(({ snap }, step) => {
     for (const change of api.diff(complete[step].id, snap.id) || []) {
-      if (change.p.endsWith('/')) continue;
+      // Things ignored from then on weren't changed by anyone, so they aren't activity
+      if (change.p.endsWith('/') || change.k === 'i') continue;
       const parts = change.p.split('/');
       let node = root;
       addActivity(node, change, step);
@@ -2394,7 +2399,7 @@ function renderChurn(loc) {
   const strip = (activity, rowKey) => el('span', { class: 'strip' }, churn.steps.map(({ snap, captured }, step) => {
     const tick = activity.steps.get(step);
     const kind = !tick ? '' : tick['~'] || (tick['+'] && tick['-']) ? 'modified' : tick['+'] ? 'added' : 'removed';
-    const what = tick ? ['+', '-', '~'].filter(k => tick[k]).map(k => `${k === '-' ? '−' : k}${tick[k]}`).join(' ') : captured ? 'no changes' : 'not captured';
+    const what = tick ? ['+', '-', '~'].filter(k => tick[k]).map(k => `${KIND_SYMBOL[k]}${tick[k]}`).join(' ') : captured ? 'no changes' : 'not captured';
     return el('span', {
       class: `tick ${kind || (captured ? '' : 'unknown')}${snap === viewed ? ' viewed' : ''}`,
       title: `${formatFull(snap.time)} (${timeAgo(snap.time)}): ${what}${tick ? `, ${formatSize(tick.bytes)}` : ''}`,
@@ -2421,8 +2426,7 @@ function renderChurn(loc) {
           a.removed ? el('div', { class: 'churn-fill removed', style: `width:${100 * a.removed / max}%` }) : null),
         el('span', { class: 'num' }, formatSize(sum)),
         strip(a, row.key),
-        el('span', { class: 'agg' }, ['+', '-', '~'].filter(k => a.counts[k]).map(k =>
-          el('span', { class: { '+': 'c-added', '-': 'c-removed', '~': 'c-modified' }[k] }, `${k === '-' ? '−' : k}${a.counts[k].toLocaleString('en-GB')}`)))),
+        el('span', { class: 'agg' }, ['+', '-', '~'].filter(k => a.counts[k]).map(k => kindCount(k, a.counts[k], true)))),
       row.key, row.pick || null, row.open || null);
   };
 
@@ -2449,15 +2453,45 @@ function pickSnapshot(snap, selected, compare) {
 
 /* ---------- Changes in the selected snapshot ---------- */
 
+// Gone from the backup: removed, or ignored (i), which the server marks where kopia's current ignore rules
+// explain a removal, as then it was most likely left out from then on rather than deleted
+const isGone = k => k === '-' || k === 'i';
 // How much bigger a change made things: a file's size added or removed, or how much a modified one grew.
 // Something that only existed in between (*) is gone again, so made no difference.
-const changeDelta = c => (c.k === '+' ? c.s || 0 : c.k === '-' ? -(c.s || 0) : c.k === '~' && c.o != null ? c.s - c.o : 0);
-const KIND_CLASS = { '+': 'c-added', '-': 'c-removed', '~': 'c-modified', d: 'c-modified' };
+const changeDelta = c => (c.k === '+' ? c.s || 0 : isGone(c.k) ? -(c.s || 0) : c.k === '~' && c.o != null ? c.s - c.o : 0);
+const KIND_CLASS = { '+': 'c-added', '-': 'c-removed', '~': 'c-modified', d: 'c-modified', i: 'c-ignored' };
+const KIND_SYMBOL = { '+': '+', '-': '−', '~': '~', d: '•', i: '⊘', '*': '' };
+// A count of one kind of change, like "+3", saying what it counts on hover: files, or with times, how many
+// times things were, where a file changed in several snapshots counts each time
+const KIND_WORDS = { '+': 'added', '-': 'removed', '~': 'modified', d: 'with only their modified date changed', i: 'ignored' };
+const kindCount = (k, n, times = false) => el('span', {
+  class: KIND_CLASS[k],
+  title: times ? `${KIND_WORDS[k][0].toUpperCase()}${KIND_WORDS[k].slice(1)} ${plural(n, 'time')}` : `${plural(n, 'file')} ${KIND_WORDS[k]}`,
+}, `${KIND_SYMBOL[k]}${n.toLocaleString('en-GB')}`);
+
+// The rules things were ignored by, from what the server found, as "X, Y in .kopiaignore": grouped by where
+// they're from, an ignore file (named inside the location) or the policy, the first few of each. The server
+// goes by the rules as they are now.
+function ignoringRules(whys) {
+  const base = state.location?.replace(/\\$/, '').toLowerCase();
+  const where = file => (!file ? 'the policy'
+    : base && file.toLowerCase().startsWith(`${base}\\`) ? file.slice(base.length + 1) : file);
+  const groups = new Map();
+  for (const why of whys) {
+    const rules = groups.get(where(why.file)) || groups.set(where(why.file), new Set()).get(where(why.file));
+    rules.add(why.rule);
+  }
+  return [...groups].map(([file, rules]) => {
+    const listed = [...rules].slice(0, 3).join(', ');
+    return `${listed}${rules.size > 3 ? ' and more' : ''} in ${file}`;
+  }).join(', and ');
+}
+const ignoredReason = why => `Ignored by ${ignoringRules([why])}`;
 
 // kopia lists the files inside folders added or removed whole too, so a folder's counts and net change
 // come from the files below it, whatever happened to the folder itself
 function buildTree(changes) {
-  const newNode = (name, path) => ({ name, path, children: new Map(), counts: { '+': 0, '-': 0, '~': 0, '*': 0, d: 0 }, delta: 0 });
+  const newNode = (name, path) => ({ name, path, children: new Map(), counts: { '+': 0, '-': 0, '~': 0, '*': 0, d: 0, i: 0 }, delta: 0 });
   const root = newNode('', '');
   for (const change of changes) {
     const isDir = change.p.endsWith('/');
@@ -2505,7 +2539,7 @@ function foldDiffs(lists) {
   const result = [];
   for (const { first, last } of history.values()) {
     const existedFirst = first.k !== '+';
-    const existsLast = last.k !== '-';
+    const existsLast = !isGone(last.k);
     if (!existedFirst && !existsLast) {
       // Only existed in between: kept as * at its last size, for showing on request
       result.push({ ...last, k: '*' });
@@ -2514,7 +2548,8 @@ function foldDiffs(lists) {
       if (first.d || last.d) continue;
       result.push({ k: '~', p: last.p, s: last.s, o: first.k === '~' ? first.o : first.s });
     } else {
-      result.push({ ...(existsLast ? last : first), k: existsLast ? '+' : '-' });
+      // Gone by the end the way it went last: removed, or ignored
+      result.push(existsLast ? { ...last, k: '+' } : { ...first, k: last.k, why: last.why });
     }
   }
   return result;
@@ -2612,29 +2647,32 @@ function renderChanges(loc, selected) {
   const inScope = prefix
     ? changes.filter(c => c.p.startsWith(prefix) && c.p.length > prefix.length).map(c => ({ ...c, p: c.p.slice(prefix.length) }))
     : changes;
-  // Files whose modified date changed but not their contents, when asked for, as finding them takes loading
-  const dates = state.filters.d ? dateOnlyChanges(older, newer, state.scope, new Set(inScope.map(c => c.p))) : null;
+  // Files whose modified date changed but not their contents, which the server finds, as kopia's diff only
+  // counts them; like the other kinds, they're counted whether or not they're shown
+  const dates = LIVE ? dateOnlyChanges(older, newer, state.scope, new Set(inScope.map(c => c.p))) : null;
   const scoped = dates ? [...inScope, ...dates.found] : inScope;
   const tree = buildTree(scoped);
   // Files that only existed between the snapshots compared, which are shown greyed out
   const transient = tree.counts['*'];
+  // Files no longer backed up because of the ignore rules, which are otherwise an unexplained drop in size
+  const ignored = tree.counts.i;
   const counts = el('span', { class: 'counts' },
-    el('span', { class: 'c-added' }, `+${tree.counts['+'].toLocaleString('en-GB')}`),
-    el('span', { class: 'c-removed' }, `−${tree.counts['-'].toLocaleString('en-GB')}`),
-    el('span', { class: 'c-modified' }, `~${tree.counts['~'].toLocaleString('en-GB')}`),
-    dates ? el('span', { class: 'c-modified', title: 'Files whose modified date changed but not their contents' },
-      dates.complete ? `•${tree.counts.d.toLocaleString('en-GB')}` : '•…') : null);
+    kindCount('+', tree.counts['+']), kindCount('-', tree.counts['-']), kindCount('~', tree.counts['~']),
+    dates ? (dates.complete ? kindCount('d', tree.counts.d) : el('span', { class: 'c-modified', title: 'Finding files with only their modified date changed…' }, '•…')) : null,
+    kindCount('i', ignored));
   const toggle = k => { state.filters[k] = !state.filters[k]; panel.replaceWith(renderChanges(loc, selected)); };
   const filters = el('span', { class: 'filters' }, ['+', '-', '~'].map(k => el('button', {
-    class: { '+': 'c-added', '-': 'c-removed', '~': 'c-modified' }[k], 'aria-pressed': String(state.filters[k]),
-    title: `Show ${{ '+': 'added', '-': 'removed', '~': 'modified' }[k]}`,
+    class: KIND_CLASS[k], 'aria-pressed': String(state.filters[k]),
+    title: `Show ${KIND_WORDS[k]}`,
     onclick: () => toggle(k),
-  }, k === '-' ? '−' : k)),
+  }, KIND_SYMBOL[k])),
   el('button', {
     class: 'c-modified dates', 'aria-pressed': String(state.filters.d), onclick: () => toggle('d'), disabled: !LIVE,
-    title: LIVE ? 'Also show files whose modified date changed but not their contents, such as ones git or a game touched'
-      : 'Needs the server: run kopia_explorer.py',
-  }, '•'));
+    title: LIVE ? 'Show date-only changes' : 'Needs the server: run kopia_explorer.py',
+  }, '•'),
+  el('button', {
+    class: 'c-ignored', 'aria-pressed': String(state.filters.i), onclick: () => toggle('i'), title: 'Show ignored',
+  }, '⊘'));
   const text = el('input', {
     class: 'filter-text', placeholder: 'Filter paths…', value: state.filterText, 'aria-label': 'Filter paths',
     oninput: event => { state.filterText = event.target.value; treeBox.replaceChildren(...topFolder(filtered())); },
@@ -2669,17 +2707,8 @@ function renderChanges(loc, selected) {
   }
   treeBox.append(...topFolder(visible));
   if (!visible.children.size) {
-    // kopia stored the folder differently, so with no contents changed, dates did: say so, rather than nothing
-    const parts = state.scope ? state.scope.split('/') : [];
-    const folderObj = snap => (!state.scope ? snap.root
-      : snapshotListing(snap, parts.slice(0, -1).join('/'))?.find(e => e.n === parts[parts.length - 1] && e.t === 'd')?.o);
-    const [before, after] = [folderObj(older), folderObj(newer)];
-    const datesHidden = LIVE && !state.filters.d && !scoped.length && before && after && before !== after;
-    treeBox.append(datesHidden
-      ? el('p', { class: 'note' }, 'No contents changed here, only modified dates. ',
-        el('button', { class: 'linklike', onclick: () => toggle('d') }, 'Show them'))
-      : el('p', { class: 'note' }, scoped.length ? 'Nothing matches the filters.'
-        : state.scope ? 'Nothing in this folder changed in this snapshot.' : 'No changes in this snapshot.'));
+    treeBox.append(el('p', { class: 'note' }, scoped.length ? 'Nothing matches the filters.'
+      : state.scope ? 'Nothing in this folder changed in this snapshot.' : 'No changes in this snapshot.'));
   }
 
   // How several snapshots' changes were combined, in as few words as what applies needs
@@ -2694,6 +2723,16 @@ function renderChanges(loc, selected) {
     combined ? el('p', { class: 'note', style: 'margin:-4px 0 10px' }, combined) : null,
     treeBox);
   return panel;
+}
+
+// The ignore rules behind what's ignored in a folder of the changes tree, for its tooltip
+function ignoredRules(node) {
+  const whys = [];
+  (function walk(n) {
+    if (n.change?.why) whys.push(n.change.why);
+    for (const child of n.children.values()) walk(child);
+  })(node);
+  return ignoringRules(whys);
 }
 
 // Render the whole changes tree from its root; every folder starts open
@@ -2747,12 +2786,17 @@ function renderNode(original, sizePositions, whole = false) {
   const kind = change?.k;
   // A folder where only dates changed, like settings a game rewrote unchanged, is grouped like one added or
   // removed whole: a dot, collapsed (except the top folder), with how many on hover
-  const datesOnly = !change && node.counts.d > 0 && !node.counts['+'] && !node.counts['-'] && !node.counts['~'] && !node.counts['*'];
-  const symClass = KIND_CLASS[datesOnly ? 'd' : kind];
+  const only = k => !change && node.counts[k] > 0 && ['+', '-', '~', '*', 'd', 'i'].every(other => other === k || !node.counts[other]);
+  const datesOnly = only('d');
+  // Likewise a folder where everything that went was ignored, like a game's data a rule now leaves out
+  const ignoredOnly = only('i');
+  const shownKind = datesOnly ? 'd' : ignoredOnly ? 'i' : kind;
+  const symClass = KIND_CLASS[shownKind];
   const wrapper = el('div');
   let open = node.children.size > 0 &&
-    // Folders start open, except ones added or removed whole, or with only dates changed, whose row says enough
-    (changeFolders.has(node.path) ? changeFolders.get(node.path) : !change && !(datesOnly && !whole));
+    // Folders start open, except ones added or removed whole, or with only dates changed or only ignored
+    // files, whose row says enough
+    (changeFolders.has(node.path) ? changeFolders.get(node.path) : !change && !((datesOnly || ignoredOnly) && !whole));
   const childBox = el('div', { class: 'children' });
 
   const fill = () => childBox.replaceChildren(...renderTree(node, sizePositions));
@@ -2774,7 +2818,10 @@ function renderNode(original, sizePositions, whole = false) {
   const count = k => el('span', { class: KIND_CLASS[k] },
     isFolder && node.counts[k] ? node.counts[k].toLocaleString('en-GB') : '');
   const delta = isFolder ? node.delta : changeDelta(change);
-  const deltaCell = delta
+  const deltaCell = delta && shownKind === 'i'
+    // Smaller, but nothing on disk was lost, so not on the red scale
+    ? el('span', { class: 'delta c-ignored' }, signedSize(delta))
+    : delta
     ? el('span', { class: 'delta', style: `color:${textColour(changeRgb(delta, sizePositions))}` }, signedSize(delta))
     // Files that changed without changing size, including just their dates, changed by nothing
     : el('span', { class: 'delta muted' }, change && !isFolder && (kind === '~' || kind === 'd') ? '0 B' : '');
@@ -2793,14 +2840,16 @@ function renderNode(original, sizePositions, whole = false) {
   }, cut ? el('span', { class: 'muted' }, label.slice(0, cut)) : null, label.slice(cut) + (isFolder ? '/' : ''));
   // Things that only existed in between, and folders with nothing else in them, are greyed out with no symbol;
   // files whose modified date changed but not their contents get a small dot
-  const transient = kind === '*' || (!change && node.counts['*'] > 0 &&
-    !node.counts['+'] && !node.counts['-'] && !node.counts['~'] && !node.counts.d);
+  const transient = kind === '*' || only('*');
   const rowTitle = kind === 'd' ? `Only its modified date changed, from ${formatFull(change.from)} to ${formatFull(change.to)}`
-    : datesOnly ? `${plural(node.counts.d, 'file')} in here only had their modified dates change`
+    : datesOnly ? `${plural(node.counts.d, 'file')} ${KIND_WORDS.d}`
+    : kind === 'i' ? ignoredReason(change.why)
+    : ignoredOnly ? `${plural(node.counts.i, 'file')} ignored by ${ignoredRules(node)}`
     : transient ? 'Only existed in between' : null;
   // Folders that only contain changes have no symbol or size of their own
-  wrapper.append(el('div', { class: `node${isFolder ? ' folder' : ''}${transient ? ' transient' : ''}${kind === 'd' || datesOnly ? ' date-only' : ''}`, title: rowTitle },
-    twisty, el('span', { class: `sym ${symClass || ''}` }, kind === '-' ? '−' : kind === 'd' || datesOnly ? '•' : kind === '*' ? '' : kind || ''), name,
+  const rowClass = `${isFolder ? ' folder' : ''}${transient ? ' transient' : ''}${shownKind === 'd' ? ' date-only' : ''}${shownKind === 'i' ? ' ignored' : ''}`;
+  wrapper.append(el('div', { class: `node${rowClass}`, title: rowTitle },
+    twisty, el('span', { class: `sym ${symClass || ''}` }, KIND_SYMBOL[shownKind] ?? ''), name,
     count('+'), count('-'), count('~'),
     el('span', { class: 'size' }, change ? formatSize(change.s) : ''), deltaCell));
   if (node.children.size) {
@@ -2884,12 +2933,12 @@ function stepChange(older, newer, rel, isFolder) {
   if (older.root === newer.root) return { identical: true };
   const list = api.diff(older.id, newer.id);
   if (!list) return null;
-  const result = { counts: { '+': 0, '-': 0, '~': 0 } };
+  const result = { counts: { '+': 0, '-': 0, '~': 0, i: 0 } };
   for (const change of list) {
     if (!isFolder) {
-      if (change.p === rel) Object.assign(result, { kind: change.k, size: change.s, oldSize: change.o });
+      if (change.p === rel) Object.assign(result, { kind: change.k, size: change.s, oldSize: change.o, why: change.why });
     } else if (rel && change.p === `${rel}/`) {
-      Object.assign(result, { kind: change.k, size: change.s, files: change.f });
+      Object.assign(result, { kind: change.k, size: change.s, files: change.f, why: change.why });
     } else if ((!rel || change.p.startsWith(`${rel}/`)) && !change.p.endsWith('/')) {
       result.counts[change.k]++;
     }
@@ -2907,7 +2956,7 @@ function stepChange(older, newer, rel, isFolder) {
 }
 
 const changedAtAll = change => !!change && !change.identical &&
-  (!!change.kind || change.counts['+'] + change.counts['-'] + change.counts['~'] > 0);
+  (!!change.kind || change.counts['+'] + change.counts['-'] + change.counts['~'] + change.counts.i > 0);
 
 // What a step did to the path, as a line under the snapshot
 function describeStep(change, isFolder) {
@@ -2915,12 +2964,12 @@ function describeStep(change, isFolder) {
   if (change === null) return el('span', { class: 'muted' }, !LIVE ? 'Changes not captured in the mockup' : pending.size ? 'Loading changes…' : 'Changes couldn\'t be loaded (see the bottom of the page)');
   // Nothing changed in it, whether or not anything did elsewhere in the location, which hovering says
   if (change.identical) return el('span', { class: 'muted', title: 'The whole snapshot is identical to the one before' }, 'No changes');
-  const kinds = { '+': ['c-added', 'Added'], '-': ['c-removed', 'Removed'], '~': ['c-modified', 'Modified'] };
+  const kinds = { '+': ['c-added', 'Added'], '-': ['c-removed', 'Removed'], '~': ['c-modified', 'Modified'], i: ['c-ignored', 'Ignored'] };
   if (change.kind && (change.kind !== '~' || !isFolder)) {
     const [cls, word] = kinds[change.kind];
     const delta = change.kind === '~' && change.oldSize != null && change.size !== change.oldSize ? ` (${signedSize(change.size - change.oldSize)})` : '';
-    const what = change.kind === '-' ? '' : ` · ${formatSize(change.size)}${delta}${isFolder && change.files != null ? ` in ${plural(change.files, 'file')}` : ''}`;
-    return el('span', {}, el('span', { class: cls }, word), what);
+    const what = isGone(change.kind) ? '' : ` · ${formatSize(change.size)}${delta}${isFolder && change.files != null ? ` in ${plural(change.files, 'file')}` : ''}`;
+    return el('span', { title: change.why ? ignoredReason(change.why) : null }, el('span', { class: cls }, word), what);
   }
   if (!changedAtAll(change)) {
     // Until the listings to compare are in, it isn't known which; if they can't be, all that's known is the diff's
@@ -2932,8 +2981,7 @@ function describeStep(change, isFolder) {
   }
   // Only the kinds of change that happened, to keep the panel quiet
   return el('span', { class: 'counts', style: 'font-size:inherit;gap:8px' },
-    ['+', '-', '~'].filter(k => change.counts[k]).map(k =>
-      el('span', { class: kinds[k][0] }, `${k === '-' ? '−' : k}${change.counts[k].toLocaleString('en-GB')}`)));
+    ['+', '-', '~', 'i'].filter(k => change.counts[k]).map(k => kindCount(k, change.counts[k])));
 }
 
 // Whether the picked path is a folder: known if it was clicked, otherwise looked up in the snapshot
