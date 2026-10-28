@@ -304,6 +304,27 @@ th[aria-sort] { color: var(--ink); }
 .snaprow .keep + .ago { margin-left: 0; }
 .snaprow .ago { margin-left: auto; color: var(--muted); font-family: var(--font-ui); white-space: nowrap; }
 .snaprow.unchanged .when { color: var(--muted); font-weight: 400; }
+.snaprow.deleting { opacity: 0.5; cursor: default; }
+/* Deleting a snapshot: a cross at the end of its row, there only while pointing at the row */
+.snaprow .delete {
+  flex: none; margin-left: auto; padding: 0 2px; border: 0; background: none; color: var(--muted);
+  font-size: 0.95rem; line-height: 1; cursor: pointer; visibility: hidden;
+}
+.snaprow .disk ~ .delete { margin-left: 6px; }
+.snaprow:hover .delete, .snaprow .delete:focus-visible { visibility: visible; }
+.snaprow .delete:hover { color: var(--removed); }
+
+/* Asking before something that can't be undone */
+.confirm {
+  width: min(440px, calc(100vw - 32px)); padding: 18px 20px; border: 1px solid var(--axis); border-radius: 8px;
+  background: var(--surface); color: var(--ink); box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+.confirm::backdrop { background: rgb(0 0 0 / 45%); }
+.confirm h2 { margin: 0 0 10px; font-size: 1rem; }
+.confirm p { margin: 0 0 8px; font-size: 0.88rem; color: var(--ink-2); overflow-wrap: anywhere; }
+.confirm p.what { color: var(--ink); }
+.confirm .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.btn.danger:not(:disabled) { background: var(--removed); border-color: var(--removed); color: #fff; }
 .elsewhere { margin-top: 12px; font-size: 0.8rem; color: var(--muted); }
 .elsewhere button { background: none; border: 0; padding: 0; color: var(--accent); font-family: var(--font-data); font-size: inherit; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -362,7 +383,7 @@ th[aria-sort] { color: var(--ink); }
 .chart-legend .hidden-item .swatch { background: none; border: 1px solid var(--axis); }
 .chart-legend .hidden-item .name { text-decoration: line-through; }
 
-/* Restores and backups, in a panel at the bottom right: each with its progress, then how it went */
+/* Backups, restores and deletions, in a panel at the bottom right: each with its progress, then how it went */
 .jobs {
   position: fixed; right: 16px; bottom: 16px; z-index: 15; width: min(460px, calc(100vw - 32px)); max-height: 50vh; overflow-y: auto;
   background: var(--surface); border: 1px solid var(--axis); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
@@ -425,7 +446,7 @@ th[aria-sort] { color: var(--ink); }
   <aside class="history" id="history" hidden></aside>
 </div>
 <div class="progress" id="progress" role="status" hidden></div>
-<section class="jobs" id="jobs" aria-label="Restores and backups" aria-live="polite" hidden></section>
+<section class="jobs" id="jobs" aria-label="Backups, restores and deletions" aria-live="polite" hidden></section>
 
 <script src="mock-data.js"></script>
 <!-- A module, so it can wait for the snapshots to load before building the page, without freezing it -->
@@ -538,8 +559,9 @@ const api = {
     try {
       const response = await fetch('/api/storage');
       if (!response.ok) throw new Error(response.statusText || `Error ${response.status}`);
-      const { repository, locations } = await response.json();
+      const { repository, locations, read } = await response.json();
       DATA.repository = repository;
+      storageRead = read;
       return locations;
     } catch (error) {
       main.replaceChildren(el('div', { class: 'panel empty' }, `Couldn't read the repository: ${
@@ -594,8 +616,12 @@ let jobList = [];
 let jobsShown = false;
 let jobPolling = null;
 let jobsUnreachable = false;  // The server stopped answering while following them
-// Still going: choosing where, restoring, moving the finished restore into place, backing up, or cancelling
-const jobActive = j => ['picking', 'restoring', 'finishing', 'running', 'cancelling'].includes(j.state);
+// Still going: choosing where, restoring, moving the finished restore into place, backing up, cancelling, or
+// deleting a snapshot
+const jobActive = j => ['picking', 'restoring', 'finishing', 'running', 'cancelling', 'deleting'].includes(j.state);
+// Whether a snapshot is being deleted, so it can't be opened or restored from meanwhile; once deleted, it's
+// still listed until the snapshots have been read again
+const beingDeleted = snap => jobList.some(j => j.kind === 'delete' && j.snapshot === snap.id && j.state !== 'failed');
 // A location's backup still going, if there is one
 const backupOf = loc => jobList.find(j => j.kind === 'backup' && j.source === loc.path && jobActive(j));
 
@@ -613,7 +639,7 @@ function backUp(loc) {
   startJob('/api/backup', { source: loc.path }, { kind: 'backup', name: loc.path, source: loc.path });
 }
 
-// Start a restore or backup, or if the server won't, list it as failed, saying why
+// Start a restore, backup or delete, or if the server won't, list it as failed, saying why
 async function startJob(url, body, job) {
   try {
     jobList = [...jobList, await api.post(url, body)];
@@ -656,24 +682,99 @@ async function cancelBackup(job) {
   jobsChanged();
 }
 
-// Read the snapshots again, quietly, as a backup has made one. Each location's list is replaced in place,
-// with the snapshots already known kept as the same objects, so everything holding on to them still finds
-// them. A location that's new shows when the page is reloaded.
-async function refreshStorage() {
-  try {
-    const response = await fetch('/api/storage');
-    if (!response.ok) return;
-    for (const fresh of (await response.json()).locations) {
-      const loc = storage.find(l => l.path === fresh.path);
-      if (!loc) continue;
-      const known = new Map(loc.snapshots.map(s => [s.id, s]));
-      loc.snapshots = fresh.snapshots.map(s => Object.assign(known.get(s.id) || {}, s));
+// Delete a snapshot for good, once a dialog has said exactly what goes: the whole snapshot of the
+// location, whatever's being looked at inside it, and what that does and doesn't free up. It's deleted in
+// the background, followed in the panel at the bottom, with its row marked until it's gone.
+function confirmDelete(loc, snap, rel, isFolder) {
+  const kept = KEEP_KINDS.find(([kind]) => snap.keep?.some(r => r.startsWith(`${kind}-`)));
+  const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
+  const remove = el('button', {
+    class: 'btn danger',
+    onclick: () => {
+      dialog.close();
+      jobsShown = true;
+      startJob('/api/snapshot/delete', { id: snap.id },
+        { kind: 'delete', name: loc.path, source: loc.path, snapshot: snap.id, snapshotTime: snap.time }).then(render);
+    },
+  }, 'Delete');
+  const inside = rel && `${rel.replaceAll('/', '\\')}${isFolder ? '\\' : ''}`;
+  const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
+    el('h2', { id: 'confirm-title' }, 'Delete this snapshot?'),
+    el('p', { class: 'what' }, el('b', {}, loc.path), `, ${formatFull(snap.time)} (${shortId(snap.id)})`,
+      snap.size != null ? `, ${formatSize(snap.size)}` : '', isCancelled(snap) ? ', cancelled before it finished' : ''),
+    el('p', {}, inside ? `This deletes the whole snapshot of ${loc.path}, not just ${inside}. ` : '', 'It can\'t be undone.'),
+    kept && kept[0] !== 'latest' ? el('p', {}, `It's kept ${kept[1]} by kopia's retention policy at the moment, so another snapshot may take its place.`) : null,
+    el('p', {}, 'Space on disk is only freed once kopia\'s maintenance runs, and only for data no other snapshot uses.'),
+    el('div', { class: 'actions' }, cancel, remove));
+  // Gone once closed, however that happens
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  cancel.focus();
+}
+
+// Backups and deletes that finished after the snapshots were last read, by the server's clock, applied on
+// top of them: a deleted snapshot taken out, and a new one put in from what kopia said when it made it. Its
+// space on disk isn't known until they're read again, which can take a while, as kopia works out storage
+// stats then, so meanwhile the location's total stays as it was.
+let storageRead = 0;
+function applyJobs() {
+  for (const j of jobList) {
+    const loc = j.finished > storageRead && storage.find(l => l.path === j.source);
+    if (!loc) continue;
+    if (j.kind === 'delete' && j.state === 'done') loc.snapshots = loc.snapshots.filter(s => s.id !== j.snapshot);
+    if (j.kind === 'backup' && j.info && !loc.snapshots.some(s => s.id === j.info.id)) {
+      const made = { ...j.info, onDisk: null, total: locationTotal(loc) };
+      loc.snapshots = [...loc.snapshots, made].sort((a, b) => a.time.localeCompare(b.time));
     }
-    treePositions = treeScale();
-    render();
-  } catch {
-    // It's read again on the next backup, or when the page is reloaded
   }
+}
+
+// After the snapshots have changed: everything redrawn, with viewing or comparing with a snapshot that's
+// been deleted going back to the default
+function snapshotsChanged() {
+  treePositions = treeScale();
+  const gone = id => id && !storage.some(l => l.snapshots.some(s => s.id === id));
+  if (gone(state.snapshot) || gone(state.compare)) {
+    return navigate({ snapshot: gone(state.snapshot) ? null : state.snapshot, compare: gone(state.compare) ? null : state.compare }, true);
+  }
+  render();
+}
+
+// Read the snapshots again, quietly, as a backup has made one or one's been deleted. Each location's list is
+// replaced in place, with the snapshots already known kept as the same objects, so everything holding on to
+// them still finds them. A location that's new shows when the page is reloaded. One read at a time: asked for
+// again meanwhile, it reads once more after, to catch what changed since it started.
+let refreshing = null;
+let refreshAgain = false;
+function refreshStorage() {
+  if (refreshing) {
+    refreshAgain = true;
+    return refreshing;
+  }
+  refreshing = (async () => {
+    do {
+      refreshAgain = false;
+      try {
+        const response = await fetch('/api/storage');
+        if (!response.ok) return;
+        const { locations, read } = await response.json();
+        for (const fresh of locations) {
+          const loc = storage.find(l => l.path === fresh.path);
+          if (!loc) continue;
+          const known = new Map(loc.snapshots.map(s => [s.id, s]));
+          loc.snapshots = fresh.snapshots.map(s => Object.assign(known.get(s.id) || {}, s));
+        }
+        storageRead = read;
+        applyJobs();
+        snapshotsChanged();
+      } catch {
+        // It's read again after the next backup or delete, or when the page is reloaded
+        return;
+      }
+    } while (refreshAgain);
+  })().finally(() => { refreshing = null; });
+  return refreshing;
 }
 
 // Open something in Windows Explorer, via the server; if that fails, the button says why
@@ -700,11 +801,16 @@ function followJobs() {
       }
       return;
     }
-    // A backup that's just ended has made a snapshot, even if cancelled
-    const ended = list.some(j => j.kind === 'backup' && !jobActive(j) && jobList.some(o => o.id === j.id && jobActive(o)));
+    // A backup that's just ended has made a snapshot, even if cancelled, and a delete has removed one
+    const ended = list.some(j => j.kind !== 'restore' && !jobActive(j) && jobList.some(o => o.id === j.id && jobActive(o)));
     jobList = list;
     jobsChanged();
-    if (ended) refreshStorage();
+    // Shown straight away, then read again for what isn't known yet
+    if (ended) {
+      applyJobs();
+      snapshotsChanged();
+      refreshStorage();
+    }
     if (!jobList.some(jobActive)) {
       clearInterval(jobPolling);
       jobPolling = null;
@@ -720,6 +826,7 @@ function renderJobs() {
   if (panel.hidden) return;
   const item = r => {
     if (r.kind === 'backup') return backupItem(r);
+    if (r.kind === 'delete') return deleteItem(r);
     const percent = r.totalBytes ? 100 * r.bytes / r.totalBytes : 0;
     const status = {
       // After a few seconds, the picker may well have opened behind something
@@ -748,11 +855,14 @@ function renderJobs() {
   const of = kind => jobList.filter(j => j.kind === kind);
   const going = kind => of(kind).filter(jobActive).length;
   const active = jobList.filter(jobActive).length;
+  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['delete', 'deletions']]
+    .filter(([kind]) => of(kind).length).map(([, name]) => name);
+  const listed = kinds.length > 1 ? `${kinds.slice(0, -1).join(', ')} and ${kinds[kinds.length - 1]}` : kinds[0];
   const heading = [
     going('backup') && `Backing up ${plural(going('backup'), 'location')}`,
     going('restore') && `Restoring ${going('restore')} of ${of('restore').length}`,
-  ].filter(Boolean).join(' · ')
-    || `${!of('backup').length ? 'Restores' : !of('restore').length ? 'Backups' : 'Backups and restores'} (${jobList.length})`;
+    going('delete') && `Deleting ${plural(going('delete'), 'snapshot')}`,
+  ].filter(Boolean).join(' · ') || `${listed[0].toUpperCase()}${listed.slice(1)} (${jobList.length})`;
   panel.replaceChildren(
     el('div', { class: 'jobs-head' },
       el('h2', {}, heading),
@@ -769,6 +879,20 @@ function renderJobs() {
       active ? null : el('button', { class: 'btn', 'aria-label': 'Close', title: 'Close', onclick: () => { jobsShown = false; renderJobs(); } }, '×')),
     el('ul', {}, jobList.map(item)));
   if (atBottom) panel.scrollTop = panel.scrollHeight;
+}
+
+// A snapshot being deleted, in the panel at the bottom
+function deleteItem(j) {
+  const status = {
+    deleting: () => el('div', { class: 'status muted' }, 'Deleting…'),
+    done: () => el('div', { class: 'status', title: 'Space on disk is freed once kopia\'s maintenance runs' },
+      el('span', { class: 'c-added' }, '✓ Deleted')),
+    failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
+  }[j.state]();
+  return el('li', { class: `${j.state}${jobActive(j) ? ' active' : ''}` },
+    el('div', { class: 'what' }, el('span', { class: 'muted' }, 'Snapshot of '), el('b', {}, j.source),
+      el('span', { class: 'muted' }, `, ${formatFull(j.snapshotTime)}`)),
+    status);
 }
 
 // A backup in the panel at the bottom: how far it's got, which kopia can only say once it's worked out
@@ -854,6 +978,7 @@ const shortId = id => id.slice(0, 8);
 // of one still going
 const isCancelled = snap => snap.incomplete === 'canceled';
 const unfinished = snap => (isCancelled(snap) ? 'was cancelled before it finished' : 'is still in progress');
+const backingUpNow = loc => loc.snapshots.some(s => s.incomplete && !isCancelled(s));
 const plural = (n, word) => `${n.toLocaleString('en-GB')} ${word}${n === 1 ? '' : 's'}`;
 // Append children, skipping empty optional ones (append() would print null as text)
 const appendAll = (parent, ...children) => parent.append(...children.flat(Infinity).filter(c => c != null && c !== false));
@@ -1274,7 +1399,7 @@ function renderLocations() {
         prefix ? el('span', { class: 'prefix' }, prefix) : null,
         // Folders end in a backslash, like drives and the contents tables; the PC isn't a folder
         el('span', { class: 'text' }, item.tree?.root || label.endsWith('\\') ? label : `${label}\\`),
-        loc?.snapshots.some(s => s.incomplete && !isCancelled(s)) ? el('span', { class: 'badge', title: 'A snapshot is in progress' }, 'Live') : null),
+        loc && backingUpNow(loc) ? el('span', { class: 'badge', title: 'A snapshot is in progress' }, 'Live') : null),
       // The PC's total is everything, so it's left off the colour scale
       total != null
         ? el('span', { class: 'total', style: total && !item.tree.root ? `color:${textColour(gradientRgb(treePositions.get(total)))}` : null }, formatSize(total))
@@ -1348,7 +1473,7 @@ function renderContents(node) {
     return {
       // Folders get a backslash added, which drives have already
       key: inner.path, prefix, label: label.replace(/\\$/, ''), folder: true, location: loc,
-      live: locationsBelow(inner).some(l => l.snapshots.some(s => s.incomplete)),
+      live: locationsBelow(inner).some(backingUpNow),
       ...latestSummary(inner),
       // A location shows its history on a single click; plain folders aren't backed up themselves
       pick: loc ? () => { pickedIsFolder = true; navigate({ history: loc.path }); } : null,
@@ -1896,8 +2021,9 @@ function restorePanel({ selected, rel, present, size, what, facts, buttons = [],
     el('dl', { class: `facts${wide ? ' wide' : ''}` }, facts.map(detail)),
     el('div', { class: 'facts-actions' },
       el('button', {
-        class: 'btn primary', disabled: !LIVE || !present,
+        class: 'btn primary', disabled: !LIVE || !present || beingDeleted(selected),
         title: !LIVE ? 'Restoring needs the server: run kopia_explorer.py' : !present ? 'It isn\'t in this snapshot'
+          : beingDeleted(selected) ? 'This snapshot is being deleted'
           : `${what === 'folder' ? 'Pick a folder to put it in' : 'Pick where to save it'}, keeping modified dates, as it was on ${formatFull(selected.time)}`,
         onclick: () => restoreItem(selected, rel, what === 'folder'),
       }, `Restore this ${what}${size != null ? ` (${formatSize(size)})` : ''}…`),
@@ -2790,7 +2916,7 @@ function renderFolderSide(aside) {
           el('span', { class: 'when mono churn-name' },
             el('span', { class: 'lead' }, loc.path.slice(node.root ? 0 : state.folder.replace(/\\$/, '').length + 1, cut)),
             el('span', { class: 'own' }, `${loc.path.slice(cut)}\\`)),
-          loc.snapshots.some(s => s.incomplete) ? el('span', { class: 'badge' }, 'Live') : null,
+          backingUpNow(loc) ? el('span', { class: 'badge' }, 'Live') : null,
           newest ? el('span', { class: 'disk', title: state.asOf ? 'On disk as of this snapshot' : 'On disk' }, formatSize(onDisk)) : null),
         el('div', { class: 'what' },
           newest ? el('span', {}, `${state.asOf ? 'Snapshot' : 'Latest'} ${formatFull(newest.time)}`)
@@ -2838,7 +2964,8 @@ function renderSide() {
 
   const row = (snap, change, extraClass = '') => {
     const at = complete.indexOf(snap);
-    const classes = ['snaprow', extraClass,
+    const deleting = beingDeleted(snap);
+    const classes = ['snaprow', extraClass, deleting ? 'deleting' : '',
       snap === selected ? 'viewing' : '', snap === other ? 'compared' : '',
       // Taken after the as-of date
       state.asOf && new Date(snap.time) > new Date(state.asOf) ? 'after' : '',
@@ -2853,8 +2980,9 @@ function renderSide() {
         : navigate({ location: loc.path, asOf: asOfFor(loc, snap), scope: rel, file: null, history: null });
     return el('li', {
       class: classes.filter(Boolean).join(' '),
-      title: snap.incomplete ? `This snapshot ${unfinished(snap)}` : here ? 'Click to view · Shift-click to compare with it' : 'Click to open at this snapshot',
-      onclick: snap.incomplete ? null : event => (here && event.shiftKey ? pickSnapshot(snap, selected, true) : open()),
+      title: deleting ? 'This snapshot is being deleted' : snap.incomplete ? `This snapshot ${unfinished(snap)}`
+        : here ? 'Click to view · Shift-click to compare with it' : 'Click to open at this snapshot',
+      onclick: snap.incomplete || deleting ? null : event => (here && event.shiftKey ? pickSnapshot(snap, selected, true) : open()),
     },
       el('div', { class: 'top' },
         el('span', { class: 'marker' }, snap === selected ? '●' : snap === other ? '○' : ''),
@@ -2862,12 +2990,21 @@ function renderSide() {
         snap === latest(loc) ? el('span', { class: 'tag' }, 'latest') : null,
         snap === other ? el('span', { class: 'tag' }, 'compared') : null,
         snap.incomplete ? el('span', { class: 'badge' }, isCancelled(snap) ? 'Cancelled' : 'In progress') : null,
+        deleting ? el('span', { class: 'badge' }, 'Deleting…') : null,
         sizeAt(snap),
         // Space the snapshot added on disk is for the whole location, so it's only shown for the location
         // itself; for anything inside, the row's own change says what happened to it
-        rel ? null : el('span', { class: 'disk', title: 'Added on disk by this snapshot, for the whole location' },
-          snap.onDisk ? el('span', { class: 'swatch', style: `background:${fillColour(gradientRgb(positions.get(snap.onDisk)))}` }) : null,
-          `+${formatSize(snap.onDisk)}`)),
+        // A snapshot just made doesn't have it yet, until the snapshots are read again
+        rel ? null : snap.onDisk == null
+          ? el('span', { class: 'disk muted', title: 'Working out how much this snapshot added on disk…' }, '…')
+          : el('span', { class: 'disk', title: 'Added on disk by this snapshot, for the whole location' },
+            snap.onDisk ? el('span', { class: 'swatch', style: `background:${fillColour(gradientRgb(positions.get(snap.onDisk)))}` }) : null,
+            `+${formatSize(snap.onDisk)}`),
+        // Not one still being made, which kopia replaces as it goes
+        LIVE && !deleting && (!snap.incomplete || isCancelled(snap)) ? el('button', {
+          class: 'delete', 'aria-label': 'Delete this snapshot', title: 'Delete this snapshot…',
+          onclick: event => { event.stopPropagation(); confirmDelete(loc, snap, rel, isFolder); },
+        }, '×') : null),
       el('div', { class: 'what' },
         snap.incomplete ? el('span', { class: 'muted' }, 'Stored so far') : describeStep(change, isFolder),
         keptFor(snap),

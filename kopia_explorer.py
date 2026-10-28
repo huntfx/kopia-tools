@@ -1,5 +1,6 @@
 """Browse kopia snapshots in a web page: backup locations, their snapshots, folder contents, what changed
-between snapshots, and file histories, restore files and folders from any snapshot, and back up a location now.
+between snapshots, and file histories, restore files and folders from any snapshot, back up a location now, and
+delete snapshots.
 
 Runs a small local web server for the page in explorer/, fetching from kopia as you browse. Diffs and
 folder listings never change for a given snapshot, so they're cached on disk, in kopia-explorer in the
@@ -121,6 +122,8 @@ class Repository:
         """Every source with its snapshots, oldest first, as the page wants them."""
         with self.lock:
             self.progress = {'step': 'Reading the snapshots'}
+            # When they were read, so the page knows which backups and deletes since then it still has to apply
+            read = time.time()
             snapshots = list_snapshots(include_incomplete=True)
             by_source = {}
             for snap in snapshots:
@@ -151,7 +154,7 @@ class Repository:
                 result.append({'path': source, 'host': snaps[0]['source']['host'], 'user': snaps[0]['source']['userName'],
                                'snapshots': [snapshot_info(s, stats.get(s['id'], {})) for s in snaps]})
             self.progress = {}
-            return {'repository': self.info, 'locations': result}
+            return {'repository': self.info, 'locations': result, 'read': read}
 
     def ignore(self, source):
         """The ignore rules for a source, from its policy and the .kopiaignore files on disk, read once
@@ -313,7 +316,7 @@ class Dialogs:
 
 dialogs = Dialogs()
 restored = set()               # Paths restored, which are the only ones the page may show in Explorer
-jobs = {}                        # Every restore and backup since the server started, by ID, for the page to follow
+jobs = {}                        # Every restore, backup and delete since the server started, by ID, for the page to follow
 job_ids = itertools.count(1)
 backup_processes = {}            # Backups still running, by job ID, so they can be cancelled
 PROGRESS = re.compile(r'Processed (\d+) \(([\d.]+) (\w+)\) of (\d+) \(([\d.]+) (\w+)\)')
@@ -348,6 +351,8 @@ def kopia_reason(error):
 def start_restore(snapshot_id, path, is_folder):
     """Restore a file or folder from a snapshot in the background, returning its progress record."""
     snap = repository.snapshots[snapshot_id]
+    if being_deleted(snapshot_id):
+        raise BusyError('That snapshot is being deleted')
     # One at a time while choosing where, so clicks don't queue up folder pickers behind one another
     choosing = next((j for j in jobs.values() if j['state'] == 'picking'), None)
     if choosing:
@@ -513,6 +518,10 @@ def run_backup(job, process):
         if process.wait() or not result:
             raise RuntimeError(last or f'kopia snapshot create failed with exit code {process.returncode}')
         job['snapshot'] = result['id']
+        # Known straight away, so it can be browsed, and the page can show it, before the snapshots are read
+        # again, which waits on storage stats; those aren't known yet
+        repository.snapshots[result['id']] = result
+        job['info'] = snapshot_info(result, {})
         summary = result['rootEntry'].get('summ', {})
         job.update(files=summary.get('files', job['files']), bytes=summary.get('size', job['bytes']),
                    errors=summary.get('numFailed', 0))
@@ -541,6 +550,40 @@ def cancel_backup(job_id):
         timer.daemon = True
         timer.start()
     return job
+
+
+def being_deleted(snapshot_id):
+    return any(j['kind'] == 'delete' and j['snapshot'] == snapshot_id and not j['finished'] for j in jobs.values())
+
+
+def start_delete(snapshot_id):
+    """Delete a snapshot from the repository for good, in the background, returning its progress record. Not one
+    still being made, which kopia replaces as it goes; a cancelled one is fine. Only the snapshot's record goes, so
+    a restore already running from it carries on: its data stays until kopia's maintenance finds nothing uses it."""
+    snap = repository.snapshots[snapshot_id]
+    if snap.get('incomplete') and snap['incomplete'] != 'canceled':
+        raise BusyError('That snapshot is still being made')
+    if being_deleted(snapshot_id):
+        raise BusyError('That snapshot is already being deleted')
+    job = {
+        'id': next(job_ids), 'kind': 'delete', 'name': snap['source']['path'], 'source': snap['source']['path'],
+        'snapshot': snapshot_id, 'snapshotTime': snap['startTime'], 'state': 'deleting', 'error': None,
+        'started': time.time(), 'finished': None,
+    }
+    jobs[job['id']] = job
+    threading.Thread(target=run_delete, args=(job,), daemon=True).start()
+    return job
+
+
+def run_delete(job):
+    try:
+        kopia('snapshot', 'delete', job['snapshot'], '--delete')
+        repository.snapshots.pop(job['snapshot'], None)
+        job['state'] = 'done'
+    except Exception as e:
+        job.update(state='failed', error=kopia_reason(e))
+    finally:
+        job['finished'] = time.time()
 
 
 def reveal(path):
@@ -595,7 +638,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         # Only the explorer's own page sends this header: a web page elsewhere can't without the browser
-        # asking first, which this server never allows, so other sites can't make it restore or back up anything
+        # asking first, which this server never allows, so other sites can't make it restore, back up or delete anything
         if self.headers.get('X-Kopia-Explorer') != '1':
             return self.send_error(403, 'Only the explorer page can do that')
         try:
@@ -606,6 +649,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(start_backup(body['source']))
             if self.path == '/api/backup/cancel':
                 return self.send_json(cancel_backup(body['id']))
+            if self.path == '/api/snapshot/delete':
+                return self.send_json(start_delete(body['id']))
             if self.path == '/api/jobs/clear':
                 for job in [j for j in jobs.values() if j['finished']]:
                     del jobs[job['id']]
