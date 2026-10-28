@@ -132,13 +132,19 @@ class Repository:
             for snap in snapshots:
                 by_source.setdefault(snap['source']['path'], []).append(snap)
                 self.snapshots[snap['id']] = snap
+            # Folders with a policy of their own are backup locations too, as kopia's scheduler backs them up,
+            # even before their first snapshot, which they don't have yet
+            prefix = policy_key('')
+            for key in json.loads(kopia('policy', 'export')):
+                if key.startswith(prefix):
+                    by_source.setdefault(key[len(prefix):], [])
             self.sources = set(by_source)
             for source in [s for s in self.stats if s not in by_source]:
                 del self.stats[source]
 
             # Storage stats depend on every snapshot of a source, so they're redone when its snapshots change
             ids = {source: sorted(s['id'] for s in snaps) for source, snaps in by_source.items()}
-            stale = [source for source in by_source if ids[source] != self.stats.get(source, {}).get('ids')]
+            stale = [source for source in by_source if ids[source] and ids[source] != self.stats.get(source, {}).get('ids')]
             if stale and not self.working():
                 self.stats_thread = threading.Thread(target=self.work_out_stats, args=({s: ids[s] for s in stale},), daemon=True)
                 self.stats_thread.start()
@@ -147,7 +153,7 @@ class Repository:
             for source, snaps in sorted(by_source.items(), key=lambda item: item[0].casefold()):
                 snaps.sort(key=lambda s: s['startTime'])
                 stats = self.stats.get(source, {}).get('stats', {})
-                result.append({'path': source, 'host': snaps[0]['source']['host'], 'user': snaps[0]['source']['userName'],
+                result.append({'path': source, 'host': self.info['host'], 'user': self.info['user'],
                                'snapshots': [snapshot_info(s, stats.get(s['id'])) for s in snaps]})
             return {'repository': self.info, 'locations': result, 'read': read, 'working': self.working()}
 
@@ -507,10 +513,10 @@ def inside_location(path):
 
 def start_backup(source):
     """Take a snapshot of a backup location now, in the background, returning its progress record. kopia
-    applies the location's policy as it would for a scheduled one, including expiring old snapshots after. A
-    folder inside a location can be backed up on its own too, which makes it a location of its own."""
-    if source not in repository.sources and not (inside_location(source) and os.path.isdir(source)):
-        raise KeyError(source)
+    applies the location's policy as it would for a scheduled one, including expiring old snapshots after. Any
+    other folder can be backed up too, which makes it a location of its own."""
+    if source not in repository.sources and not os.path.isdir(source):
+        raise ValueError(f'There\'s no folder {source}')
     running = next((j for j in jobs.values() if j['kind'] == 'backup' and j['source'] == source and not j['finished']), None)
     if running:
         raise BusyError(f'{source} is already being backed up')
@@ -626,9 +632,12 @@ def schedule_of(path):
 def set_schedule(path, interval):
     """Back a folder up every so often on its own, or with no interval, as the policy above it says. Only its
     own policy's schedule changes: it's exported, changed and imported back, as kopia's policy set can't put an
-    interval back to inherited. A folder that isn't a backup location yet becomes one once it's backed up."""
-    if not inside_location(path) or not os.path.isdir(path):
-        raise KeyError(path)
+    interval back to inherited. Any folder on the PC can have one, which makes it a backup location: kopia's
+    scheduler backs up folders with a policy of their own."""
+    # Tidied, so the same folder typed differently is the same location
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        raise ValueError(f'There\'s no folder {path}')
     # Whole minutes, and no more often than KopiaUI offers
     if interval is not None and (not isinstance(interval, int) or interval < 600 or interval % 60):
         raise KeyError(interval)
@@ -680,6 +689,14 @@ def run_delete(job):
         job.update(state='failed', error=kopia_reason(e))
     finally:
         job['finished'] = time.time()
+
+
+def pick_folder():
+    """A folder to back up, picked in a folder picker, or None if cancelled."""
+    def show(root):
+        picked = filedialog.askdirectory(parent=root, title='Back up a folder', mustexist=True)
+        return os.path.abspath(picked) if picked else None
+    return {'path': dialogs.ask(show)}
 
 
 def reveal(path):
@@ -746,6 +763,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(cancel_backup(body['id']))
             if self.path == '/api/schedule':
                 return self.send_json(set_schedule(body['path'], body['interval']))
+            if self.path == '/api/pick-folder':
+                return self.send_json(pick_folder())
             if self.path == '/api/snapshot/delete':
                 return self.send_json(start_delete(body['id']))
             if self.path == '/api/jobs/clear':
@@ -757,6 +776,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
         except KeyError as e:
             self.send_error(400, f'Missing or unknown {e}')
+        except ValueError as e:
+            self.send_error(400, str(e))
         except RuntimeError as e:
             self.send_error(502, kopia_reason(e))
         except PermissionError as e:

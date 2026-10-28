@@ -122,7 +122,9 @@ a.btn { color: inherit; text-decoration: none; display: inline-block; }
 
 /* Locations */
 .sidebar { border-right: 1px solid var(--line); background: var(--surface); padding: 14px 0; min-width: 0; }
-.sidebar h2 { padding: 0 16px 8px; }
+.sidebar-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 16px 8px; }
+/* Like the snapshots panel's buttons beside its heading */
+.sidebar-head .btn { font-size: 0.8rem; flex: none; }
 .sidebar .sum { padding: 0 16px 10px; color: var(--muted); font-size: 0.8rem; }
 .sort { display: flex; margin: 0 16px 10px; border: 1px solid var(--axis); border-radius: 6px; overflow: hidden; }
 .sort button { flex: 1; background: none; border: 0; padding: 3px 0; font-size: 0.8rem; color: var(--ink-2); }
@@ -440,7 +442,10 @@ th[aria-sort] { color: var(--ink); }
 
 <div class="app" id="app">
   <nav class="sidebar" aria-label="Backup locations">
-    <h2>Backup locations</h2>
+    <div class="sidebar-head">
+      <h2>Backup locations</h2>
+      <button type="button" class="btn" id="add-location" title="Pick a folder to back up">Add location…</button>
+    </div>
     <form class="search" id="search">
       <input id="search-input" placeholder="Filter, or paste a path" aria-label="Filter the backup locations, or a path to go to" autocomplete="off"
         title="Type to filter the locations, folders and files · paste a path like C:\Users\Peter\Documents and press Enter to go there">
@@ -698,14 +703,17 @@ async function cancelBackup(job) {
 const schedules = new Map();
 function scheduleOf(path) {
   if (!LIVE) return null;
+  if (!schedules.has(path.toLowerCase())) loadSchedule(path).then(redrawSoon);
+  return schedules.get(path.toLowerCase());
+}
+// The same, waiting for it if it isn't loaded yet; null if it can't be
+function loadSchedule(path) {
   const key = path.toLowerCase();
-  if (!schedules.has(key)) {
-    schedules.set(key, undefined);
-    fetch(`/api/schedule?path=${encodeURIComponent(path)}`)
-      .then(response => (response.ok ? response.json() : null)).catch(() => null)
-      .then(schedule => { schedules.set(key, schedule); redrawSoon(); });
-  }
-  return schedules.get(key);
+  if (schedules.has(key) && schedules.get(key) !== undefined) return Promise.resolve(schedules.get(key));
+  schedules.set(key, undefined);
+  return fetch(`/api/schedule?path=${encodeURIComponent(path)}`)
+    .then(response => (response.ok ? response.json() : null)).catch(() => null)
+    .then(schedule => { schedules.set(key, schedule); return schedule; });
 }
 
 // The intervals that can be picked, as in KopiaUI
@@ -732,20 +740,23 @@ const scheduleSource = (schedule, here) => (schedule.from ? `Set by ${schedule.f
 function scheduleLine(loc, target, rel, isFolder) {
   if (!LIVE || !isFolder) return null;
   const own = scheduleOf(target);
-  const line = (schedule, words, action, separate) => el('div', { class: 'schedule' },
-    schedule ? el('span', { title: scheduleSource(schedule, !separate) }, words(schedule)) : el('span', { class: 'muted' }, '…'),
-    el('button', { class: 'linklike', onclick: () => scheduleDialog(loc, target, separate) }, action));
+  const line = (schedule, words, action, mode) => el('div', { class: 'schedule' },
+    schedule ? el('span', { title: scheduleSource(schedule, mode === 'change') }, words(schedule)) : el('span', { class: 'muted' }, '…'),
+    el('button', { class: 'linklike', onclick: () => scheduleDialog(target, mode) }, action));
   if (rel && !own?.own) {
-    return line(scheduleOf(loc.path), schedule => `${scheduleText(schedule)} with ${loc.path}`, 'Back up on its own…', true);
+    return line(scheduleOf(loc.path), schedule => `${scheduleText(schedule)} with ${loc.path}`, 'Back up on its own…', 'separate');
   }
-  return line(own, scheduleText, 'Change…', false);
+  return line(own, scheduleText, 'Change…', 'change');
 }
 
-// Set how often a folder is backed up. For a folder inside a location, that backs it up on its own, as a
-// location of its own, which it only becomes once backed up, so that's done straight away unless unticked.
-function scheduleDialog(loc, path, separate) {
-  const current = scheduleOf(path);
+// Set how often a folder is backed up: a location's schedule (change), a folder inside one backed up on its
+// own (separate), or any other folder on the PC backed up (new). A folder with a schedule of its own is a
+// location, though it has nothing in it until it's backed up, so the last two do that straight away unless
+// unticked, then show it.
+async function scheduleDialog(path, mode) {
+  const current = await loadSchedule(path);
   if (!current) return;
+  const separate = mode !== 'change';
   const inherited = current.inherited;
   // Its own interval stays a choice if it was set to something else elsewhere, so it isn't changed by accident
   const intervals = current.own && !INTERVALS.includes(current.interval)
@@ -762,23 +773,28 @@ function scheduleDialog(loc, path, separate) {
     class: 'btn primary',
     onclick: async () => {
       save.disabled = cancel.disabled = true;
+      let saved;
       try {
-        await api.post('/api/schedule', { path, interval: select.value ? Number(select.value) : null });
+        saved = await api.post('/api/schedule', { path, interval: select.value ? Number(select.value) : null });
       } catch (e) {
-        error.textContent = `Couldn't change it: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
+        error.textContent = `Couldn't ${separate ? 'back it up' : 'change it'}: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
         error.hidden = false;
         save.disabled = cancel.disabled = false;
         return;
       }
       schedules.clear();
       dialog.close();
-      if (separate && now.checked) backUp(path);
-      redrawSoon();
+      if (!separate) return redrawSoon();
+      // Now a location, as the server tidied its path
+      if (now.checked) backUp(saved.path);
+      await refreshStorage();
+      if (mode === 'new') navigate({ location: saved.path, snapshot: null });
     },
-  }, separate ? 'Back up on its own' : 'Save');
-  const name = path.slice(path.replace(/\\$/, '').lastIndexOf('\\') + 1);
+  }, { change: 'Save', separate: 'Back up on its own', new: 'Back up' }[mode]);
+  // Its own name with a backslash, like Code\, or a drive's, like D:\
+  const name = `${(path.replace(/\\$/, '').split('\\').pop())}\\`;
   const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'schedule-title' },
-    el('h2', { id: 'schedule-title' }, separate ? `Back up ${name}\\ on its own?` : 'How often to back up?'),
+    el('h2', { id: 'schedule-title' }, { change: 'How often to back up?', separate: `Back up ${name} on its own?`, new: `Back up ${name}?` }[mode]),
     el('p', { class: 'what' }, el('b', {}, path)),
     el('label', { class: 'field' }, 'How often', select),
     separate ? el('label', { class: 'field' }, now, 'Back up now') : null,
@@ -1468,7 +1484,8 @@ const joinRel = (rel, name) => (rel ? `${rel}/${name}` : name);
 // The snapshot a location's folders are read from: the one selected if it's open, otherwise its latest
 function sidebarSnapshot(loc) {
   const snap = loc.path === state.location ? selectedSnapshot(loc) : asOfSnapshot(loc);
-  return snap.incomplete ? [...loc.snapshots].reverse().find(s => !s.incomplete) : snap;
+  // None for a location that hasn't been backed up yet
+  return snap?.incomplete ? [...loc.snapshots].reverse().find(s => !s.incomplete) : snap;
 }
 
 const treeItem = node => node.location
@@ -2028,6 +2045,11 @@ function renderMain() {
   const loc = storage.find(l => l.path === state.location);
   if (!loc) {
     main.replaceChildren(el('div', { class: 'panel empty' }, 'Pick a backup location on the left, or search for a path to see its history.'));
+    return;
+  }
+  // A folder given a schedule of its own isn't backed up until its first snapshot
+  if (!loc.snapshots.length) {
+    main.replaceChildren(el('section', { class: 'loc-head' }, locationCrumbs(loc)), el('div', { class: 'panel empty' }, 'No snapshots yet'));
     return;
   }
   if (state.file) return renderFilePage(main, loc);
@@ -3030,7 +3052,7 @@ function goToPath(typed) {
     const rel = realCase(loc, relativeTo(loc, path));
     const parent = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
     const name = rel.slice(rel.lastIndexOf('/') + 1);
-    const entry = rel && snapshotListing(asOfSnapshot(loc), parent)?.find(e => e.n.toLowerCase() === name.toLowerCase());
+    const entry = rel && asOfSnapshot(loc) && snapshotListing(asOfSnapshot(loc), parent)?.find(e => e.n.toLowerCase() === name.toLowerCase());
     if (entry?.t === 'f') return navigate({ location: loc.path, snapshot: null, scope: parent, file: entry.n });
     return navigate({ location: loc.path, snapshot: null, scope: rel });
   }
@@ -3171,6 +3193,15 @@ function renderSide() {
 
   const rel = relativeTo(loc, target);
   const isFolder = isFolderPath(loc, rel);
+  // A location that hasn't been backed up yet: its schedule, and backing it up
+  if (!loc.snapshots.length) {
+    aside.replaceChildren(
+      el('div', { class: 'history-head' },
+        el('div', {}, el('h2', {}, 'Snapshots (0)'), el('div', { class: 'target' }, target), scheduleLine(loc, target, rel, isFolder)),
+        backupButton(loc)),
+      el('p', { class: 'note' }, 'No snapshots yet'));
+    return;
+  }
   // Snapshots can be viewed and compared for the location open in the middle; elsewhere a click goes there
   const viewing = loc.path === state.location;
   const selected = viewing ? selectedSnapshot(loc) : null;
@@ -3374,6 +3405,31 @@ function clearFilter() {
   renderLocations();
 }
 
+// Adding a backup location: a folder picked in a folder picker, which the server opens, then how often to
+// back it up. One that's already a location is gone to instead.
+const addButton = document.getElementById('add-location');
+if (!LIVE) {
+  addButton.disabled = true;
+  addButton.title = 'Adding locations needs the server: run kopia_explorer.py';
+}
+addButton.addEventListener('click', async () => {
+  addButton.disabled = true;
+  addButton.textContent = 'Choosing…';
+  let picked = null;
+  try {
+    ({ path: picked } = await api.post('/api/pick-folder', {}));
+  } catch (error) {
+    addButton.textContent = `Couldn't open the picker: ${error instanceof TypeError ? 'can\'t reach the server' : error.message}`;
+    await new Promise(resolve => setTimeout(resolve, 4000));
+  }
+  addButton.disabled = false;
+  addButton.textContent = 'Add location…';
+  if (!picked) return;
+  const loc = storage.find(l => l.path.toLowerCase() === picked.toLowerCase());
+  if (loc) return navigate({ location: loc.path, snapshot: null });
+  scheduleDialog(picked, 'new');
+});
+
 const searchInput = document.getElementById('search-input');
 searchInput.addEventListener('input', () => {
   const text = searchInput.value.trim();
@@ -3490,7 +3546,7 @@ function asOfSteps() {
   if (loc) {
     const complete = loc.snapshots.filter(s => !s.incomplete);
     const current = selectedSnapshot(loc);
-    const at = complete.indexOf(current.incomplete ? complete[complete.length - 1] : current);
+    const at = complete.indexOf(current?.incomplete ? complete[complete.length - 1] : current);
     const asOf = snap => asOfFor(loc, snap);
     return { older: at > 0 ? asOf(complete[at - 1]) : undefined, newer: at >= 0 && at < complete.length - 1 ? asOf(complete[at + 1]) : undefined };
   }
