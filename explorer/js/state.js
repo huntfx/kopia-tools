@@ -9,9 +9,10 @@ import { currentFolder } from './storage.js';
 // scope is a folder inside the location (with / separators), which narrows everything shown to it,
 // and file is a file in that folder whose own page is shown instead.
 // The right-hand panel lists the location's snapshots for the folder or file being looked at, or for
-// history, a path picked with a single click, until moving somewhere else.
+// history, a path picked with a single click, until moving somewhere else. A path backed up in more than one
+// location has its snapshots from the one open in the middle, or via, another picked for the panel.
 export const state = {
-  location: null, folder: null, scope: '', file: null, snapshot: null, compare: null, history: null,
+  location: null, folder: null, scope: '', file: null, snapshot: null, compare: null, history: null, via: null,
   // * is for things that only existed between two snapshots compared, which are always shown, greyed out;
   // i (⊘) is for things that went from one snapshot to the next because kopia's ignore rules leave them out.
   // Files whose modified date changed but not their contents (d, •) go with modified ones (~).
@@ -27,6 +28,7 @@ export function readHash() {
   state.snapshot = params.get('snap');
   state.compare = params.get('cmp');
   state.history = params.get('hist');
+  state.via = params.get('via');
   state.asOf = params.get('at');
 }
 
@@ -39,6 +41,7 @@ export function writeHash(replace = false) {
   if (state.snapshot) params.set('snap', state.snapshot);
   if (state.compare) params.set('cmp', state.compare);
   if (state.history) params.set('hist', state.history);
+  if (state.via) params.set('via', state.via);
   if (state.asOf) params.set('at', state.asOf);
   const hash = '#' + params.toString();
   if (hash !== location.hash) (replace ? history.replaceState(null, '', hash) : history.pushState(null, '', hash));
@@ -46,7 +49,7 @@ export function writeHash(replace = false) {
 
 export function navigate(changes, replace = false) {
   // Picking something for the right-hand panel leaves the rest of the page alone, so expanded folders and scrolling stay put
-  if (Object.keys(changes).every(key => key === 'history')) {
+  if (Object.keys(changes).every(key => key === 'history' || key === 'via')) {
     Object.assign(state, changes);
     writeHash(replace);
     renderSide();
@@ -83,6 +86,7 @@ export function navigate(changes, replace = false) {
   if (moved) {
     reveal(currentFolder());
     state.history = null;
+    state.via = null;
   }
   writeHash(replace);
   render();

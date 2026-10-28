@@ -156,7 +156,11 @@ export function renderSide() {
   const aside = document.getElementById('history');
   const app = document.getElementById('app');
   const target = state.history || currentPath();
-  const loc = target && locationOf(target);
+  // A path can be in more than one location, nested in each other: the snapshots are the location picked for
+  // the panel's, or the one open in the middle's, or the nearest's
+  const contains = l => (target.toLowerCase() + '\\').startsWith(`${l.path.replace(/\\$/, '').toLowerCase()}\\`);
+  const loc = target && (storage.find(l => l.path === state.via && contains(l))
+    || storage.find(l => l.path === state.location && contains(l)) || locationOf(target));
   // The panel stays open everywhere, so the page keeps its shape
   const shown = !!loc || !!state.folder;
   aside.hidden = !shown;
@@ -253,9 +257,9 @@ export function renderSide() {
     rows.push(row(complete[i], i === 0 ? 'first' : stepChange(complete[i - 1], complete[i], rel, isFolder)));
   }
 
-  // The same path may be backed up by other locations too
-  const elsewhere = storage.filter(l => l !== loc && locationOf(target) !== l &&
-    (target.toLowerCase() + '\\').startsWith(l.path.replace(/\\$/, '').toLowerCase() + '\\'));
+  // The same path may be backed up by other locations too, whose snapshots of it can be shown instead
+  const elsewhere = storage.filter(l => l !== loc && contains(l));
+  const middle = storage.find(l => l.path === state.location && contains(l)) || locationOf(target);
 
   aside.replaceChildren(...[
     el('div', { class: 'history-head' },
@@ -274,7 +278,8 @@ export function renderSide() {
     el('ul', { class: 'snaps' }, inProgress.map(s => row(s, null, 'partial')), rows),
     elsewhere.length ? el('div', { class: 'elsewhere' }, 'Also backed up in ',
       elsewhere.map((l, i) => [i ? ', ' : '', el('button', {
-        onclick: () => navigate({ location: l.path, snapshot: null, scope: isFolder ? relativeTo(l, target) : relativeTo(l, target).split('/').slice(0, -1).join('/') }),
+        title: `Show its snapshots in ${l.path} here`,
+        onclick: () => navigate({ via: l === middle ? null : l.path }),
       }, l.path)])) : null,
   ].filter(Boolean));
 }

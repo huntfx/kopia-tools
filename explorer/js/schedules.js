@@ -56,6 +56,8 @@ export function scheduleLine(loc, target, rel, isFolder) {
   const line = (schedule, words, action, mode) => el('div', { class: 'schedule' },
     schedule ? el('span', { title: scheduleSource(schedule, mode === 'change') }, words(schedule)) : el('span', { class: 'muted' }, '…'),
     el('button', { class: 'linklike', disabled: !schedule || !own, onclick: () => scheduleDialog(target, mode) }, action));
+  // Inside a location, whether it has a schedule of its own decides what's offered, so that waits until it's known
+  if (rel && own === undefined) return el('div', { class: 'schedule' }, el('span', { class: 'muted' }, '…'));
   if (rel && !own?.own) {
     return line(scheduleOf(loc.path), schedule => `${scheduleText(schedule)} with ${loc.path}`, 'Back up on its own…', 'separate');
   }
