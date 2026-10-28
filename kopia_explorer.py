@@ -1,6 +1,6 @@
 """Browse kopia snapshots in a web page: backup locations, their snapshots, folder contents, what changed
-between snapshots, and file histories, restore files and folders from any snapshot, back up a location now, and
-delete snapshots.
+between snapshots, and file histories, restore files and folders from any snapshot, back up a location now,
+delete snapshots, and set how often a folder is backed up.
 
 Runs a small local web server for the page in explorer/, fetching from kopia as you browse. Diffs and
 folder listings never change for a given snapshot, so they're cached on disk, in kopia-explorer in the
@@ -497,10 +497,19 @@ def pick_restore_target(snap, path, name, is_folder):
     return dialogs.ask(show)
 
 
+def inside_location(path):
+    """Whether a path is a backup location or inside one, tidied first so .. can't step out of one. Not
+    resolved, as that turns mapped network drives like S: into \\\\server\\share paths, which then aren't inside
+    the S: backup locations."""
+    target = Path(os.path.abspath(path))
+    return any(target == Path(source) or Path(source) in target.parents for source in repository.sources)
+
+
 def start_backup(source):
     """Take a snapshot of a backup location now, in the background, returning its progress record. kopia
-    applies the location's policy as it would for a scheduled one, including expiring old snapshots after."""
-    if source not in repository.sources:
+    applies the location's policy as it would for a scheduled one, including expiring old snapshots after. A
+    folder inside a location can be backed up on its own too, which makes it a location of its own."""
+    if source not in repository.sources and not (inside_location(source) and os.path.isdir(source)):
         raise KeyError(source)
     running = next((j for j in jobs.values() if j['kind'] == 'backup' and j['source'] == source and not j['finished']), None)
     if running:
@@ -579,6 +588,66 @@ def cancel_backup(job_id):
     return job
 
 
+def policy_key(path):
+    return f'{repository.info["user"]}@{repository.info["host"]}:{path}'
+
+
+def schedule_of(path):
+    """How often a folder is backed up on its own, as kopia works it out: from its own policy, or the nearest
+    folder above with one, or the user's, the computer's or the global policy, each setting from the first
+    that has it. Says where the interval came from, whether the folder has its own, and what it would be
+    without it."""
+    policies = json.loads(kopia('policy', 'export'))
+    user, host = repository.info['user'], repository.info['host']
+    folder = Path(path)
+    chain = [(policy_key(p), str(p)) for p in [folder, *folder.parents]]
+    chain += [(f'{user}@{host}', f'{user}@{host}'), (f'@{host}', host), ('(global)', 'the global policy')]
+
+    def settings(chain):
+        found = {}
+        for key, name in chain:
+            scheduling = (policies.get(key) or {}).get('scheduling') or {}
+            for setting in ('intervalSeconds', 'timeOfDay', 'cron', 'manual'):
+                if setting in scheduling and setting not in found:
+                    found[setting] = (scheduling[setting], name)
+        return found
+
+    found, above = settings(chain), settings(chain[1:])
+    interval, source = found.get('intervalSeconds', (None, None))
+    return {
+        'path': path, 'interval': interval, 'from': None if source == str(folder) else source,
+        'times': [f'{t["hour"]:02}:{t["min"]:02}' for t in found.get('timeOfDay', ([], None))[0]],
+        'cron': found.get('cron', ([], None))[0], 'manual': found.get('manual', (False, None))[0],
+        'own': 'intervalSeconds' in ((policies.get(policy_key(folder)) or {}).get('scheduling') or {}),
+        'inherited': dict(zip(('interval', 'from'), above.get('intervalSeconds', (None, None)))),
+    }
+
+
+def set_schedule(path, interval):
+    """Back a folder up every so often on its own, or with no interval, as the policy above it says. Only its
+    own policy's schedule changes: it's exported, changed and imported back, as kopia's policy set can't put an
+    interval back to inherited. A folder that isn't a backup location yet becomes one once it's backed up."""
+    if not inside_location(path) or not os.path.isdir(path):
+        raise KeyError(path)
+    # Whole minutes, and no more often than KopiaUI offers
+    if interval is not None and (not isinstance(interval, int) or interval < 600 or interval % 60):
+        raise KeyError(interval)
+    key = policy_key(path)
+    policy = json.loads(kopia('policy', 'export')).get(key) or {}
+    scheduling = policy.setdefault('scheduling', {})
+    if interval is None:
+        scheduling.pop('intervalSeconds', None)
+    else:
+        # Backed up on a schedule, so not only by hand
+        scheduling.update(intervalSeconds=interval)
+        scheduling.pop('manual', None)
+    result = subprocess.run(['kopia', 'policy', 'import', key], input=json.dumps({key: policy}), text=True,
+                            encoding='utf-8', capture_output=True)
+    if result.returncode:
+        raise RuntimeError(f'kopia policy import failed:\n{result.stderr.strip()}')
+    return schedule_of(path)
+
+
 def being_deleted(snapshot_id):
     return any(j['kind'] == 'delete' and j['snapshot'] == snapshot_id and not j['finished'] for j in jobs.values())
 
@@ -616,11 +685,8 @@ def run_delete(job):
 def reveal(path):
     """Show something in Windows Explorer: a folder opened, or a file selected in its folder. If it's gone,
     the nearest folder above it that's still there. Only for things restored or inside a backup location."""
-    # Tidied first, so .. can't step out of a backup location; not resolved, as that turns mapped network
-    # drives like S: into \\server\share paths, which then aren't inside the S: backup locations
     target = Path(os.path.abspath(path))
-    inside = any(target == Path(source) or Path(source) in target.parents for source in repository.sources)
-    if path not in restored and not inside:
+    if path not in restored and not inside_location(path):
         raise PermissionError('Only things restored or in a backup location can be shown')
     if target.is_dir():
         subprocess.Popen(['explorer', str(target)])
@@ -649,6 +715,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(date_changes(query['from'], query['to']))
             if url.path == '/api/listing':
                 return self.send_json(listing(query['obj']))
+            if url.path == '/api/schedule':
+                return self.send_json(schedule_of(query['path']))
             if url.path == '/api/jobs':
                 return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
             if url.path == '/mock-data.js':
@@ -676,6 +744,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(start_backup(body['source']))
             if self.path == '/api/backup/cancel':
                 return self.send_json(cancel_backup(body['id']))
+            if self.path == '/api/schedule':
+                return self.send_json(set_schedule(body['path'], body['interval']))
             if self.path == '/api/snapshot/delete':
                 return self.send_json(start_delete(body['id']))
             if self.path == '/api/jobs/clear':

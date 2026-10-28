@@ -275,6 +275,7 @@ th[aria-sort] { color: var(--ink); }
 }
 .history-head { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; margin-bottom: 12px; }
 .history-head .target { font-family: var(--font-data); font-size: 0.85rem; word-break: break-all; margin-top: 4px; }
+.history-head .schedule { display: flex; flex-wrap: wrap; gap: 0 8px; margin-top: 2px; font-size: 0.8rem; color: var(--ink-2); overflow-wrap: anywhere; }
 .close { background: none; border: 1px solid var(--axis); border-radius: 6px; width: 28px; height: 28px; flex: none; }
 
 /* A file's details */
@@ -326,6 +327,9 @@ th[aria-sort] { color: var(--ink); }
 .confirm h2 { margin: 0 0 10px; font-size: 1rem; }
 .confirm p { margin: 0 0 8px; font-size: 0.88rem; color: var(--ink-2); overflow-wrap: anywhere; }
 .confirm p.what { color: var(--ink); }
+.confirm p.error { color: var(--removed); }
+.confirm .field { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; font-size: 0.88rem; }
+.confirm select { background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font-size: 0.85rem; flex: 1; min-width: 0; }
 .confirm .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .btn.danger:not(:disabled) { background: var(--removed); border-color: var(--removed); color: #fff; }
 .elsewhere { margin-top: 12px; font-size: 0.8rem; color: var(--muted); }
@@ -638,9 +642,10 @@ function restoreItem(snap, rel, folder) {
     { kind: 'restore', name: rel.split('/').pop() || 'this location', snapshotTime: snap.time });
 }
 
-function backUp(loc) {
+// Back up a location now, or a folder inside one on its own, which makes it a location of its own
+function backUp(path) {
   jobsShown = true;
-  startJob('/api/backup', { source: loc.path }, { kind: 'backup', name: loc.path, source: loc.path });
+  startJob('/api/backup', { source: path }, { kind: 'backup', name: path, source: path });
 }
 
 // Start a restore, backup or delete, or if the server won't, list it as failed, saying why
@@ -672,7 +677,7 @@ function backupButton(loc) {
     title: !LIVE ? 'Backing up needs the server: run kopia_explorer.py'
       : job ? 'Stop it, keeping what it got through as an incomplete snapshot'
         : `Take a snapshot of ${loc.path} now, as its schedule would`,
-    onclick: () => (job ? cancelBackup(job) : backUp(loc)),
+    onclick: () => (job ? cancelBackup(job) : backUp(loc.path)),
   }, job?.state === 'cancelling' ? 'Cancelling…' : job ? 'Cancel backup' : 'Back up now');
   return button;
 }
@@ -684,6 +689,106 @@ async function cancelBackup(job) {
     job.error = `Couldn't cancel: ${error instanceof TypeError ? 'can\'t reach the server' : error.message}`;
   }
   jobsChanged();
+}
+
+/* ---------- Schedules ---------- */
+
+// How often a folder is backed up on its own, from kopia's policies via the server, loaded once each, and
+// again after one's changed: { interval, times, cron, manual, from, own, inherited }
+const schedules = new Map();
+function scheduleOf(path) {
+  if (!LIVE) return null;
+  const key = path.toLowerCase();
+  if (!schedules.has(key)) {
+    schedules.set(key, undefined);
+    fetch(`/api/schedule?path=${encodeURIComponent(path)}`)
+      .then(response => (response.ok ? response.json() : null)).catch(() => null)
+      .then(schedule => { schedules.set(key, schedule); redrawSoon(); });
+  }
+  return schedules.get(key);
+}
+
+// The intervals that can be picked, as in KopiaUI
+const INTERVALS = [600, 900, 1200, 1800, 3600, 10800, 21600, 43200];
+// An interval in words, like "every 3 hours" or "every day"
+function every(seconds) {
+  for (const [unit, size] of [['day', 86400], ['hour', 3600], ['minute', 60]]) {
+    if (seconds % size === 0) return seconds === size ? `every ${unit}` : `every ${seconds / size} ${unit}s`;
+  }
+  return `every ${plural(seconds, 'second')}`;
+}
+const capitalised = text => text[0].toUpperCase() + text.slice(1);
+// A schedule in words, like "Every 12 hours" or "Every day and at 09:00", and where it's set, for its tooltip
+function scheduleText(schedule) {
+  if (schedule.manual) return 'Only by hand';
+  const parts = [schedule.interval ? every(schedule.interval) : null, schedule.times.length ? `at ${schedule.times.join(', ')}` : null,
+    schedule.cron?.length ? 'on a custom schedule' : null].filter(Boolean);
+  return capitalised(parts.join(' and ') || 'not on a schedule');
+}
+const scheduleSource = (schedule, here) => (schedule.from ? `Set by ${schedule.from}` : here ? 'Set for this folder' : `Set for ${schedule.path}`);
+
+// Under the snapshots panel's heading: how often what it's for is backed up, and changing that. A folder
+// inside a location is backed up with it, unless it's given a schedule of its own.
+function scheduleLine(loc, target, rel, isFolder) {
+  if (!LIVE || !isFolder) return null;
+  const own = scheduleOf(target);
+  const line = (schedule, words, action, separate) => el('div', { class: 'schedule' },
+    schedule ? el('span', { title: scheduleSource(schedule, !separate) }, words(schedule)) : el('span', { class: 'muted' }, '…'),
+    el('button', { class: 'linklike', onclick: () => scheduleDialog(loc, target, separate) }, action));
+  if (rel && !own?.own) {
+    return line(scheduleOf(loc.path), schedule => `${scheduleText(schedule)} with ${loc.path}`, 'Back up on its own…', true);
+  }
+  return line(own, scheduleText, 'Change…', false);
+}
+
+// Set how often a folder is backed up. For a folder inside a location, that backs it up on its own, as a
+// location of its own, which it only becomes once backed up, so that's done straight away unless unticked.
+function scheduleDialog(loc, path, separate) {
+  const current = scheduleOf(path);
+  if (!current) return;
+  const inherited = current.inherited;
+  // Its own interval stays a choice if it was set to something else elsewhere, so it isn't changed by accident
+  const intervals = current.own && !INTERVALS.includes(current.interval)
+    ? [...INTERVALS, current.interval].sort((a, b) => a - b) : INTERVALS;
+  const select = el('select', { 'aria-label': 'How often' },
+    inherited.interval ? el('option', { value: '' }, `Inherit from ${inherited.from} (${every(inherited.interval)})`) : null,
+    intervals.map(seconds => el('option', { value: seconds }, capitalised(every(seconds)))));
+  // Inheriting, unless it has its own, which is kept
+  select.value = current.own ? String(current.interval) : '';
+  const now = el('input', { type: 'checkbox', checked: true });
+  const error = el('p', { class: 'error', hidden: true });
+  const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
+  const save = el('button', {
+    class: 'btn primary',
+    onclick: async () => {
+      save.disabled = cancel.disabled = true;
+      try {
+        await api.post('/api/schedule', { path, interval: select.value ? Number(select.value) : null });
+      } catch (e) {
+        error.textContent = `Couldn't change it: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
+        error.hidden = false;
+        save.disabled = cancel.disabled = false;
+        return;
+      }
+      schedules.clear();
+      dialog.close();
+      if (separate && now.checked) backUp(path);
+      redrawSoon();
+    },
+  }, separate ? 'Back up on its own' : 'Save');
+  const name = path.slice(path.replace(/\\$/, '').lastIndexOf('\\') + 1);
+  const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'schedule-title' },
+    el('h2', { id: 'schedule-title' }, separate ? `Back up ${name}\\ on its own?` : 'How often to back up?'),
+    el('p', { class: 'what' }, el('b', {}, path)),
+    el('label', { class: 'field' }, 'How often', select),
+    separate ? el('label', { class: 'field' }, now, 'Back up now') : null,
+    el('p', {}, 'KopiaUI picks up the change when it next refreshes, within 4 hours.'),
+    error,
+    el('div', { class: 'actions' }, cancel, save));
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  select.focus();
 }
 
 // Delete a snapshot for good, once a dialog has said exactly what goes: the whole snapshot of the
@@ -793,8 +898,8 @@ function snapshotsChanged() {
 
 // Read the snapshots again, quietly, as a backup has made one or one's been deleted. Each location's list is
 // replaced in place, with the snapshots already known kept as the same objects, so everything holding on to
-// them still finds them. A location that's new shows when the page is reloaded. One read at a time: asked for
-// again meanwhile, it reads once more after, to catch what changed since it started.
+// them still finds them. One read at a time: asked for again meanwhile, it reads once more after, to catch
+// what changed since it started.
 let refreshing = null;
 let refreshAgain = false;
 function refreshStorage() {
@@ -809,11 +914,22 @@ function refreshStorage() {
         const response = await fetch('/api/storage');
         if (!response.ok) return;
         const { locations, read, working } = await response.json();
+        let added = false;
         for (const fresh of locations) {
           const loc = storage.find(l => l.path === fresh.path);
-          if (!loc) continue;
+          if (!loc) {
+            // A new location, such as a folder backed up on its own, goes into the tree in order
+            storage.push(fresh);
+            added = true;
+            continue;
+          }
           const known = new Map(loc.snapshots.map(s => [s.id, s]));
           loc.snapshots = fresh.snapshots.map(s => Object.assign(known.get(s.id) || {}, s));
+        }
+        if (added) {
+          storage.sort((a, b) => (a.path.toLowerCase() < b.path.toLowerCase() ? -1 : 1));
+          treeNodes.clear();
+          locationTree = buildLocationTree();
         }
         storageRead = read;
         storageWorking = working;
@@ -1271,7 +1387,8 @@ function compactFolder(node) {
   return { node, prefix, label: names[names.length - 1] };
 }
 
-const locationTree = buildLocationTree();
+// Built again when a location's added, such as a folder backed up on its own
+let locationTree = buildLocationTree();
 
 // Folders above the locations start open, so the tree shows every location; closed ones are kept here.
 // Locations and the folders inside them start closed, so it isn't swamped; opened ones are kept here.
@@ -3138,7 +3255,8 @@ function renderSide() {
 
   aside.replaceChildren(...[
     el('div', { class: 'history-head' },
-      el('div', {}, el('h2', {}, `Snapshots (${complete.length})`), el('div', { class: 'target' }, target)),
+      el('div', {}, el('h2', {}, `Snapshots (${complete.length})`), el('div', { class: 'target' }, target),
+        scheduleLine(loc, target, rel, isFolder)),
       // Up one folder level within the location, for the panel only; the middle stays where it is
       rel ? el('button', {
         class: 'btn', style: 'font-size:0.8rem;flex:none', title: 'Show the snapshots of the folder above',
