@@ -601,8 +601,8 @@ def policy_key(path):
 def schedule_of(path):
     """How often a folder is backed up on its own, as kopia works it out: from its own policy, or the nearest
     folder above with one, or the user's, the computer's or the global policy, each setting from the first
-    that has it. Says where the interval came from, whether the folder has its own, and what it would be
-    without it."""
+    that has it. Says where its schedule came from, whether the folder has its own (an interval, or manual
+    snapshots only), and what the interval would be without it."""
     policies = json.loads(kopia('policy', 'export'))
     user, host = repository.info['user'], repository.info['host']
     folder = Path(path)
@@ -620,20 +620,25 @@ def schedule_of(path):
 
     found, above = settings(chain), settings(chain[1:])
     interval, source = found.get('intervalSeconds', (None, None))
+    # Manual snapshots only decides it, wherever that's set
+    if found.get('manual', (False, None))[0]:
+        source = found['manual'][1]
+    own = (policies.get(policy_key(folder)) or {}).get('scheduling') or {}
     return {
         'path': path, 'interval': interval, 'from': None if source == str(folder) else source,
         'times': [f'{t["hour"]:02}:{t["min"]:02}' for t in found.get('timeOfDay', ([], None))[0]],
         'cron': found.get('cron', ([], None))[0], 'manual': found.get('manual', (False, None))[0],
-        'own': 'intervalSeconds' in ((policies.get(policy_key(folder)) or {}).get('scheduling') or {}),
+        'own': 'intervalSeconds' in own or bool(own.get('manual')), 'ownManual': bool(own.get('manual')),
         'inherited': dict(zip(('interval', 'from'), above.get('intervalSeconds', (None, None)))),
     }
 
 
-def set_schedule(path, interval):
-    """Back a folder up every so often on its own, or with no interval, as the policy above it says. Only its
-    own policy's schedule changes: it's exported, changed and imported back, as kopia's policy set can't put an
-    interval back to inherited. Any folder on the PC can have one, which makes it a backup location: kopia's
-    scheduler backs up folders with a policy of their own."""
+def set_schedule(path, interval, manual=False):
+    """Back a folder up every so often on its own, or with manual snapshots only, or with neither, as the policy
+    above it says. Only its own policy's schedule changes: it's exported, changed and imported back, as kopia's
+    policy set can't put an interval back to inherited. Any folder on the PC can have one, which makes it a
+    backup location: kopia's scheduler backs up folders with a policy of their own, unless manual snapshots
+    only."""
     # Tidied, so the same folder typed differently is the same location
     path = os.path.abspath(path)
     if not os.path.isdir(path):
@@ -644,10 +649,15 @@ def set_schedule(path, interval):
     key = policy_key(path)
     policy = json.loads(kopia('policy', 'export')).get(key) or {}
     scheduling = policy.setdefault('scheduling', {})
-    if interval is None:
+    if manual:
+        # kopia's scheduler leaves it alone, so it's only backed up when asked
         scheduling.pop('intervalSeconds', None)
+        scheduling['manual'] = True
+    elif interval is None:
+        scheduling.pop('intervalSeconds', None)
+        scheduling.pop('manual', None)
     else:
-        # Backed up on a schedule, so not only by hand
+        # Backed up on a schedule, so not manual snapshots only
         scheduling.update(intervalSeconds=interval)
         scheduling.pop('manual', None)
     result = subprocess.run(['kopia', 'policy', 'import', key], input=json.dumps({key: policy}), text=True,
@@ -764,7 +774,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/backup/cancel':
                 return self.send_json(cancel_backup(body['id']))
             if self.path == '/api/schedule':
-                return self.send_json(set_schedule(body['path'], body['interval']))
+                return self.send_json(set_schedule(body['path'], body['interval'], bool(body.get('manual'))))
             if self.path == '/api/pick-folder':
                 return self.send_json(pick_folder())
             if self.path == '/api/snapshot/delete':

@@ -39,7 +39,8 @@ export const capitalised = text => text[0].toUpperCase() + text.slice(1);
 
 // A schedule in words, like "Every 12 hours" or "Every day and at 09:00", and where it's set, for its tooltip
 export function scheduleText(schedule) {
-  if (schedule.manual) return 'Only by hand';
+  // As KopiaUI calls it
+  if (schedule.manual) return 'Manual snapshots only';
   const parts = [schedule.interval ? every(schedule.interval) : null, schedule.times.length ? `at ${schedule.times.join(', ')}` : null,
     schedule.cron?.length ? 'on a custom schedule' : null].filter(Boolean);
   return capitalised(parts.join(' and ') || 'not on a schedule');
@@ -82,14 +83,25 @@ export async function scheduleDialog(path, mode) {
   const separate = mode !== 'change';
   const inherited = current.inherited;
   // Its own interval stays a choice if it was set to something else elsewhere, so it isn't changed by accident
-  const intervals = current.own && !INTERVALS.includes(current.interval)
+  const ownInterval = current.own && !current.ownManual;
+  const intervals = ownInterval && !INTERVALS.includes(current.interval)
     ? [...INTERVALS, current.interval].sort((a, b) => a - b) : INTERVALS;
+  // Or no schedule, as kopia's manual snapshots only: backed up only when asked, so when it's backed up now as
+  // well, a single snapshot
   const select = el('select', { 'aria-label': 'How often' },
     inherited.interval ? el('option', { value: '' }, `Inherit from ${inherited.from} (${every(inherited.interval)})`) : null,
+    el('option', { value: 'manual' }, separate ? 'Just this once' : 'Manual snapshots only'),
     intervals.map(seconds => el('option', { value: seconds }, capitalised(every(seconds)))));
   // Inheriting, unless it has its own, which is kept
-  select.value = current.own ? String(current.interval) : '';
+  select.value = current.ownManual ? 'manual' : ownInterval ? String(current.interval) : '';
   const now = el('input', { type: 'checkbox', checked: true });
+  // Just this once is backing it up now
+  const once = () => {
+    if (select.value === 'manual') now.checked = true;
+    now.disabled = select.value === 'manual';
+  };
+  select.addEventListener('change', once);
+  once();
   const error = el('p', { class: 'error', hidden: true });
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
   const save = el('button', {
@@ -98,7 +110,8 @@ export async function scheduleDialog(path, mode) {
       save.disabled = cancel.disabled = true;
       let saved;
       try {
-        saved = await api.post('/api/schedule', { path, interval: select.value ? Number(select.value) : null });
+        const manual = select.value === 'manual';
+        saved = await api.post('/api/schedule', { path, interval: select.value && !manual ? Number(select.value) : null, manual });
       } catch (e) {
         error.textContent = `Couldn't ${separate ? 'back it up' : 'change it'}: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
         error.hidden = false;
