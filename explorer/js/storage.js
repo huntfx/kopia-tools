@@ -139,6 +139,9 @@ export const unfinished = snap => (isCancelled(snap) ? 'was cancelled before it 
 
 export const backingUpNow = loc => loc.snapshots.some(s => s.incomplete && !isCancelled(s));
 
+// What the blue dot beside a backup location means, wherever one's listed
+export const LOCATION_DOT = 'Backup location, with its own policy';
+
 // Every backup location with its snapshots, oldest first, which everything else is built from: read when the
 // page starts, then kept up to date
 export let storage;

@@ -3,10 +3,10 @@ import { compareTarget, ignoredReason, isGone, kindCount } from './changes.js';
 import { api, pending } from './data.js';
 import { el, fillColour, formatFull, formatSize, gradientPositions, gradientRgb, plural, signedSize, timeAgo } from './format.js';
 import { backupButton, beingDeleted, confirmDelete } from './jobs.js';
-import { scheduleLine } from './schedules.js';
+import { scheduleLine, separateLine } from './schedules.js';
 import { diskText, locationsBelow, sidebarSnapshot, treeNodes } from './sidebar.js';
 import { navigate, state, ui } from './state.js';
-import { asOfSnapshot, backingUpNow, currentPath, hiddenAsOf, isCancelled, latest, locationOf, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf, unfinished } from './storage.js';
+import { LOCATION_DOT, asOfSnapshot, backingUpNow, currentPath, hiddenAsOf, isCancelled, latest, locationOf, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf, unfinished } from './storage.js';
 
 // Viewing a snapshot sets "files as of" to its time, so every location follows; the newest goes back to now
 export const asOfFor = (loc, snap) => (snap === latest(loc) ? null : snap.time);
@@ -138,7 +138,7 @@ export function renderFolderSide(aside) {
       const cut = loc.path.lastIndexOf('\\') + 1;
       return el('li', { class: 'snaprow', title: `Open ${loc.path}`, onclick: () => navigate({ location: loc.path, snapshot: null }) },
         el('div', { class: 'top' },
-          el('span', { class: 'marker', style: 'color:var(--accent)' }, '●'),
+          el('span', { class: 'marker', style: 'color:var(--accent)', title: LOCATION_DOT }, '●'),
           // The path leading to the location gives way first, so its own name stays readable
           el('span', { class: 'when mono churn-name' },
             el('span', { class: 'lead' }, loc.path.slice(node.root ? 0 : state.folder.replace(/\\$/, '').length + 1, cut)),
@@ -156,29 +156,65 @@ export function renderSide() {
   const aside = document.getElementById('history');
   const app = document.getElementById('app');
   const target = state.history || currentPath();
-  // A path can be in more than one location, nested in each other: the snapshots are the location picked for
-  // the panel's, or the one open in the middle's, or the nearest's
+  // A path can be in more than one location, nested in each other: each one's snapshots of it are listed,
+  // the nearest's first, which is the one with the path's own schedule and backing up
   const contains = l => (target.toLowerCase() + '\\').startsWith(`${l.path.replace(/\\$/, '').toLowerCase()}\\`);
-  const loc = target && (storage.find(l => l.path === state.via && contains(l))
-    || storage.find(l => l.path === state.location && contains(l)) || locationOf(target));
+  const locations = target ? storage.filter(contains).sort((a, b) => b.path.length - a.path.length) : [];
   // The panel stays open everywhere, so the page keeps its shape
-  const shown = !!loc || !!state.folder;
+  const shown = locations.length > 0 || !!state.folder;
   aside.hidden = !shown;
   app.classList.toggle('with-history', shown);
   if (!shown) return;
-  if (!loc) return renderFolderSide(aside);
+  if (!locations.length) return renderFolderSide(aside);
 
+  const [nearest] = locations;
+  const rel = relativeTo(nearest, target);
+  const isFolder = isFolderPath(nearest, rel);
+  // Each location's snapshots of it are a group, headed by the location, which collapses, with backing it up now,
+  // then its schedule, which can be changed here when the location is the path itself; the others' are changed on
+  // their own pages. A location with no snapshots yet has nothing to collapse, so it stays open, with no arrow.
+  const group = loc => {
+    const empty = !loc.snapshots.length;
+    const open = empty || !collapsedGroups.has(loc.path);
+    const toggle = () => {
+      if (open) collapsedGroups.add(loc.path);
+      else collapsedGroups.delete(loc.path);
+      renderSide();
+    };
+    const name = [loc.path, el('span', { class: 'count' }, ` (${loc.snapshots.filter(s => !s.incomplete).length})`)];
+    return [
+      el('div', { class: 'snap-group' },
+        el('div', { class: 'title' },
+          empty ? el('span', { class: 'twisty' })
+            : el('button', { class: 'twisty', 'aria-expanded': String(open), 'aria-label': `${open ? 'Collapse' : 'Expand'} ${loc.path}`, onclick: toggle }, open ? '▾' : '▸'),
+          empty ? el('span', { class: 'name' }, ...name) : el('button', { class: 'name', onclick: toggle }, ...name),
+          backupButton(loc)),
+        open ? scheduleLine(loc, loc.path.toLowerCase() === target.toLowerCase()) : null),
+      open ? snapshotList(loc, target, isFolder) : null,
+    ].filter(Boolean);
+  };
+  aside.replaceChildren(
+    el('div', { class: 'history-head' },
+      el('div', {}, el('h2', {}, 'Snapshots'), el('div', { class: 'target' }, target), separateLine(target, isFolder)),
+      // Up one folder level within the location, for the panel only; the middle stays where it is
+      rel ? el('button', {
+        class: 'btn', style: 'font-size:0.8rem;flex:none', title: 'Show the snapshots of the folder above',
+        onclick: () => {
+          const above = target.slice(0, target.lastIndexOf('\\'));
+          ui.pickedIsFolder = true;
+          navigate({ history: above.toLowerCase() === currentPath().toLowerCase() ? null : above });
+        },
+      }, '↑ Up') : null),
+    ...locations.flatMap(group));
+}
+
+// Groups in the snapshots panel collapsed by hand, by location, kept while the page is open
+const collapsedGroups = new Set();
+
+// A location's snapshots of a path in it, newest first, each with what it changed in the path since the one before
+function snapshotList(loc, target, isFolder) {
+  if (!loc.snapshots.length) return el('p', { class: 'note' }, 'No snapshots yet');
   const rel = relativeTo(loc, target);
-  const isFolder = isFolderPath(loc, rel);
-  // A location that hasn't been backed up yet: its schedule, and backing it up
-  if (!loc.snapshots.length) {
-    aside.replaceChildren(
-      el('div', { class: 'history-head' },
-        el('div', {}, el('h2', {}, 'Snapshots (0)'), el('div', { class: 'target' }, target), scheduleLine(loc, target, rel, isFolder)),
-        backupButton(loc)),
-      el('p', { class: 'note' }, 'No snapshots yet'));
-    return;
-  }
   // Snapshots can be viewed and compared for the location open in the middle; elsewhere a click goes there
   const viewing = loc.path === state.location;
   const selected = viewing ? selectedSnapshot(loc) : null;
@@ -251,35 +287,9 @@ export function renderSide() {
         el('span', { class: 'ago' }, timeAgo(snap.time))));
   };
 
-  // Newest first, each with what it changed in the path since the one before
   const rows = [];
   for (let i = complete.length - 1; i >= 0; i--) {
     rows.push(row(complete[i], i === 0 ? 'first' : stepChange(complete[i - 1], complete[i], rel, isFolder)));
   }
-
-  // The same path may be backed up by other locations too, whose snapshots of it can be shown instead
-  const elsewhere = storage.filter(l => l !== loc && contains(l));
-  const middle = storage.find(l => l.path === state.location && contains(l)) || locationOf(target);
-
-  aside.replaceChildren(...[
-    el('div', { class: 'history-head' },
-      el('div', {}, el('h2', {}, `Snapshots (${complete.length})`), el('div', { class: 'target' }, target),
-        scheduleLine(loc, target, rel, isFolder)),
-      // Up one folder level within the location, for the panel only; the middle stays where it is
-      rel ? el('button', {
-        class: 'btn', style: 'font-size:0.8rem;flex:none', title: 'Show the snapshots of the folder above',
-        onclick: () => {
-          const above = target.slice(0, target.lastIndexOf('\\'));
-          ui.pickedIsFolder = true;
-          navigate({ history: above.toLowerCase() === currentPath().toLowerCase() ? null : above });
-        },
-      }, '↑ Up') : null,
-      backupButton(loc)),
-    el('ul', { class: 'snaps' }, inProgress.map(s => row(s, null, 'partial')), rows),
-    elsewhere.length ? el('div', { class: 'elsewhere' }, 'Also backed up in ',
-      elsewhere.map((l, i) => [i ? ', ' : '', el('button', {
-        title: `Show its snapshots in ${l.path} here`,
-        onclick: () => navigate({ via: l === middle ? null : l.path }),
-      }, l.path)])) : null,
-  ].filter(Boolean));
+  return el('ul', { class: 'snaps' }, inProgress.map(s => row(s, null, 'partial')), rows);
 }

@@ -55,19 +55,21 @@ export async function startJob(url, body, job) {
   followJobs();
 }
 
-// The panel at the bottom, and the snapshots panel's backup button, which says whether one's going
+// The panel at the bottom, and the snapshots panel's backup buttons, one for each location, which say whether
+// one's going
 export function jobsChanged() {
   renderJobs();
-  const button = document.getElementById('backup-now');
-  const loc = button && storage.find(l => l.path === button.dataset.location);
-  if (loc) button.replaceWith(backupButton(loc));
+  for (const button of document.querySelectorAll('.backup-now')) {
+    const loc = storage.find(l => l.path === button.dataset.location);
+    if (loc) button.replaceWith(backupButton(loc));
+  }
 }
 
 // Back up a location now, or while it's being backed up, cancel that
 export function backupButton(loc) {
   const job = backupOf(loc);
   const button = el('button', {
-    id: 'backup-now', class: 'btn', style: 'font-size:0.8rem;flex:none', 'data-location': loc.path,
+    class: 'btn backup-now', style: 'font-size:0.8rem;flex:none', 'data-location': loc.path,
     disabled: job?.state === 'cancelling',
     title: job ? 'Stop it, keeping what it got through as an incomplete snapshot' : `Take a snapshot of ${loc.path} now, as its schedule would`,
     onclick: () => (job ? cancelBackup(job) : backUp(loc.path)),

@@ -5,7 +5,7 @@ import { scheduleDialog } from './schedules.js';
 import { diskText, joinRel, renderLocations, treeNodes } from './sidebar.js';
 import { realCase } from './snapshots.js';
 import { navigate } from './state.js';
-import { asOfSnapshot, hiddenAsOf, locationOf, relativeTo, snapshotListing, storage, totalAsOf } from './storage.js';
+import { LOCATION_DOT, asOfSnapshot, hiddenAsOf, locationOf, relativeTo, snapshotListing, storage, totalAsOf } from './storage.js';
 
 // Go to a typed path: into its folder in the location that contains it, or a folder page above locations
 export function goToPath(typed) {
@@ -118,7 +118,7 @@ export function renderMatches() {
     return el('div', { class: `fsrow${match.kind === 'location' ? '' : ' group'}`, style: 'padding-left:6px' },
       el('span'),
       el('button', { class: 'label', title: match.path, onclick: () => { clearFilter(); openMatch(match); } },
-        match.kind === 'location' ? el('span', { class: 'dot', 'aria-hidden': 'true' }) : null,
+        match.kind === 'location' ? el('span', { class: 'dot', title: LOCATION_DOT }) : null,
         cut ? el('span', { class: 'prefix' }, match.kind === 'location' && !byPath ? highlight(match.path.slice(0, cut), marked) : match.path.slice(0, cut)) : null,
         el('span', { class: 'text' }, highlight(own + (match.kind !== 'file' && !own.endsWith('\\') ? '\\' : ''), marked))),
       el('span', { class: 'total muted' }, match.kind === 'location' ? diskText(totalAsOf(match.loc)) : formatSize(match.size)));

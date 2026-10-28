@@ -80,14 +80,40 @@ export function showProgress() {
 
 export let redrawQueued = false;
 
+// Redraw once whatever's arrived has, but not while a mouse button's down: a click only counts if what was pressed
+// is still there when it's let go, so redrawing in between, as happens a lot while things load, would lose it.
+// It's redrawn once the click's done.
+let pointerDown = false;
+let redrawAfterPointer = false;
+
 export function redrawSoon() {
   if (redrawQueued) return;
   redrawQueued = true;
   requestAnimationFrame(() => {
+    if (pointerDown) {
+      redrawAfterPointer = true;
+      return;
+    }
     redrawQueued = false;
     render();
   });
 }
+
+function pointerReleased() {
+  pointerDown = false;
+  if (!redrawAfterPointer) return;
+  redrawAfterPointer = false;
+  // After the click the release makes has been handled
+  setTimeout(() => {
+    redrawQueued = false;
+    render();
+  });
+}
+document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+document.addEventListener('pointerup', pointerReleased, true);
+// A press that ends elsewhere, such as outside the window, doesn't hold redrawing up
+document.addEventListener('pointercancel', pointerReleased, true);
+window.addEventListener('blur', pointerReleased);
 
 export const api = {
   // Everything else is built from this, so the page waits for it, showing how the server's getting on, as

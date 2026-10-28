@@ -3,7 +3,7 @@ import { api, redrawSoon } from './data.js';
 import { el, plural } from './format.js';
 import { backUp } from './jobs.js';
 import { navigate } from './state.js';
-import { refreshStorage } from './storage.js';
+import { refreshStorage, storage } from './storage.js';
 
 // How often a folder is backed up on its own, from kopia's policies via the server, loaded once each, and
 // again after one's changed: { interval, times, cron, manual, from, own, inherited }
@@ -48,21 +48,21 @@ export function scheduleText(schedule) {
 
 export const scheduleSource = (schedule, here) => (schedule.from ? `Set by ${schedule.from}` : here ? 'Set for this folder' : `Set for ${schedule.path}`);
 
-// Under the snapshots panel's heading: how often what it's for is backed up, and changing that. A folder
-// inside a location is backed up with it, unless it's given a schedule of its own.
-export function scheduleLine(loc, target, rel, isFolder) {
-  if (!isFolder) return null;
-  const own = scheduleOf(target);
-  // It can be changed once what the dialog needs is loaded, so the dialog opens straight away
-  const line = (schedule, words, action, mode) => el('div', { class: 'schedule' },
-    schedule ? el('span', { title: scheduleSource(schedule, mode === 'change') }, words(schedule)) : el('span', { class: 'muted' }, '…'),
-    el('button', { class: 'linklike', disabled: !schedule || !own, onclick: () => scheduleDialog(target, mode) }, action));
-  // Inside a location, whether it has a schedule of its own decides what's offered, so that waits until it's known
-  if (rel && own === undefined) return el('div', { class: 'schedule' }, el('span', { class: 'muted' }, '…'));
-  if (rel && !own?.own) {
-    return line(scheduleOf(loc.path), schedule => `${scheduleText(schedule)} with ${loc.path}`, 'Back up on its own…', 'separate');
-  }
-  return line(own, scheduleText, 'Change…', 'change');
+// Under a location's heading in the snapshots panel: how often its snapshots are made, and changing that when
+// it's the location being looked at. It can be changed once its schedule's loaded, so the dialog opens straight away.
+export function scheduleLine(loc, changeable) {
+  const schedule = scheduleOf(loc.path);
+  return el('div', { class: 'schedule' },
+    schedule ? el('span', { title: scheduleSource(schedule, changeable) }, scheduleText(schedule)) : el('span', { class: 'muted' }, '…'),
+    changeable ? el('button', { class: 'linklike', disabled: !schedule, onclick: () => scheduleDialog(loc.path, 'change') }, 'Change…') : null);
+}
+
+// Under the snapshots panel's heading: backing up the folder being looked at on its own, unless it's a location
+// already. It can be clicked once its schedule's loaded, so the dialog opens straight away.
+export function separateLine(target, isFolder) {
+  if (!isFolder || storage.some(l => l.path.toLowerCase() === target.toLowerCase())) return null;
+  return el('div', { class: 'separate' },
+    el('button', { class: 'linklike', disabled: !scheduleOf(target), onclick: () => scheduleDialog(target, 'separate') }, 'Back up on its own…'));
 }
 
 // Set how often a folder is backed up: a location's schedule (change), a folder inside one backed up on its

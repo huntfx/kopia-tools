@@ -1,7 +1,7 @@
 // Sortable tables with rows that are picked with a click and opened with a double click
 import { el, formatFull, formatSize, gradientPositions, gradientRgb, plural, textColour } from './format.js';
 import { navigate, ui } from './state.js';
-import { currentPath } from './storage.js';
+import { LOCATION_DOT, currentPath } from './storage.js';
 
 // items: { key, label, prefix?, folder, location?, live?, size, files, modified, pick?, open }
 // up: { label, go } or null. rerender returns a fresh copy of the panel, for re-sorting.
@@ -19,7 +19,7 @@ export function contentsTable(legend, up, items, rerender) {
     `${item.pick ? 'Click for its history - ' : ''}Double-click to open${item.location ? ` (${item.location.path} is a backup location)` : ''}`,
     el('td', {},
       el('span', { class: 'mono' },
-        item.location ? el('span', { class: 'swatch', style: 'background:var(--accent);border-radius:50%' }) : null,
+        item.location ? el('span', { class: 'swatch', style: 'background:var(--accent);border-radius:50%', title: LOCATION_DOT }) : null,
         item.prefix ? el('span', { class: 'muted' }, item.prefix) : null,
         item.label + (item.folder ? '\\' : '')),
       item.live ? el('span', { class: 'badge', style: 'margin-left:8px' }, 'Live') : null),
