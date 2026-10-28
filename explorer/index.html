@@ -3159,17 +3159,36 @@ function renderSide() {
 
 /* ---------- One box: filter the sidebar, or go to a path ---------- */
 
-// Something with a drive letter or slashes is a path to go to; anything else filters
-const looksLikePath = text => /^[a-z]:/i.test(text) || /[\\/]/.test(text);
+// A path starting with a drive is one to go to; anything else filters, including part of a path, such as
+// Documents\Code copied from the top of a page
+const looksLikePath = text => /^[a-z]:/i.test(text);
 let sidebarFilter = '';
 
-// Matches for a filter: backup locations by path, then folders and files by name from each location's
-// snapshot for the as-of date, as far as their listings are known
+// What a filter is looked for in: with a slash, it's part of a path, matched against the full path up to
+// and into its last folder or file, so it finds what it names rather than everything inside; otherwise names
+function filterQuery(query) {
+  const q = query.toLowerCase().replaceAll('/', '\\').replace(/^\\+|\\+$/g, '');
+  const byPath = q.includes('\\');
+  return {
+    q, byPath, last: byPath ? q.slice(q.lastIndexOf('\\') + 1) : q,
+    matches: (name, path) => {
+      if (!byPath) return name.toLowerCase().includes(q);
+      const lower = path.toLowerCase().replace(/\\$/, '');
+      const at = lower.lastIndexOf(q);
+      return at >= 0 && at + q.length > lower.lastIndexOf('\\');
+    },
+  };
+}
+
+// Matches for a filter: backup locations by path, then folders and files by name (or path) from each
+// location's snapshot for the as-of date, as far as their listings are known
 function findMatches(query) {
-  const q = query.toLowerCase();
+  const { q, matches, byPath } = filterQuery(query);
   const results = new Map();
   for (const loc of storage) {
-    if (loc.path.toLowerCase().includes(q)) results.set(loc.path.toLowerCase(), { kind: 'location', loc, path: loc.path, name: loc.path });
+    if (byPath ? matches(loc.path, loc.path) : loc.path.toLowerCase().includes(q)) {
+      results.set(loc.path.toLowerCase(), { kind: 'location', loc, path: loc.path, name: loc.path });
+    }
   }
   for (const loc of storage) {
     const snap = asOfSnapshot(loc);
@@ -3180,7 +3199,7 @@ function findMatches(query) {
       for (const entry of snapshotListing(snap, rel, false) || []) {
         const inside = joinRel(rel, entry.n);
         const path = `${base}\\${inside.replaceAll('/', '\\')}`;
-        if (entry.n.toLowerCase().includes(q) && !results.has(path.toLowerCase())) {
+        if (matches(entry.n, path) && !results.has(path.toLowerCase())) {
           results.set(path.toLowerCase(), { kind: entry.t === 'd' ? 'folder' : 'file', loc, rel: inside, path, name: entry.n, size: entry.s });
         }
         if (entry.t === 'd') walk(inside);
@@ -3210,6 +3229,9 @@ function highlight(text, query) {
 // The sidebar while filtering: a flat list of matches instead of the tree
 function renderMatches() {
   const matches = findMatches(sidebarFilter);
+  // Part of a path marks where it ends, in the name
+  const { byPath, last } = filterQuery(sidebarFilter);
+  const marked = byPath ? last : sidebarFilter;
   const limit = 100;
   document.getElementById('sum').replaceChildren(
     `${matches.length.toLocaleString('en-GB')} ${matches.length === 1 ? 'match' : 'matches'} for `, el('b', {}, `“${sidebarFilter}”`), ' · ',
@@ -3221,8 +3243,8 @@ function renderMatches() {
       el('span'),
       el('button', { class: 'label', title: match.path, onclick: () => { clearFilter(); openMatch(match); } },
         match.kind === 'location' ? el('span', { class: 'dot', 'aria-hidden': 'true' }) : null,
-        cut ? el('span', { class: 'prefix' }, match.kind === 'location' ? highlight(match.path.slice(0, cut), sidebarFilter) : match.path.slice(0, cut)) : null,
-        el('span', { class: 'text' }, highlight(own + (match.kind !== 'file' && !own.endsWith('\\') ? '\\' : ''), sidebarFilter))),
+        cut ? el('span', { class: 'prefix' }, match.kind === 'location' && !byPath ? highlight(match.path.slice(0, cut), marked) : match.path.slice(0, cut)) : null,
+        el('span', { class: 'text' }, highlight(own + (match.kind !== 'file' && !own.endsWith('\\') ? '\\' : ''), marked))),
       el('span', { class: 'total muted' }, match.kind === 'location' ? diskText(locationTotal(match.loc)) : formatSize(match.size)));
   }), ...(matches.length > limit ? [el('div', { class: 'more', style: 'padding:4px 16px' }, `…and ${matches.length - limit} more`)] : []),
   ...(matches.length ? [] : [el('p', { class: 'note', style: 'padding:0 16px' }, 'Nothing matches. Paste a full path to go straight to it.')]));
