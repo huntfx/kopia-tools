@@ -1113,9 +1113,9 @@ const fillColour = rgb => `rgb(${rgb.join(' ')})`;
 const state = {
   location: null, folder: null, scope: '', file: null, snapshot: null, compare: null, history: null,
   // * is for things that only existed between two snapshots compared, which are always shown, greyed out;
-  // d is for files whose modified date changed but not their contents; i (⊘) is for things that went from one
-  // snapshot to the next because kopia's ignore rules leave them out
-  filters: { '+': true, '-': true, '~': true, '*': true, d: true, i: true }, filterText: '',
+  // i (⊘) is for things that went from one snapshot to the next because kopia's ignore rules leave them out.
+  // Files whose modified date changed but not their contents (d, •) go with modified ones (~).
+  filters: { '+': true, '-': true, '~': true, '*': true, i: true }, filterText: '',
 };
 
 function readHash() {
@@ -2461,9 +2461,11 @@ const isGone = k => k === '-' || k === 'i';
 const changeDelta = c => (c.k === '+' ? c.s || 0 : isGone(c.k) ? -(c.s || 0) : c.k === '~' && c.o != null ? c.s - c.o : 0);
 const KIND_CLASS = { '+': 'c-added', '-': 'c-removed', '~': 'c-modified', d: 'c-modified', i: 'c-ignored' };
 const KIND_SYMBOL = { '+': '+', '-': '−', '~': '~', d: '•', i: '⊘', '*': '' };
+// How many of a kind of change in a folder's counts, where modified includes only the modified date changing
+const kindTotal = (counts, k) => counts[k] + (k === '~' ? counts.d : 0);
 // A count of one kind of change, like "+3", saying what it counts on hover: files, or with times, how many
 // times things were, where a file changed in several snapshots counts each time
-const KIND_WORDS = { '+': 'added', '-': 'removed', '~': 'modified', d: 'with only their modified date changed', i: 'ignored' };
+const KIND_WORDS = { '+': 'added', '-': 'removed', '~': 'modified', d: 'with only a date change', i: 'ignored' };
 const kindCount = (k, n, times = false) => el('span', {
   class: KIND_CLASS[k],
   title: times ? `${KIND_WORDS[k][0].toUpperCase()}${KIND_WORDS[k].slice(1)} ${plural(n, 'time')}` : `${plural(n, 'file')} ${KIND_WORDS[k]}`,
@@ -2656,20 +2658,20 @@ function renderChanges(loc, selected) {
   const transient = tree.counts['*'];
   // Files no longer backed up because of the ignore rules, which are otherwise an unexplained drop in size
   const ignored = tree.counts.i;
-  const counts = el('span', { class: 'counts' },
-    kindCount('+', tree.counts['+']), kindCount('-', tree.counts['-']), kindCount('~', tree.counts['~']),
-    dates ? (dates.complete ? kindCount('d', tree.counts.d) : el('span', { class: 'c-modified', title: 'Finding files with only their modified date changed…' }, '•…')) : null,
-    kindCount('i', ignored));
+  // Modified includes files with only their modified date changed, which their own symbol marks in the tree
+  const modified = kindCount('~', kindTotal(tree.counts, '~'));
+  if (tree.counts.d) modified.title += `, including ${tree.counts.d.toLocaleString('en-GB')} ${KIND_WORDS.d}`;
+  if (dates && !dates.complete) {
+    modified.append('…');
+    modified.title += `, still finding ones ${KIND_WORDS.d}`;
+  }
+  const counts = el('span', { class: 'counts' }, kindCount('+', tree.counts['+']), kindCount('-', tree.counts['-']), modified, kindCount('i', ignored));
   const toggle = k => { state.filters[k] = !state.filters[k]; panel.replaceWith(renderChanges(loc, selected)); };
   const filters = el('span', { class: 'filters' }, ['+', '-', '~'].map(k => el('button', {
     class: KIND_CLASS[k], 'aria-pressed': String(state.filters[k]),
     title: `Show ${KIND_WORDS[k]}`,
     onclick: () => toggle(k),
   }, KIND_SYMBOL[k])),
-  el('button', {
-    class: 'c-modified dates', 'aria-pressed': String(state.filters.d), onclick: () => toggle('d'), disabled: !LIVE,
-    title: LIVE ? 'Show date-only changes' : 'Needs the server: run kopia_explorer.py',
-  }, '•'),
   el('button', {
     class: 'c-ignored', 'aria-pressed': String(state.filters.i), onclick: () => toggle('i'), title: 'Show ignored',
   }, '⊘'));
@@ -2680,7 +2682,7 @@ function renderChanges(loc, selected) {
   const treeBox = el('div', { class: 'tree' });
   const filtered = () => {
     const needle = state.filterText.toLowerCase();
-    return buildTree(scoped.filter(c => state.filters[c.k] && (!needle || c.p.toLowerCase().includes(needle))));
+    return buildTree(scoped.filter(c => state.filters[c.k === 'd' ? '~' : c.k] && (!needle || c.p.toLowerCase().includes(needle))));
   };
   const visible = filtered();
   // Everything sits under the folder being looked at, so collapsing that collapses it all
@@ -2742,7 +2744,7 @@ const renderTree = (root, sizePositions) => renderNodes(root, sizePositions);
 // sorts by what it shows, which is the last of them.
 const isChangeFolder = n => n.children.size > 0 || !!n.change?.d;
 const rowNode = n => compact(n).node;
-const changeCount = k => n => (isChangeFolder(rowNode(n)) ? rowNode(n).counts[k] : null);
+const changeCount = k => n => (isChangeFolder(rowNode(n)) ? kindTotal(rowNode(n).counts, k) : null);
 const changeColumns = [
   { key: 'name', label: 'Name', value: n => n.name },
   { key: '+', label: '+', title: 'Files added', cls: 'c-added', desc: true, value: changeCount('+') },
@@ -2816,7 +2818,7 @@ function renderNode(original, sizePositions, whole = false) {
   // The same columns for every row: files added, removed and modified (for folders; a file's symbol says
   // which it is), its size, and how much bigger or smaller it got
   const count = k => el('span', { class: KIND_CLASS[k] },
-    isFolder && node.counts[k] ? node.counts[k].toLocaleString('en-GB') : '');
+    isFolder && kindTotal(node.counts, k) ? kindTotal(node.counts, k).toLocaleString('en-GB') : '');
   const delta = isFolder ? node.delta : changeDelta(change);
   const deltaCell = delta && shownKind === 'i'
     // Smaller, but nothing on disk was lost, so not on the red scale
@@ -2841,7 +2843,7 @@ function renderNode(original, sizePositions, whole = false) {
   // Things that only existed in between, and folders with nothing else in them, are greyed out with no symbol;
   // files whose modified date changed but not their contents get a small dot
   const transient = kind === '*' || only('*');
-  const rowTitle = kind === 'd' ? `Only its modified date changed, from ${formatFull(change.from)} to ${formatFull(change.to)}`
+  const rowTitle = kind === 'd' ? `Date changed: ${formatFull(change.from)} → ${formatFull(change.to)}`
     : datesOnly ? `${plural(node.counts.d, 'file')} ${KIND_WORDS.d}`
     : kind === 'i' ? ignoredReason(change.why)
     : ignoredOnly ? `${plural(node.counts.i, 'file')} ignored by ${ignoredRules(node)}`
@@ -2976,7 +2978,7 @@ function describeStep(change, isFolder) {
     if (change.touched === undefined) return el('span', { class: 'muted' }, LIVE && pending.size ? 'Checking…' : 'No content changes');
     return change.touched
       ? el('span', { class: 'muted', title: 'kopia stored it again because a modified date changed, but no file\'s contents did' },
-        isFolder ? 'Only modified dates changed' : 'Only its modified date changed')
+        isFolder ? 'Dates changed' : 'Date changed')
       : el('span', { class: 'muted', title: 'Nothing in it changed; something elsewhere in the location did' }, 'No changes');
   }
   // Only the kinds of change that happened, to keep the panel quiet
