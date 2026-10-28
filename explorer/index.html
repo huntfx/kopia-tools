@@ -1274,15 +1274,19 @@ const locationTree = buildLocationTree();
 const collapsedFolders = new Set();
 const openFolders = new Set();
 
-// Open the folders above a path, so it shows and is highlighted in the sidebar, without listing its own contents
+// Open the folders above a path, so it shows and is highlighted in the sidebar, without listing its own
+// contents. In the lists by size or name, each location is a row of its own, so only folders inside the
+// path's own location are opened, not the locations it's nested in; switching to the tree opens those.
 function reveal(path) {
   if (!path) return;
   collapsedFolders.delete(locationTree.path);
+  const owner = sidebarSort === 'tree' ? null : locationOf(path)?.path.replace(/\\$/, '').toLowerCase();
   const parts = path.replace(/\\$/, '').split('\\');
   for (let i = 1; i < parts.length; i++) {
     const sub = i === 1 ? `${parts[0]}\\` : parts.slice(0, i).join('\\');
+    const key = sub.toLowerCase();
     collapsedFolders.delete(sub);
-    openFolders.add(sub.toLowerCase());
+    if (!owner || key === owner || key.startsWith(`${owner}\\`)) openFolders.add(key);
   }
 }
 
@@ -1321,6 +1325,8 @@ function renderSort() {
       onclick: () => {
         if (active) sidebarReversed = !sidebarReversed;
         else { sidebarSort = key; sidebarReversed = false; }
+        // The tree shows what's open through the locations above it, which the lists leave closed
+        if (sidebarSort === 'tree') reveal(currentFolder());
         try {
           localStorage.setItem('sidebarSort', sidebarSort);
           localStorage.setItem('sidebarReversed', sidebarReversed ? '1' : '0');
