@@ -153,6 +153,8 @@ a.btn { color: inherit; text-decoration: none; display: inline-block; }
 .fsrow mark { background: var(--warn-bg); color: inherit; border-radius: 2px; box-shadow: 0 0 0 1px var(--warn-line); }
 .linklike { background: none; border: 0; padding: 0; color: var(--accent); font-size: inherit; }
 .linklike:hover { text-decoration: underline; }
+/* Like disabled buttons */
+.linklike:disabled { opacity: 0.55; cursor: not-allowed; text-decoration: none; }
 .badge {
   display: inline-block; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
   padding: 0 6px; border-radius: 4px; background: var(--warn-bg); color: var(--warn-line); border: 1px solid var(--warn-line);
@@ -740,9 +742,10 @@ const scheduleSource = (schedule, here) => (schedule.from ? `Set by ${schedule.f
 function scheduleLine(loc, target, rel, isFolder) {
   if (!LIVE || !isFolder) return null;
   const own = scheduleOf(target);
+  // It can be changed once what the dialog needs is loaded, so the dialog opens straight away
   const line = (schedule, words, action, mode) => el('div', { class: 'schedule' },
     schedule ? el('span', { title: scheduleSource(schedule, mode === 'change') }, words(schedule)) : el('span', { class: 'muted' }, '…'),
-    el('button', { class: 'linklike', onclick: () => scheduleDialog(target, mode) }, action));
+    el('button', { class: 'linklike', disabled: !schedule || !own, onclick: () => scheduleDialog(target, mode) }, action));
   if (rel && !own?.own) {
     return line(scheduleOf(loc.path), schedule => `${scheduleText(schedule)} with ${loc.path}`, 'Back up on its own…', 'separate');
   }
@@ -753,9 +756,16 @@ function scheduleLine(loc, target, rel, isFolder) {
 // own (separate), or any other folder on the PC backed up (new). A folder with a schedule of its own is a
 // location, though it has nothing in it until it's backed up, so the last two do that straight away unless
 // unticked, then show it.
+let scheduleDialogOpen = false;
 async function scheduleDialog(path, mode) {
+  // One at a time, so clicking again while its schedule loads doesn't open a second
+  if (scheduleDialogOpen) return;
+  scheduleDialogOpen = true;
   const current = await loadSchedule(path);
-  if (!current) return;
+  if (!current) {
+    scheduleDialogOpen = false;
+    return;
+  }
   const separate = mode !== 'change';
   const inherited = current.inherited;
   // Its own interval stays a choice if it was set to something else elsewhere, so it isn't changed by accident
@@ -801,7 +811,10 @@ async function scheduleDialog(path, mode) {
     el('p', {}, 'KopiaUI picks up the change when it next refreshes, within 4 hours.'),
     error,
     el('div', { class: 'actions' }, cancel, save));
-  dialog.addEventListener('close', () => dialog.remove());
+  dialog.addEventListener('close', () => {
+    dialog.remove();
+    scheduleDialogOpen = false;
+  });
   document.body.append(dialog);
   dialog.showModal();
   select.focus();
