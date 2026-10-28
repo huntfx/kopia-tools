@@ -701,6 +701,18 @@ def run_delete(job):
         job['finished'] = time.time()
 
 
+REPOSITORY_SIZE = re.compile(r'^Total Packed: ([\d.]+) (\w+)', re.M)
+
+
+def repository_size():
+    """The repository's exact size on disk, from kopia's index, which it keeps a copy of locally: all the data
+    stored, once however many locations share it. It takes a few seconds, so it's only worked out when asked."""
+    match = REPOSITORY_SIZE.search(kopia('content', 'stats'))
+    if not match:
+        raise RuntimeError('kopia content stats didn\'t say how much is stored')
+    return {'size': size_of(*match.groups())}
+
+
 def pick_folder():
     """A folder to back up, picked in a folder picker, or None if cancelled."""
     def show(root):
@@ -749,6 +761,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(listing(query['obj']))
             if url.path == '/api/schedule':
                 return self.send_json(schedule_of(query['path']))
+            if url.path == '/api/repository-size':
+                return self.send_json(repository_size())
             if url.path == '/api/jobs':
                 return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
             self.send_error(404)

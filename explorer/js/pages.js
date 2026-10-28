@@ -5,7 +5,7 @@ import { renderChurn } from './churn.js';
 import { notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
 import { beingDeleted, restoreItem, showInExplorer } from './jobs.js';
-import { compactFolder, diskText, locationTree, locationsBelow, shownBelow, treeNodes, treeTotal } from './sidebar.js';
+import { compactFolder, diskText, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
 import { describeStep, openHistory, stepChange } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
 import { asOfSnapshot, backingUpNow, enclosingLocation, hiddenAsOf, isCancelled, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
@@ -25,10 +25,11 @@ export function parentNode(node) {
 }
 
 // Size, files and modified time of a folder from each location's snapshot as of the date (the latest
-// by default), counting a location nested inside another only once, as part of the outer one
+// by default), counting a location nested inside another only once, as part of the outer one, and not
+// counting ones hidden for being newer than the date
 export function latestSummary(node) {
   if (node.location) {
-    const snap = asOfSnapshot(node.location);
+    const snap = !hiddenAsOf(node.location) && asOfSnapshot(node.location);
     return snap && !snap.incomplete ? { size: snap.size, files: snap.files, modified: snap.mtime } : { size: 0, files: 0, modified: null };
   }
   const summary = { size: 0, files: 0, modified: null };
@@ -106,15 +107,17 @@ export function renderFolder(main) {
     main.replaceChildren(el('div', { class: 'panel empty' }, `${state.folder} isn't a folder with backup locations in it.`));
     return;
   }
-  // Not counting locations hidden for being newer than the as-of date
-  const below = locationsBelow(node).filter(l => !hiddenAsOf(l));
+  // Like a location's page: the size and files of what's in it, then the space it takes on disk, all as of the
+  // as-of date. The PC is the whole repository, whose exact size can be worked out.
+  const { size, files } = latestSummary(node);
   // The storage chart isn't there with fewer than two locations to compare
   main.replaceChildren(...[
     el('section', { class: 'loc-head' },
       pathCrumbs(node.path),
       el('div', { class: 'meta' },
-        el('span', {}, el('b', {}, diskText(treeTotal(node))), ' on disk'),
-        el('span', {}, plural(below.length, 'backup location')))),
+        el('span', {}, el('b', {}, formatSize(size))),
+        el('span', {}, plural(files, 'file')),
+        el('span', {}, node.root ? repositoryDiskText(treeTotal(node), true) : diskText(treeTotal(node)), ' on disk'))),
     renderContents(node),
     renderStorageChart(node),
   ].filter(Boolean));

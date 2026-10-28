@@ -221,7 +221,7 @@ export function renderSide() {
     return el('li', {
       class: classes.filter(Boolean).join(' '),
       title: deleting ? 'This snapshot is being deleted' : snap.incomplete ? `This snapshot ${unfinished(snap)}`
-        : here ? 'Click to view · Shift-click to compare with it' : 'Click to open at this snapshot',
+        : here ? 'Click to view - Shift-click to compare with it' : 'Click to open at this snapshot',
       onclick: snap.incomplete || deleting ? null : event => (here && event.shiftKey ? pickSnapshot(snap, selected, true) : open()),
     },
       el('div', { class: 'top' },

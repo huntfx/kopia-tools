@@ -149,7 +149,7 @@ export function stackedChart(options) {
   ].sort((a, b) => (b.at === -1) - (a.at === -1) || b.at - a.at);
   const legend = el('div', { class: 'chart-legend' }, entries.map(({ s, i, hidden: isHidden }) => el('button', {
     class: isHidden ? 'hidden-item' : null,
-    title: isHidden ? `${s.title}\nHidden · click to show it again`
+    title: isHidden ? `${s.title}\nHidden - click to show it again`
       : s.others ? 'Click to hide the bigger ones and show these separately' : `${s.title}\nClick to hide it`,
     onmouseenter: isHidden ? null : () => highlight(i), onmouseleave: isHidden ? null : () => highlight(null),
     onclick: isHidden ? () => showItem(s) : s.others ? openOthers : () => hideItem(s),
@@ -270,7 +270,7 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
       when(t, isNow), row(band, j),
       el('div', { class: 'path' }, series[band].title),
       fromSnapshot(series[band].lastAt(t)),
-      el('div', { class: 'hint' }, series[band].others ? 'Click to hide the bigger ones and show these separately' : 'Click for its snapshots · double-click to open it'),
+      el('div', { class: 'hint' }, series[band].others ? 'Click to hide the bigger ones and show these separately' : 'Click for its snapshots - double-click to open it'),
     ] : [
       when(t, isNow),
       ...[...series.keys()].reverse().map(i => row(i, j)),

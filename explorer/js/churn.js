@@ -142,10 +142,10 @@ export function renderChurn(loc) {
     const sum = total(a);
     const fill = sum ? fillColour(gradientRgb(positions.get(sum))) : null;
     return makePickable(
-      el('div', { class: 'churn-row', title: 'Click for its history · double-click to open' },
+      el('div', { class: 'churn-row', title: 'Click for its history - double-click to open' },
         el('span', { class: 'churn-name', title: row.label }, el('span', { class: 'own' }, row.label)),
         // Written and removed side by side, so deletions count as activity too
-        el('div', { class: 'churn-track', title: `${formatSize(a.written)} added or modified · ${formatSize(a.removed)} removed` },
+        el('div', { class: 'churn-track', title: `${formatSize(a.written)} added or modified - ${formatSize(a.removed)} removed` },
           a.written ? el('div', { class: 'churn-fill', style: `width:${100 * a.written / max}%;background:${fill}` }) : null,
           a.removed ? el('div', { class: 'churn-fill removed', style: `width:${100 * a.removed / max}%` }) : null),
         el('span', { class: 'num' }, formatSize(sum)),

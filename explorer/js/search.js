@@ -107,7 +107,9 @@ export function renderMatches() {
   const { byPath, last } = filterQuery(sidebarFilter);
   const marked = byPath ? last : sidebarFilter;
   const limit = 100;
-  document.getElementById('sum').replaceChildren(
+  const sum = document.getElementById('sum');
+  sum.hidden = false;
+  sum.replaceChildren(
     `${matches.length.toLocaleString('en-GB')} ${matches.length === 1 ? 'match' : 'matches'} for `, el('b', {}, `“${sidebarFilter}”`), ' · ',
     el('button', { class: 'linklike', onclick: () => clearFilter() }, 'Clear'));
   document.getElementById('locations').replaceChildren(...matches.slice(0, limit).map(match => {

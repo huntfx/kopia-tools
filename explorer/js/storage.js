@@ -3,7 +3,7 @@ import { DATA, api, failures, showProgress } from './data.js';
 import { el, formatFull, plural } from './format.js';
 import { jobList } from './jobs.js';
 import { render } from './render.js';
-import { buildSidebarTree, rescaleTree } from './sidebar.js';
+import { buildSidebarTree, forgetExactSize, rescaleTree } from './sidebar.js';
 import { navigate, state, ui } from './state.js';
 
 // Backups and deletes that finished after the snapshots were last read, by the server's clock, applied on
@@ -67,6 +67,7 @@ export function renderRepoStatus(progress = {}) {
 // been deleted going back to the default, and anything that failed to load for a deleted one forgotten
 export function snapshotsChanged() {
   fillTotals();
+  forgetExactSize();
   rescaleTree();
   const known = new Set(storage.flatMap(l => l.snapshots.map(s => s.id)));
   for (const url of [...failures.keys()]) {

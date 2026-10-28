@@ -257,7 +257,7 @@ export function renderChanges(loc, selected) {
       const active = sort.key === col.key;
       return el('span', { class: col.cls || null, 'aria-sort': active ? (sort.desc ? 'descending' : 'ascending') : null },
         el('button', {
-          class: 'sort-head', title: `${col.title ? `${col.title} · ` : ''}${active ? 'Click again to reverse' : 'Click to sort'}`,
+          class: 'sort-head', title: `${col.title ? `${col.title} - ` : ''}${active ? 'Click again to reverse' : 'Click to sort'}`,
           onclick: () => {
             if (active) sort.desc = !sort.desc;
             else { sort.key = col.key; sort.desc = !!col.desc; }
@@ -398,7 +398,7 @@ export function renderNode(original, sizePositions, whole = false) {
     ? navigate({ scope: inside })
     : navigate({ scope: inside.includes('/') ? inside.slice(0, inside.lastIndexOf('/')) : '', file: inside.slice(inside.lastIndexOf('/') + 1) });
   const name = el('button', {
-    class: 'name', title: 'Click for its snapshots · double-click to open',
+    class: 'name', title: 'Click for its snapshots - double-click to open',
     onclick: event => { if (event.detail === 1) openHistory(node.path, !!isFolder); },
     ondblclick: node.path ? goInto : null,
   }, cut ? el('span', { class: 'muted' }, label.slice(0, cut)) : null, label.slice(cut) + (isFolder ? '/' : ''));

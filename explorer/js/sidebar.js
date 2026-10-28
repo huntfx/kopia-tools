@@ -1,6 +1,7 @@
 // The sidebar: the tree of backup locations, or them listed by size or name
 import { DATA, repositoryTitle } from './data.js';
 import { el, formatSize, gradientPositions, gradientRgb, textColour } from './format.js';
+import { render } from './render.js';
 import { renderMatches, sidebarFilter } from './search.js';
 import { navigate, state } from './state.js';
 import { asOfSnapshot, backingUpNow, currentFolder, hiddenAsOf, locationOf, selectedSnapshot, snapshotListing, storage, totalAsOf } from './storage.js';
@@ -36,6 +37,37 @@ export function locationsBelow(node) {
   const found = node.location ? [node.location] : [];
   for (const child of node.children.values()) found.push(...locationsBelow(child));
   return found;
+}
+
+// The whole repository's exact size on disk, from kopia's index, worked out only when asked, as it takes a few
+// seconds. The sum of the locations counts data they share once in each, so it's a little more. Undefined until
+// asked, 'loading' meanwhile, then { size } or { error }; forgotten when the snapshots change.
+export let exactSize;
+export function calculateExactSize() {
+  exactSize = 'loading';
+  render();
+  fetch('/api/repository-size')
+    .then(response => (response.ok ? response.json() : Promise.reject(new Error(response.statusText || `Error ${response.status}`))))
+    .then(result => { exactSize = result; }, error => { exactSize = { error: error instanceof TypeError ? 'can\'t reach the server' : error.message }; })
+    .finally(render);
+}
+export function forgetExactSize() {
+  exactSize = undefined;
+}
+
+// The whole repository's size on disk, given the sum of its locations': exact once worked out, otherwise that
+// sum. Where it can be clicked, which is on the PC's page, it's marked ~ as about that, and clicking works out
+// the exact size. That's only for now, so with an as-of date it's just the sum.
+export function repositoryDiskText(total, clickable = false) {
+  if (!state.asOf && exactSize?.size != null) return el('span', { title: 'Measured from kopia\'s index' }, formatSize(exactSize.size));
+  if (!clickable || state.asOf || total == null) return diskText(total);
+  const sum = `~${formatSize(total)}`;
+  if (exactSize === 'loading') return el('span', { class: 'muted', title: 'Calculating the exact size…' }, `${sum}…`);
+  return el('button', {
+    class: 'linklike', onclick: calculateExactSize,
+    title: exactSize?.error ? `Couldn't calculate the exact size: ${exactSize.error} - click to try again`
+      : 'Approximate size calculated from snapshots - click to calculate the exact size',
+  }, sum);
 }
 
 // Whether a folder in the tree has any location in it that isn't hidden for being newer than the as-of date
@@ -252,7 +284,8 @@ export function renderLocations() {
   if (sidebarFilter) return renderMatches();
   // The sizes, and so their colours, are as of the as-of date
   rescaleTree();
-  document.getElementById('sum').textContent = `${storage.filter(l => !hiddenAsOf(l)).length} locations · ${diskText(treeTotal(locationTree))} on disk`;
+  // The line under the heading is only for filtering; the PC's page says how many locations and how much
+  document.getElementById('sum').hidden = true;
   const direction = sidebarReversed ? -1 : 1;
   const rows = [];
   // In the flat lists the direction is for size or path, so what's inside a location is always A–Z
@@ -277,7 +310,7 @@ export function renderLocations() {
       // A click opens it in the middle; a double click expands or collapses it. The first click redraws
       // the sidebar, so the second is recognised by its click count rather than a dblclick event.
       el('button', {
-        class: 'label', title: `${loc ? `${loc.path} (backup location)` : item.tree?.root ? repositoryTitle() : item.path}${expandable ? ' · double-click to expand or collapse' : ''}`,
+        class: 'label', title: `${loc ? `${loc.path} (backup location)` : item.tree?.root ? repositoryTitle() : item.path}${expandable ? ' - double-click to expand or collapse' : ''}`,
         onclick: event => {
           if (event.detail < 2) navigate(itemTarget(item));
           // Collapsing this way closes everything inside it too, so it opens again one level at a time
@@ -293,7 +326,8 @@ export function renderLocations() {
       // The PC's total is everything, so it's left off the colour scale
       onDisk && total == null ? el('span', { class: 'total muted', title: 'Working out space on disk…' }, '…')
         : total != null
-          ? el('span', { class: 'total', style: total && !item.tree.root ? `color:${textColour(gradientRgb(treePositions.get(total)))}` : null }, formatSize(total))
+          ? el('span', { class: 'total', style: total && !item.tree.root ? `color:${textColour(gradientRgb(treePositions.get(total)))}` : null },
+            item.tree.root ? repositoryDiskText(total) : formatSize(total))
           : el('span', { class: 'total muted' }, item.size != null ? formatSize(item.size) : '')));
     if (open) for (const child of sorted(children)) walk(child, depth + 1);
   };

@@ -16,7 +16,7 @@ export function contentsTable(legend, up, items, rerender) {
   const sorted = sortRows(items, tableSorts.contents, columns, i => i.folder, i => (i.prefix || '') + i.label);
   const positions = gradientPositions(sorted.map(i => i.size).filter(Boolean));
   const row = item => pickableRow(item.key, item.pick, item.open,
-    `${item.pick ? 'Click for its history · ' : ''}Double-click to open${item.location ? ` (${item.location.path} is a backup location)` : ''}`,
+    `${item.pick ? 'Click for its history - ' : ''}Double-click to open${item.location ? ` (${item.location.path} is a backup location)` : ''}`,
     el('td', {},
       el('span', { class: 'mono' },
         item.location ? el('span', { class: 'swatch', style: 'background:var(--accent);border-radius:50%' }) : null,
@@ -97,6 +97,6 @@ export const pickableRow = (key, pick, open, title, ...cells) => makePickable(el
 export function upTableRow(label, go, span) {
   const here = currentPath();
   return pickableRow(`..${here}`, here ? () => navigate({ history: null }) : null, go,
-    `Click for this folder's snapshots · double-click to go up to ${label}`,
+    `Click for this folder's snapshots - double-click to go up to ${label}`,
     el('td', {}, el('span', { class: 'mono' }, '..')), el('td', { class: 'muted', colspan: span }, `Up to ${label}`));
 }
