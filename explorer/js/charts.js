@@ -143,7 +143,7 @@ export let chartOverlaid = false;
 
 try { chartOverlaid = localStorage.getItem('chartMode') === 'overlaid'; } catch {}
 
-// A stacked chart of things over time, biggest at the bottom: items are { name, title (unique), values (one per
+// A stacked chart of things over time, smallest at the bottom: items are { name, title (unique), values (one per
 // time), lastAt(t) (the snapshot a value at t is from), pick(), open() (what single and double clicks on its
 // band do, like its row in Contents), hint (saying so, or null where they do nothing) }, biggest first. The first
 // seven shown get their own colours; any more are added together as Others. views, if given, switches what the
@@ -161,7 +161,8 @@ export function stackedChart(options) {
   // The last one shown stays, so there's always something to see
   const hideItem = item => { if (shown.length > 1) setHidden(new Set([...hidden, item.title])); };
   const openOthers = () => setHidden(new Set([...hidden, ...named.map(item => item.title)]));
-  const series = [
+  // Coloured by size, biggest first
+  const bySize = [
     ...named.map((item, i) => ({ ...item, colour: `var(--series-${i + 1})` })),
     ...(others.length ? [{
       name: `${others.length} others`, title: `${others.length} smaller ${what[1]} added together`, colour: 'var(--series-other)', others: true,
@@ -169,6 +170,8 @@ export function stackedChart(options) {
       lastAt: t => Math.max(...others.map(item => item.lastAt(t))),
     }] : []),
   ];
+  // From the bottom up: stacked, the smallest at the bottom, with Others there, so the big ones sit on top
+  const series = chartOverlaid ? bySize : [...bySize].reverse();
   // Each band's top at each moment, stacked in order from the bottom; overlaid, the scale goes up to the biggest one
   const tops = [];
   series.forEach((s, i) => tops.push(s.values.map((v, j) => v + (i ? tops[i - 1][j] : 0))));
@@ -191,10 +194,11 @@ export function stackedChart(options) {
   // Hidden ones stay in it, greyed out, in their place by size, and clicking one shows it again, which may move
   // the smallest band shown back into Others.
   const showItem = item => setHidden(new Set([...hidden].filter(title => title !== item.title)));
+  // In the order they're stacked, from the top down
   const entries = [
     ...series.map((s, i) => ({ s, i, at: s.others ? -1 : items.findIndex(item => item.title === s.title) })),
     ...items.filter(item => hidden.has(item.title)).map(item => ({ s: item, hidden: true, at: items.indexOf(item) })),
-  ].sort((a, b) => (b.at === -1) - (a.at === -1) || b.at - a.at);
+  ].sort((a, b) => ((b.at === -1) - (a.at === -1) || b.at - a.at) * (chartOverlaid ? 1 : -1));
   const legend = el('div', { class: 'chart-legend' }, entries.map(({ s, i, hidden: isHidden }) => el('button', {
     class: isHidden ? 'hidden-item' : null,
     title: isHidden ? `${s.title}\nHidden - click to show it again`
