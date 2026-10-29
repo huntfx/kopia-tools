@@ -171,13 +171,14 @@ export function followJobs() {
     const snapshotsEnded = ended('backup') || ended('delete');
     const settingsEnded = ended('settings');
     jobList = list;
-    jobsChanged();
-    // Shown straight away, then read again for what isn't known yet
+    // Shown straight away, then read again for what isn't known yet. The panel links to a backup's snapshot
+    // once it's among them, which may only be after this stops asking, so it's shown again then.
     if (snapshotsEnded) {
       applyJobs();
       snapshotsChanged();
-      refreshStorage();
+      refreshStorage().then(jobsChanged);
     }
+    jobsChanged();
     // Each location's settings are read again, as they're shown
     if (settingsEnded) {
       schedules.clear();
