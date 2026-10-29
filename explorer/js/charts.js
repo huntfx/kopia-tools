@@ -6,7 +6,7 @@ import { render } from './render.js';
 import { joinRel, locationsBelow, treeNodes } from './sidebar.js';
 import { openHistory } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
-import { folderObj, pathInScope, snapshotListing } from './storage.js';
+import { folderObj, pathInScope, selectedSnapshot, snapshotListing } from './storage.js';
 
 // How the space the locations inside a folder take on disk grew over time, stacked: each location's running
 // total as of its latest snapshot at each moment. kopia counts storage per location, so data shared between
@@ -39,7 +39,7 @@ export function renderStorageChart(node) {
   }).sort((a, b) => b.values[b.values.length - 1] - a.values[a.values.length - 1]);
 
   return stackedChart({
-    key: `folder:${node.path}`, heading: 'Space on disk over time', what: ['location', 'locations'], items, times, now,
+    key: `folder:${node.path}`, heading: 'Space on disk over time', pieHeading: 'Space on disk', what: ['location', 'locations'], items, times, now,
     note: 'Each location\'s data on disk, as it grew with each snapshot it still has, with locations inside another counted as part of it. kopia counts each location\'s storage separately, so data shared between them is counted more than once and the total can be a little more than the repository uses.',
   });
 }
@@ -85,7 +85,8 @@ export function renderSizeChart(loc) {
   }).sort((a, b) => b.peak - a.peak);
 
   return stackedChart({
-    key: `size:${loc.path}:${state.scope}`, heading: 'Size over time', what: ['item', 'items'], items, times, now, views: sizeViews(),
+    key: `size:${loc.path}:${state.scope}`, heading: 'Size over time', pieHeading: 'Size', at: viewedAt(complete, loc),
+    what: ['item', 'items'], items, times, now, views: sizeViews(),
     note: 'How big each folder and file in here was at each snapshot. kopia only counts space on disk for a whole location, so this is their size rather than what they take up in the repository.',
   });
 }
@@ -112,10 +113,18 @@ function renderTypesChart(loc, complete, panel) {
   }).sort((a, b) => b.peak - a.peak);
 
   return stackedChart({
-    key: `types:${loc.path}:${state.scope}`, heading: 'Size over time', what: ['type', 'types'], items, times, now, views: sizeViews(),
+    key: `types:${loc.path}:${state.scope}`, heading: 'Size over time', pieHeading: 'Size', at: viewedAt(complete, loc),
+    what: ['type', 'types'], items, times, now, views: sizeViews(),
     note: 'How much of each file type was in here at each snapshot, counting everything inside it. This is their size rather than what they take up in the repository.',
   });
 }
+
+// Where the snapshot being viewed is among a location's complete ones, for the pie, which shows it like Contents
+// does: the latest, if one still being made or cancelled is being viewed
+const viewedAt = (complete, loc) => {
+  const at = complete.indexOf(selectedSnapshot(loc));
+  return at < 0 ? complete.length - 1 : at;
+};
 
 // The size chart's bands are the folders and files in the folder in scope, or file types; remembered
 export let sizeByType = false;
@@ -138,40 +147,61 @@ function sizeViews() {
 // around the page.
 export let chartHidden = { key: null, titles: new Set() };
 
-// Charts stack their bands on top of each other, or overlay them, each from zero, to compare them; remembered
-export let chartOverlaid = false;
+// Charts stack their bands on top of each other, or overlay them, each from zero, to compare them, or show
+// each one's share at one moment as a pie; remembered
+export let chartMode = 'stacked';
 
-try { chartOverlaid = localStorage.getItem('chartMode') === 'overlaid'; } catch {}
+try { chartMode = ['overlaid', 'pie'].includes(localStorage.getItem('chartMode')) ? localStorage.getItem('chartMode') : 'stacked'; } catch {}
 
 // A stacked chart of things over time, smallest at the bottom: items are { name, title (unique), values (one per
 // time), lastAt(t) (the snapshot a value at t is from), pick(), open() (what single and double clicks on its
 // band do, like its row in Contents), hint (saying so, or null where they do nothing) }, biggest first. The first
-// seven shown get their own colours; any more are added together as Others. views, if given, switches what the
-// bands are, beside switching between stacked and overlaid.
+// seven shown get their own colours, or up to 14 if Others would be big; any more are added together as
+// Others. views, if given, switches what the
+// bands are, beside switching between stacked, overlaid and pie. The pie, the legend and the total are at the
+// time at (an index into times, the last by default); the pie's headed pieHeading. Whichever way it's shown, the
+// legend's the same, and hiding one hides it in all of them.
 export function stackedChart(options) {
-  const { key, heading, what, items, times, now, note, views } = options;
+  const { key, heading, pieHeading, what, items, times, now, note, views } = options;
+  const at = options.at ?? times.length - 1;
+  const pie = chartMode === 'pie';
+  const chartOverlaid = chartMode === 'overlaid';
   const hidden = chartHidden.key === key ? chartHidden.titles : new Set();
   const shown = items.filter(item => !hidden.has(item.title));
   const setHidden = titles => {
     chartHidden = { key, titles };
     panel.replaceWith(stackedChart(options));
   };
-  const named = shown.length > 8 ? shown.slice(0, 7) : shown;
-  const others = shown.slice(named.length);
+  // The biggest at their peak get colours of their own. While what's left would still be more than a fifth of
+  // the total then, the biggest of the rest then get one too, in lighter shades of the same colours, up to 14.
+  // Others of just one would be no better than naming it.
+  const named = shown.length > 8 ? shown.slice(0, 7) : [...shown];
+  const sizeAt = list => list.reduce((sum, item) => sum + item.values[at], 0);
+  const whole = sizeAt(shown);
+  const rest = shown.filter(item => !named.includes(item)).sort((a, b) => b.values[at] - a.values[at]);
+  while (rest.length && named.length < 14 && sizeAt(rest) > whole / 5) named.push(rest.shift());
+  if (rest.length === 1) named.push(rest.shift());
+  const others = rest;
   // The last one shown stays, so there's always something to see
   const hideItem = item => { if (shown.length > 1) setHidden(new Set([...hidden, item.title])); };
   const openOthers = () => setHidden(new Set([...hidden, ...named.map(item => item.title)]));
-  // Coloured by size, biggest first
+  // Coloured in that order, past seven in lighter shades, then put in order of size then, biggest first, like
+  // the legend's sizes
   const bySize = [
-    ...named.map((item, i) => ({ ...item, colour: `var(--series-${i + 1})` })),
+    ...named.map((item, i) => ({ ...item, colour: i < 7 ? `var(--series-${i + 1})` : `color-mix(in srgb, var(--series-${i - 6}) 55%, var(--surface))` }))
+      .sort((a, b) => b.values[at] - a.values[at]),
     ...(others.length ? [{
       name: `${others.length} others`, title: `${others.length} smaller ${what[1]} added together`, colour: 'var(--series-other)', others: true,
       values: times.map((_, j) => others.reduce((sum, item) => sum + item.values[j], 0)),
       lastAt: t => Math.max(...others.map(item => item.lastAt(t))),
     }] : []),
   ];
-  // From the bottom up: stacked, the smallest at the bottom, with Others there, so the big ones sit on top
-  const series = chartOverlaid ? bySize : [...bySize].reverse();
+  // The total and each one's share then, as the legend and the pie say them
+  const total = bySize.reduce((sum, s) => sum + s.values[at], 0);
+  const share = value => `${(total ? 100 * value / total : 0).toFixed(1)}%`;
+  // From the bottom up: stacked, the smallest at the bottom, with Others there, so the big ones sit on top. The pie
+  // goes round biggest first, like the legend.
+  const series = chartOverlaid || pie ? bySize : [...bySize].reverse();
   // Each band's top at each moment, stacked in order from the bottom; overlaid, the scale goes up to the biggest one
   const tops = [];
   series.forEach((s, i) => tops.push(s.values.map((v, j) => v + (i ? tops[i - 1][j] : 0))));
@@ -184,21 +214,23 @@ export function stackedChart(options) {
   const drawIfResized = () => {
     if (!chart.isConnected || !chart.clientWidth || Math.abs(chart.clientWidth - drawnWidth) <= 1) return;
     drawnWidth = chart.clientWidth;
-    highlight = drawStackedChart(chart, drawnWidth, { heading, series, times, tops, max, now, openOthers, overlaid: chartOverlaid });
+    highlight = pie
+      ? drawPieChart(chart, drawnWidth, { heading: pieHeading || heading, slices: series, at, total, share, openOthers })
+      : drawStackedChart(chart, drawnWidth, { heading, series, times, tops, max, now, openOthers, overlaid: chartOverlaid });
   };
   new ResizeObserver(drawIfResized).observe(chart);
   // Straight away once it's been put on the page, which happens just after this returns
   queueMicrotask(drawIfResized);
 
-  // The legend names every band, with its size now; hovering one picks out its band, and clicking one hides it.
-  // Hidden ones stay in it, greyed out, in their place by size, and clicking one shows it again, which may move
-  // the smallest band shown back into Others.
+  // The legend names every band, biggest first, then Others, with each one's size and share; hovering one picks
+  // out its band, and clicking one hides it. Hidden ones stay in it, greyed out, at the end, and clicking one
+  // shows it again, which may move the smallest band shown back into Others.
   const showItem = item => setHidden(new Set([...hidden].filter(title => title !== item.title)));
-  // In the order they're stacked, from the top down
+  // In the order they're coloured, then Others, then any hidden
   const entries = [
-    ...series.map((s, i) => ({ s, i, at: s.others ? -1 : items.findIndex(item => item.title === s.title) })),
-    ...items.filter(item => hidden.has(item.title)).map(item => ({ s: item, hidden: true, at: items.indexOf(item) })),
-  ].sort((a, b) => ((b.at === -1) - (a.at === -1) || b.at - a.at) * (chartOverlaid ? 1 : -1));
+    ...series.map((s, i) => ({ s, i, order: bySize.indexOf(s) })),
+    ...items.filter(item => hidden.has(item.title)).map(item => ({ s: item, hidden: true, order: bySize.length + items.indexOf(item) })),
+  ].sort((a, b) => a.order - b.order);
   const legend = el('div', { class: 'chart-legend' }, entries.map(({ s, i, hidden: isHidden }) => el('button', {
     class: isHidden ? 'hidden-item' : null,
     title: isHidden ? `${s.title}\nHidden - click to show it again`
@@ -206,29 +238,93 @@ export function stackedChart(options) {
     onmouseenter: isHidden ? null : () => highlight(i), onmouseleave: isHidden ? null : () => highlight(null),
     onclick: isHidden ? () => showItem(s) : s.others ? openOthers : () => hideItem(s),
   }, el('span', { class: 'swatch', style: isHidden ? null : `background:${s.colour}` }), el('span', { class: 'name' }, s.name),
-    el('span', { class: 'muted' }, formatSize(s.values[times.length - 1])))));
+    el('span', { class: 'muted' }, isHidden ? formatSize(s.values[at]) : `${formatSize(s.values[at])} (${share(s.values[at])})`))));
 
-  // Stacked or overlaid, for every chart on the page
-  const setOverlaid = overlaid => {
-    chartOverlaid = overlaid;
-    try { localStorage.setItem('chartMode', overlaid ? 'overlaid' : 'stacked'); } catch {}
-    render();
-  };
-  const modes = el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'How the chart shows them' },
-    [['Stacked', false, 'On top of each other, adding up to the total'], ['Overlaid', true, 'Each from zero, to compare them']].map(([label, overlaid, title]) =>
-      el('button', { 'aria-pressed': String(chartOverlaid === overlaid), title, onclick: () => setOverlaid(overlaid) }, label)));
-
+  const when = at === times.length - 1 ? 'now' : `at ${formatFull(new Date(times[at]).toISOString())}`;
   const panel = el('section', { class: 'panel' },
-    el('div', { class: 'chart-head' }, el('h2', {}, heading),
+    el('div', { class: 'chart-head' }, el('h2', {}, pie ? pieHeading || heading : heading),
       hidden.size ? el('span', { class: 'legend', title: items.filter(item => hidden.has(item.title)).map(item => item.title).join('\n') },
         `${plural(hidden.size, what[0])} hidden · `,
         el('button', { class: 'linklike', onclick: () => setHidden(new Set()) }, 'Show all')) : null,
-      el('span', { class: 'legend', style: 'margin-left:auto' }, `${formatSize(tops[tops.length - 1][times.length - 1])} now`),
-      views, modes),
-    chart,
+      el('span', { class: 'legend', style: 'margin-left:auto' }, `${formatSize(total)} ${when}`),
+      views, chartModes()),
+    pie && !total ? el('p', { class: 'note' }, `Nothing in here ${when}`) : chart,
     legend,
     el('p', { class: 'note', style: 'margin:8px 0 0' }, note));
   return panel;
+}
+
+// Stacked, overlaid or a pie, for every chart on the page
+function chartModes() {
+  const setMode = mode => {
+    chartMode = mode;
+    try { localStorage.setItem('chartMode', mode); } catch {}
+    render();
+  };
+  return el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'How the chart shows them' },
+    [['Stacked', 'stacked', 'On top of each other, adding up to the total'], ['Overlaid', 'overlaid', 'Each from zero, to compare them'],
+      ['Pie', 'pie', 'Each one\'s share of the total']].map(([label, mode, title]) =>
+      el('button', { 'aria-pressed': String(chartMode === mode), title, onclick: () => setMode(mode) }, label)));
+}
+
+// Draw a stacked chart's bands as a pie at one time, as a ring with the total in the middle, into its box at a
+// width, returning how to pick out a slice, for the legend. Each slice is its band's size then, in its colour,
+// going round from the top, biggest first. Hovering a slice says what it is; clicking does what clicking its band
+// does.
+function drawPieChart(chart, width, { heading, slices, at, total, share, openOthers }) {
+  const height = 240;
+  const outer = 108, inner = 50, cx = width / 2, cy = height / 2;
+  const point = (angle, radius) => `${(cx + radius * Math.cos(angle)).toFixed(1)},${(cy + radius * Math.sin(angle)).toFixed(1)}`;
+  // A whole ring is drawn just short of a circle, which an arc can't be; one with nothing then has no slice
+  let angle = -Math.PI / 2;
+  const paths = slices.map(s => {
+    if (!s.values[at]) return svgEl('path', { class: 'band', d: '' });
+    const sweep = Math.min(s.values[at] / total * 2 * Math.PI, 2 * Math.PI - 0.0001);
+    const from = angle;
+    angle += sweep;
+    const large = sweep > Math.PI ? 1 : 0;
+    return svgEl('path', {
+      class: 'band', style: `--band:${s.colour}`,
+      d: `M${point(from, outer)}A${outer},${outer} 0 ${large} 1 ${point(angle, outer)}L${point(angle, inner)}A${inner},${inner} 0 ${large} 0 ${point(from, inner)}Z`,
+    });
+  });
+  const highlight = i => paths.forEach((path, k) => path.classList.toggle('faded', i != null && k !== i));
+  const svg = svgEl('svg', { class: 'pie', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': heading },
+    paths,
+    svgEl('text', { class: 'pie-total', x: cx, y: cy + 2, 'text-anchor': 'middle' }, formatSize(total)),
+    svgEl('text', { class: 'pie-label', x: cx, y: cy + 18, 'text-anchor': 'middle' }, 'Total'));
+
+  const tip = el('div', { class: 'chart-tip', hidden: true });
+  paths.forEach((path, i) => {
+    const s = slices[i];
+    path.addEventListener('pointermove', event => {
+      highlight(i);
+      tip.replaceChildren(...[
+        el('div', { class: 'row' }, el('span', { class: 'key', style: `background:${s.colour}` }), el('b', {}, formatSize(s.values[at])), el('span', {}, s.name)),
+        el('div', { class: 'path' }, s.title),
+        el('div', { class: 'hint' }, `${share(s.values[at])} of the total`),
+        s.hint === null ? null : el('div', { class: 'hint' }, s.others ? 'Click to hide the bigger ones and show these separately'
+          : s.hint ?? 'Click for its snapshots - double-click to open it'),
+      ].filter(Boolean));
+      tip.hidden = false;
+      const box = svg.getBoundingClientRect();
+      const left = event.clientX - box.left;
+      tip.style.left = `${left + (left > box.width / 2 ? -tip.offsetWidth - 12 : 12)}px`;
+    });
+    path.addEventListener('click', event => {
+      // The second click of a double click is the double click's
+      if (event.detail > 1) return;
+      if (s.others) openOthers();
+      else s.pick?.();
+    });
+    path.addEventListener('dblclick', () => { if (!s.others) s.open?.(); });
+  });
+  svg.addEventListener('pointerleave', () => {
+    tip.hidden = true;
+    highlight(null);
+  });
+  chart.replaceChildren(svg, tip);
+  return highlight;
 }
 
 // Draw a stacked chart into its box at a width, returning how to pick out a band, for the legend
@@ -330,7 +426,7 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
       el('div', { class: 'row total' }, el('span', { class: 'key' }), el('b', {}, formatSize(tops[tops.length - 1][j])), el('span', {}, 'Total')),
       fromSnapshot(times[j]),
       el('div', { class: 'hint' }, 'Click to show files as of then'),
-    ]));
+    ]).filter(Boolean));
     tip.hidden = false;
     const box = svg.getBoundingClientRect();
     const left = px / width * box.width;

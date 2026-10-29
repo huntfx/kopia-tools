@@ -388,6 +388,11 @@ th[aria-sort] { color: var(--ink); }
 .chart-modes button + button { border-left: 1px solid var(--axis); }
 .chart-modes button[aria-pressed="true"] { background: var(--accent-bg); color: var(--ink); }
 .storage-chart .grid { stroke: var(--line); stroke-width: 1; }
+/* A pie: a ring of slices with a 2px gap between them, and the total in the middle */
+.storage-chart svg.pie { cursor: default; }
+.storage-chart svg.pie .band { stroke-width: 2; cursor: pointer; }
+.storage-chart .pie-total { fill: var(--ink); font-family: var(--font-data); font-size: 15px; font-weight: 600; }
+.storage-chart .pie-label { fill: var(--muted); font-size: 11px; }
 .storage-chart .axis text, .storage-chart text.axis { fill: var(--muted); font-family: var(--font-data); font-size: 11px; }
 .storage-chart .crosshair { stroke: var(--ink-2); stroke-width: 1; pointer-events: none; }
 .storage-chart .rug { stroke: var(--muted); stroke-width: 1; }
