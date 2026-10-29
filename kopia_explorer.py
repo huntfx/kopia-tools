@@ -1,13 +1,15 @@
-"""Browse kopia snapshots in a web page: backup locations, their snapshots, folder contents and file types, what
+"""Browse kopia snapshots in a window of their own: backup locations, their snapshots, folder contents and file types, what
 changed between snapshots, and file histories, restore files and folders from any snapshot, back up a location
 now, delete snapshots, and set how often a folder is backed up.
 
 Runs a small local web server for the page in explorer/ (index.html, style.css and the modules in js/),
-fetching from kopia as you browse. Diffs and folder listings never change for a given snapshot, so they're
-cached on disk, in kopia-explorer in the temp folder (TEMP).
+fetching from kopia as you browse, and shows it in a window with pywebview (py -m pip install pywebview), or in a
+browser. Diffs and folder listings never change for a given snapshot, so they're cached on disk, in
+kopia-explorer in the temp folder (TEMP).
 
 Example:
     py kopia_explorer.py
+    py kopia_explorer.py --browser
     py kopia_explorer.py --port 9000 --no-browser
 """
 
@@ -1178,11 +1180,40 @@ class Handler(BaseHTTPRequestHandler):
             super().log_message(format, *args)
 
 
+def confirm_close():
+    """Whether to close the window: straight away, unless backups are running, as closing stops them."""
+    running = [jobs[job_id]['source'] for job_id in backup_processes]
+    if not running:
+        return True
+    return dialogs.ask(lambda root: messagebox.askokcancel(
+        'Kopia Explorer', f'{"A backup is" if len(running) == 1 else "Backups are"} still running ({", ".join(running)}).\n\n'
+        'Closing stops it, keeping what it got through.', icon='warning', parent=root))
+
+
+def show_window(url):
+    """The page in a window of its own, until it's closed. Its settings, such as how charts are shown, are kept
+    in Kopia Explorer in the local app data folder."""
+    import webview
+    window = webview.create_window('Kopia Explorer', url, width=1500, height=950, min_size=(800, 500),
+                                   background_color='#0f1216', text_select=True, zoomable=True)
+    window.events.closing += confirm_close
+    storage = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'Kopia Explorer'
+    webview.start(private_mode=False, storage_path=str(storage))
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Browse kopia snapshots in a web page.')
+    parser = argparse.ArgumentParser(description='Browse kopia snapshots in a window of their own.')
     parser.add_argument('--port', type=int, default=8765, help='port to serve on (default: 8765)')
-    parser.add_argument('--no-browser', action='store_true', help="don't open the page in a browser")
+    shown = parser.add_mutually_exclusive_group()
+    shown.add_argument('--browser', action='store_true', help='open the page in a browser rather than a window')
+    shown.add_argument('--no-browser', action='store_true', help="don't open the page anywhere, just serve it")
     args = parser.parse_args()
+    if not args.browser and not args.no_browser:
+        try:
+            import webview  # noqa: F401
+        except ImportError:
+            print("pywebview isn't installed (py -m pip install pywebview), so it's opening in a browser instead", flush=True)
+            args.browser = True
 
     print('Reading the repository...', flush=True)
     repository.storage()
@@ -1191,10 +1222,16 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     url = f'http://localhost:{args.port}/'
     print(f'Kopia Explorer is at {url} (Ctrl+C to stop)', flush=True)
-    if not args.no_browser:
-        webbrowser.open(url)
     try:
-        server.serve_forever()
+        if args.browser or args.no_browser:
+            if args.browser:
+                webbrowser.open(url)
+            server.serve_forever()
+        else:
+            # The window has to be on the main thread, so the server isn't; closing the window stops it
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            show_window(url)
+            server.shutdown()
     except KeyboardInterrupt:
         pass
     finally:
