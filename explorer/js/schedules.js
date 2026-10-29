@@ -1,9 +1,9 @@
 // How often folders are backed up, from kopia's policies, and changing that
 import { api, redrawSoon } from './data.js';
-import { el, plural } from './format.js';
-import { backUp } from './jobs.js';
+import { el, listOf, plural } from './format.js';
+import { backUp, changeSettings, offerSettings } from './jobs.js';
 import { navigate } from './state.js';
-import { refreshStorage, storage } from './storage.js';
+import { enclosingLocation, refreshStorage, storage } from './storage.js';
 
 // How often a folder is backed up on its own, from kopia's policies via the server, loaded once each, and
 // again after one's changed: { interval, times, cron, manual, from, own, inherited }
@@ -57,6 +57,48 @@ export function scheduleLine(loc, changeable) {
     changeable ? el('button', { class: 'linklike', disabled: !schedule, onclick: () => scheduleDialog(loc.path, 'change') }, 'Change…') : null);
 }
 
+// The parent settings fix: copying the settings a location inside another would inherit into its policy, as
+// kopia doesn't use them in there while backing up the other location. Applying it or removing it is followed
+// in the panel at the bottom, which shows it again once done.
+function changeCopiedSettings(loc, undo, button) {
+  button.disabled = true;
+  changeSettings(undo, [loc.path]);
+}
+
+// Above a location's contents when it's inside another location and needs the parent settings fix
+export function settingsWarning(loc) {
+  const nested = scheduleOf(loc.path)?.nested;
+  if (!nested?.missing.length || nested.copied.length) return null;
+  const apply = el('button', { class: 'btn', onclick: () => changeCopiedSettings(loc, false, apply) }, 'Apply parent settings fix');
+  return el('section', { class: 'panel warning' },
+    el('div', { class: 'chart-head' }, el('h2', {}, 'Parent settings not used')),
+    el('p', {}, `Backups of ${nested.container} don't use your ${listOf(nested.missing, 'or')} in here, as kopia doesn't pass them on to a location inside another. The parent settings fix copies them into this location's policy, and keeps them up to date.`),
+    el('div', { class: 'actions' }, apply));
+}
+
+// At the top of a location's page, once the parent settings fix is applied, with removing it, and applying it
+// again if the settings it copied have been changed by hand since, which keeps those changes
+export function settingsStatus(loc) {
+  const nested = scheduleOf(loc.path)?.nested;
+  if (!nested?.copied.length) return null;
+  const change = (label, undo) => {
+    const button = el('button', { class: 'linklike', onclick: () => changeCopiedSettings(loc, undo, button) }, label);
+    return button;
+  };
+  const changed = nested.edited || nested.missing.length;
+  const title = capitalised(listOf(nested.copied)) + (nested.edited ? ' - changed since, so not kept up to date' : '');
+  return el('span', { title },
+    changed ? 'parent settings fix changed since (' : 'parent settings fix applied (',
+    changed ? [change('reapply', false), ', '] : null, change('undo', true), ')');
+}
+
+// When the page opens: offer to copy settings into every location inside another that needs them, in the
+// panel at the bottom, which finding them doesn't hold up
+export async function offerToCopySettings() {
+  const needing = await fetch('/api/copied-settings').then(response => (response.ok ? response.json() : [])).catch(() => []);
+  offerSettings(needing);
+}
+
 // Under the snapshots panel's heading: backing up the folder being looked at on its own, unless it's a location
 // already. It can be clicked once its schedule's loaded, so the dialog opens straight away.
 export function separateLine(target, isFolder) {
@@ -102,6 +144,10 @@ export async function scheduleDialog(path, mode) {
   };
   select.addEventListener('change', once);
   once();
+  // A new policy inside another location doesn't pass on the settings above it to that location's backups,
+  // unless they're copied in by the parent settings fix, as the page offers for existing ones
+  const outer = separate && !current.own ? enclosingLocation({ path })?.loc : null;
+  const copySettings = el('input', { type: 'checkbox', checked: true });
   const error = el('p', { class: 'error', hidden: true });
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
   const save = el('button', {
@@ -111,7 +157,9 @@ export async function scheduleDialog(path, mode) {
       let saved;
       try {
         const manual = select.value === 'manual';
-        saved = await api.post('/api/schedule', { path, interval: select.value && !manual ? Number(select.value) : null, manual });
+        saved = await api.post('/api/schedule', {
+          path, interval: select.value && !manual ? Number(select.value) : null, manual, copySettings: !!outer && copySettings.checked,
+        });
       } catch (e) {
         error.textContent = `Couldn't ${separate ? 'back it up' : 'change it'}: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
         error.hidden = false;
@@ -134,6 +182,7 @@ export async function scheduleDialog(path, mode) {
     el('p', { class: 'what' }, el('b', {}, path)),
     el('label', { class: 'field' }, 'How often', select),
     separate ? el('label', { class: 'field' }, now, 'Back up now') : null,
+    outer ? el('label', { class: 'field', title: `So backups of ${outer.path} use your settings in here` }, copySettings, 'Apply parent settings fix') : null,
     el('p', {}, 'KopiaUI picks up the change when it next refreshes, within 4 hours.'),
     error,
     el('div', { class: 'actions' }, cancel, save));

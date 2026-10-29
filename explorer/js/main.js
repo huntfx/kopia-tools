@@ -5,9 +5,11 @@ import { buildSidebarTree, reveal, renderSort } from './sidebar.js';
 import { repositoryTitle } from './data.js';
 import { readHash, writeHash } from './state.js';
 import { render } from './render.js';
+import { offerToCopySettings } from './schedules.js';
 // These only listen for things, such as the search box and the "files as of" picker
 import './search.js';
 import './asof.js';
+import './tools.js';
 
 await loadStorage();
 pickUpJobs();
@@ -19,3 +21,4 @@ reveal(currentFolder());
 renderSort();
 render();
 writeHash(true);
+offerToCopySettings();

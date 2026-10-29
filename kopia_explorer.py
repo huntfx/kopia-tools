@@ -12,6 +12,7 @@ Example:
 """
 
 import argparse
+import hashlib
 import itertools
 import json
 import os
@@ -349,7 +350,7 @@ class Dialogs:
 
 dialogs = Dialogs()
 restored = set()               # Paths restored, which are the only ones the page may show in Explorer
-jobs = {}                        # Every restore, backup and delete since the server started, by ID, for the page to follow
+jobs = {}                        # Every restore, backup, delete and settings change since the server started, by ID, for the page to follow
 job_ids = itertools.count(1)
 backup_processes = {}            # Backups still running, by job ID, so they can be cancelled
 PROGRESS = re.compile(r'Processed (\d+) \(([\d.]+) (\w+)\) of (\d+) \(([\d.]+) (\w+)\)')
@@ -630,15 +631,16 @@ def schedule_of(path):
         'cron': found.get('cron', ([], None))[0], 'manual': found.get('manual', (False, None))[0],
         'own': 'intervalSeconds' in own or bool(own.get('manual')), 'ownManual': bool(own.get('manual')),
         'inherited': dict(zip(('interval', 'from'), above.get('intervalSeconds', (None, None)))),
+        'nested': nested_status(path, policies),
     }
 
 
-def set_schedule(path, interval, manual=False):
+def set_schedule(path, interval, manual=False, copy_settings=False):
     """Back a folder up every so often on its own, or with manual snapshots only, or with neither, as the policy
     above it says. Only its own policy's schedule changes: it's exported, changed and imported back, as kopia's
     policy set can't put an interval back to inherited. Any folder on the PC can have one, which makes it a
     backup location: kopia's scheduler backs up folders with a policy of their own, unless manual snapshots
-    only."""
+    only. A new one inside another location can have the settings it would inherit copied in too."""
     # Tidied, so the same folder typed differently is the same location
     path = os.path.abspath(path)
     if not os.path.isdir(path):
@@ -647,7 +649,8 @@ def set_schedule(path, interval, manual=False):
     if interval is not None and (not isinstance(interval, int) or interval < 600 or interval % 60):
         raise KeyError(interval)
     key = policy_key(path)
-    policy = json.loads(kopia('policy', 'export')).get(key) or {}
+    existing = json.loads(kopia('policy', 'export')).get(key)
+    policy = existing or {}
     scheduling = policy.setdefault('scheduling', {})
     if manual:
         # kopia's scheduler leaves it alone, so it's only backed up when asked
@@ -660,11 +663,247 @@ def set_schedule(path, interval, manual=False):
         # Backed up on a schedule, so not manual snapshots only
         scheduling.update(intervalSeconds=interval)
         scheduling.pop('manual', None)
+    import_policy(key, policy)
+    # Without the settings it would inherit, the location it's in stops using them in here when backed up
+    if copy_settings and existing is None and containing_location(path):
+        copy_settings_in(path)
+    return schedule_of(path)
+
+
+def import_policy(key, policy):
     result = subprocess.run(['kopia', 'policy', 'import', key], input=json.dumps({key: policy}), text=True,
                             encoding='utf-8', capture_output=True)
     if result.returncode:
         raise RuntimeError(f'kopia policy import failed:\n{result.stderr.strip()}')
-    return schedule_of(path)
+
+
+# Settings kopia reads folder by folder while backing up. Inside a folder with a policy of its own, while a
+# location it's in is backed up, kopia takes these from that policy alone, rather than what it would inherit,
+# and uses its own defaults for any it leaves unset (kopia issue #3671), so they're copied into it. Each is
+# (code for the marker, section, setting, what kopia uses when it's unset there, or None to always copy it).
+PASSED_ON = [
+    ('dot-ignore', 'files', 'ignoreDotFiles', []),
+    ('cache-dirs', 'files', 'ignoreCacheDirs', True),
+    ('one-fs', 'files', 'oneFileSystem', False),
+    ('compress', 'compression', 'compressorName', 'none'),
+    ('compress-min', 'compression', 'minSize', None),
+    ('compress-max', 'compression', 'maxSize', None),
+    ('compress-only', 'compression', 'onlyCompress', None),
+    ('compress-never', 'compression', 'neverCompress', None),
+    ('meta-compress', 'metadataCompression', 'compressorName', None),
+    ('splitter', 'splitter', 'algorithm', None),
+    ('file-errors', 'errorHandling', 'ignoreFileErrors', False),
+    ('dir-errors', 'errorHandling', 'ignoreDirectoryErrors', False),
+    ('unknown-types', 'errorHandling', 'ignoreUnknownTypes', True),
+]
+SETTING_NAMES = {
+    'dot-ignore': 'ignore files', 'cache-dirs': 'cache folders', 'one-fs': 'one file system',
+    'compress': 'compression', 'compress-min': 'compression', 'compress-max': 'compression',
+    'compress-only': 'compression', 'compress-never': 'compression', 'meta-compress': 'metadata compression',
+    'splitter': 'splitter', 'file-errors': 'error handling', 'dir-errors': 'error handling',
+    'unknown-types': 'error handling',
+}
+# Which settings were copied in, so they can be kept up to date and taken out again, and a hash of their values,
+# to tell when they've been changed by hand since. It's kept as an ignore file name, the only place in a policy
+# for it that changes nothing: kopia looks for a file by that name in each folder, and there's never one.
+MARKER = re.compile(r'\.kopia-explorer\(([\w,-]*);([0-9a-f]{8})\)')
+
+
+def marker_in(policy):
+    """The settings copied into a policy, and the hash of their values then, or (None, None) if none were"""
+    for name in policy.get('files', {}).get('ignoreDotFiles', []):
+        if match := MARKER.fullmatch(name):
+            return [code for code in match[1].split(',') if code], match[2]
+    return None, None
+
+
+def setting(policy, code):
+    _, section, name, _ = next(s for s in PASSED_ON if s[0] == code)
+    value = policy.get(section, {}).get(name)
+    # Without the marker, and in kopia's order, so it compares the same however it was saved
+    if code == 'dot-ignore' and value is not None:
+        value = sorted(n for n in value if not MARKER.fullmatch(n)) or None
+    return value
+
+
+def values_hash(policy, codes):
+    values = json.dumps({code: setting(policy, code) for code in codes}, sort_keys=True)
+    return hashlib.sha1(values.encode('utf-8')).hexdigest()[:8]
+
+
+def needed(above, code):
+    """Whether a setting has to be copied in: when it's set above, to something other than what kopia uses
+    in its place"""
+    value, fallback = setting(above, code), next(s[3] for s in PASSED_ON if s[0] == code)
+    return value is not None and (fallback is None or value != fallback)
+
+
+def containing_location(path):
+    """The nearest backup location that a folder is inside, not counting itself"""
+    inside = [s for s in repository.sources
+              if (path.lower() + '\\').startswith(s.rstrip('\\').lower() + '\\') and s.lower() != path.lower()]
+    return max(inside, key=len, default=None)
+
+
+def settings_above(path):
+    """What a folder would inherit: everything set for the folder it's in, from all the policies above"""
+    return json.loads(kopia('policy', 'show', '--json', str(Path(path).parent)))
+
+
+def nested_status(path, policies):
+    """For a location inside another, which settings that location's backups don't use in here and which have
+    been copied in: whether they've been changed by hand since, and whether they're behind the ones above"""
+    policy = policies.get(policy_key(path))
+    container = containing_location(path)
+    if policy is None or not container:
+        return None
+    above = settings_above(path)
+    codes, stamp = marker_in(policy)
+    copied = codes or []
+    missing = [s[0] for s in PASSED_ON if s[0] not in copied and setting(policy, s[0]) is None and needed(above, s[0])]
+    names = lambda found: list(dict.fromkeys(SETTING_NAMES[code] for code in found))
+    return {
+        'container': container, 'missing': names(missing), 'copied': names(copied),
+        'edited': codes is not None and values_hash(policy, copied) != stamp,
+        'behind': any(setting(policy, code) != setting(above, code) for code in copied),
+    }
+
+
+def copy_settings_in(path):
+    """Copy the settings a location inside another would inherit into its own policy, or bring them up to date,
+    so the other location's backups use them in here. Only settings it leaves unset are copied, and any copied
+    before that have been changed by hand since are left as they are, as its own."""
+    key = policy_key(path)
+    policy = json.loads(kopia('policy', 'export')).get(key)
+    if policy is None or not containing_location(path):
+        raise ValueError(f'{path} isn\'t a backup location inside another')
+    above = settings_above(path)
+    codes, stamp = marker_in(policy)
+    copied = codes or []
+    if codes is not None and values_hash(policy, copied) != stamp:
+        copied = [code for code in copied if setting(policy, code) == setting(above, code)]
+    marker = next((n for n in policy.get('files', {}).get('ignoreDotFiles', []) if MARKER.fullmatch(n)), None)
+    result = []
+    for code, section, name, _ in PASSED_ON:
+        if code in copied or setting(policy, code) is None:
+            if needed(above, code):
+                # Without the marker of any location above that's had settings copied in
+                value = setting(above, code)
+                # Ignore files of its own are kept alongside
+                if code == 'dot-ignore':
+                    own = [n for n in setting(policy, code) or [] if n not in value] if code in copied else []
+                    value = sorted({*value, *own})
+                policy.setdefault(section, {})[name] = value
+                result.append(code)
+            elif code in copied:
+                policy.get(section, {}).pop(name, None)
+    write_marker(policy, marker, result)
+    import_policy(key, policy)
+
+
+def undo_copied_settings(path):
+    """Take the copied settings out of a location's policy again, apart from any changed by hand since"""
+    key = policy_key(path)
+    policy = json.loads(kopia('policy', 'export')).get(key) or {}
+    codes, stamp = marker_in(policy)
+    if codes is None:
+        return
+    above = settings_above(path)
+    edited = values_hash(policy, codes) != stamp
+    marker = next(n for n in policy['files']['ignoreDotFiles'] if MARKER.fullmatch(n))
+    for code, section, name, _ in PASSED_ON:
+        if code in codes and (not edited or setting(policy, code) == setting(above, code)):
+            if code == 'dot-ignore':
+                # Ignore files of its own stay
+                policy['files'][name] = [n for n in policy['files'][name] if n not in (setting(above, code) or [])]
+            else:
+                policy.get(section, {}).pop(name, None)
+    write_marker(policy, marker, [])
+    import_policy(key, policy)
+
+
+def write_marker(policy, old, codes):
+    files = policy.setdefault('files', {})
+    names = [n for n in files.get('ignoreDotFiles', []) if n != old]
+    if codes:
+        names.append(f'.kopia-explorer({",".join(codes)};{values_hash(policy, codes)})')
+    if names:
+        files['ignoreDotFiles'] = names
+    else:
+        files.pop('ignoreDotFiles', None)
+
+
+def needing_settings():
+    """Every location inside another whose backups don't use some of the settings it would inherit in there,
+    and that's had none copied in yet"""
+    policies = json.loads(kopia('policy', 'export'))
+    prefix = policy_key('')
+    paths = sorted(key[len(prefix):] for key in policies if key.startswith(prefix))
+    found = zip(paths, pool.map(lambda path: nested_status(path, policies), paths))
+    return [{'path': path, **status} for path, status in found if status and status['missing'] and not status['copied']]
+
+
+def with_copied_settings():
+    """Every location that's had settings copied in"""
+    policies = json.loads(kopia('policy', 'export'))
+    prefix = policy_key('')
+    return sorted(key[len(prefix):] for key, policy in policies.items()
+                  if key.startswith(prefix) and marker_in(policy)[0] is not None)
+
+
+# Settings changes wait for any before them, as each reads and rewrites policies
+settings_lock = threading.Lock()
+
+
+def start_settings(undo, paths=None):
+    """Copy settings into locations inside others, or take them out again, in the background, one location at a
+    time, returning its progress record, with an item for each location. Without paths, it's every location that
+    needs them, or every one that has them."""
+    job = {
+        'id': next(job_ids), 'kind': 'settings', 'name': 'settings', 'undo': undo,
+        'state': 'checking' if paths is None else 'waiting', 'error': None, 'started': time.time(), 'finished': None,
+        'items': [{'path': path, 'state': 'waiting', 'error': None} for path in paths or []],
+    }
+    jobs[job['id']] = job
+    threading.Thread(target=run_settings, args=(job,), daemon=True).start()
+    return job
+
+
+def run_settings(job):
+    try:
+        with settings_lock:
+            if job['state'] == 'checking':
+                # Finding them takes a few seconds, as each one's settings above are read
+                paths = with_copied_settings() if job['undo'] else [n['path'] for n in needing_settings()]
+                job['items'] = [{'path': path, 'state': 'waiting', 'error': None} for path in paths]
+            job['state'] = 'running'
+            for item in job['items']:
+                item['state'] = 'running'
+                try:
+                    (undo_copied_settings if job['undo'] else copy_settings_in)(item['path'])
+                    item['state'] = 'done'
+                except Exception as e:
+                    item.update(state='failed', error=kopia_reason(e))
+        job['state'] = 'done'
+    except Exception as e:
+        job.update(state='failed', error=kopia_reason(e))
+    finally:
+        job['finished'] = time.time()
+
+
+def keep_copied_settings_up_to_date():
+    """At startup: bring settings copied into locations inside others up to date with the ones above, unless
+    they've been changed by hand since. The page offers to copy them into locations that need them."""
+    try:
+        policies = json.loads(kopia('policy', 'export'))
+        prefix = policy_key('')
+        for path in sorted(key[len(prefix):] for key in policies if key.startswith(prefix)):
+            status = nested_status(path, policies)
+            if status and status['copied'] and not status['edited'] and (status['behind'] or status['missing']):
+                copy_settings_in(path)
+                print(f'Brought the settings copied into {path} up to date', flush=True)
+    except RuntimeError as e:
+        print(f'Couldn\'t check the settings of locations inside others: {kopia_reason(e)}', flush=True)
 
 
 def being_deleted(snapshot_id):
@@ -761,6 +1000,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(listing(query['obj']))
             if url.path == '/api/schedule':
                 return self.send_json(schedule_of(query['path']))
+            if url.path == '/api/copied-settings':
+                return self.send_json(needing_settings())
             if url.path == '/api/repository-size':
                 return self.send_json(repository_size())
             if url.path == '/api/jobs':
@@ -788,7 +1029,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/backup/cancel':
                 return self.send_json(cancel_backup(body['id']))
             if self.path == '/api/schedule':
-                return self.send_json(set_schedule(body['path'], body['interval'], bool(body.get('manual'))))
+                return self.send_json(set_schedule(body['path'], body['interval'], bool(body.get('manual')),
+                                                   bool(body.get('copySettings'))))
+            if self.path == '/api/copied-settings':
+                return self.send_json(start_settings(bool(body.get('undo')), body.get('paths')))
             if self.path == '/api/pick-folder':
                 return self.send_json(pick_folder())
             if self.path == '/api/snapshot/delete':
@@ -848,6 +1092,7 @@ def main():
 
     print('Reading the repository...', flush=True)
     repository.storage()
+    threading.Thread(target=keep_copied_settings_up_to_date, daemon=True).start()
 
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     url = f'http://localhost:{args.port}/'

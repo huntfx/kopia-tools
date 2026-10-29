@@ -1,7 +1,9 @@
-// Restores, backups and deletes, which run on the server, and the panel at the bottom that follows them
-import { api } from './data.js';
-import { el, formatFull, formatSize, formatTime, plural, shortId } from './format.js';
+// Restores, backups, deletes and settings changes, which run on the server, and the panel at the bottom that
+// follows them
+import { api, redrawSoon } from './data.js';
+import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
 import { render } from './render.js';
+import { schedules } from './schedules.js';
 import { KEEP_KINDS } from './snapshots.js';
 import { navigate, state } from './state.js';
 import { applyJobs, isCancelled, latest, refreshStorage, snapshotsChanged, storage } from './storage.js';
@@ -17,9 +19,32 @@ export let jobPolling = null;
 
 export let jobsUnreachable = false;  // The server stopped answering while following them
 
-// Still going: choosing where, restoring, moving the finished restore into place, backing up, cancelling, or
-// deleting a snapshot
-export const jobActive = j => ['picking', 'restoring', 'finishing', 'running', 'cancelling', 'deleting'].includes(j.state);
+// Still going: choosing where, restoring, moving the finished restore into place, backing up or changing
+// settings, cancelling, deleting a snapshot, finding the locations whose settings to change, or waiting for
+// another settings change to finish
+export const jobActive = j => ['picking', 'restoring', 'finishing', 'running', 'cancelling', 'deleting', 'checking', 'waiting'].includes(j.state);
+
+// Locations inside others whose settings aren't used in the backups of the locations they're in, warned about
+// when the page opens, above the panel at the bottom, until copied in or put off
+export let settingsOffer = null;
+
+export function offerSettings(needing) {
+  settingsOffer = needing.length ? needing : null;
+  renderNotice();
+}
+
+// Copy settings into locations inside others, or take them out again: the given ones, or without any, every one
+// that needs them, or every one that has them
+export function changeSettings(undo, paths = null) {
+  if (!undo) {
+    settingsOffer = paths ? settingsOffer?.filter(n => !paths.includes(n.path)) || null : null;
+    if (!settingsOffer?.length) settingsOffer = null;
+    renderNotice();
+  }
+  jobsShown = true;
+  startJob('/api/copied-settings', { undo, paths },
+    { kind: 'settings', name: 'settings', undo, items: (paths || []).map(path => ({ path, state: 'failed' })) });
+}
 
 // Whether a snapshot is being deleted, so it can't be opened or restored from meanwhile; once deleted, it's
 // still listed until the snapshots have been read again
@@ -141,15 +166,22 @@ export function followJobs() {
       }
       return;
     }
+    const ended = kind => list.some(j => j.kind === kind && !jobActive(j) && jobList.some(o => o.id === j.id && jobActive(o)));
     // A backup that's just ended has made a snapshot, even if cancelled, and a delete has removed one
-    const ended = list.some(j => j.kind !== 'restore' && !jobActive(j) && jobList.some(o => o.id === j.id && jobActive(o)));
+    const snapshotsEnded = ended('backup') || ended('delete');
+    const settingsEnded = ended('settings');
     jobList = list;
     jobsChanged();
     // Shown straight away, then read again for what isn't known yet
-    if (ended) {
+    if (snapshotsEnded) {
       applyJobs();
       snapshotsChanged();
       refreshStorage();
+    }
+    // Each location's settings are read again, as they're shown
+    if (settingsEnded) {
+      schedules.clear();
+      redrawSoon();
     }
     if (!jobList.some(jobActive)) {
       clearInterval(jobPolling);
@@ -167,6 +199,7 @@ export function renderJobs() {
   const item = r => {
     if (r.kind === 'backup') return backupItem(r);
     if (r.kind === 'delete') return deleteItem(r);
+    if (r.kind === 'settings') return settingsItems(r);
     const percent = r.totalBytes ? 100 * r.bytes / r.totalBytes : 0;
     const status = {
       // After a few seconds, the picker may well have opened behind something
@@ -195,13 +228,16 @@ export function renderJobs() {
   const of = kind => jobList.filter(j => j.kind === kind);
   const going = kind => of(kind).filter(jobActive).length;
   const active = jobList.filter(jobActive).length;
-  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['delete', 'deletions']]
+  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['delete', 'deletions'], ['settings', 'parent settings fixes']]
     .filter(([kind]) => of(kind).length).map(([, name]) => name);
-  const listed = kinds.length > 1 ? `${kinds.slice(0, -1).join(', ')} and ${kinds[kinds.length - 1]}` : kinds[0];
+  const listed = listOf(kinds);
+  const settingsJob = of('settings').find(jobActive);
   const heading = [
     going('backup') && `Backing up ${plural(going('backup'), 'location')}`,
     going('restore') && `Restoring ${going('restore')} of ${of('restore').length}`,
     going('delete') && `Deleting ${plural(going('delete'), 'snapshot')}`,
+    settingsJob && `${settingsJob.undo ? 'Removing parent settings fix' : 'Applying parent settings fix'}${settingsJob.items.length
+      ? ` (${settingsJob.items.filter(i => ['done', 'failed'].includes(i.state)).length} of ${settingsJob.items.length})` : ''}`,
   ].filter(Boolean).join(' · ') || `${listed[0].toUpperCase()}${listed.slice(1)} (${jobList.length})`;
   panel.replaceChildren(
     el('div', { class: 'jobs-head' },
@@ -219,6 +255,51 @@ export function renderJobs() {
       active ? null : el('button', { class: 'btn', 'aria-label': 'Close', title: 'Close', onclick: () => { jobsShown = false; renderJobs(); } }, '×')),
     el('ul', {}, jobList.map(item)));
   if (atBottom) panel.scrollTop = panel.scrollHeight;
+}
+
+// The warning above the panel at the bottom: locations inside others whose settings aren't used when the
+// locations around them are backed up, with copying them in
+export function renderNotice() {
+  const notice = document.getElementById('notice');
+  notice.hidden = !settingsOffer;
+  if (!settingsOffer) return;
+  const missing = listOf([...new Set(settingsOffer.flatMap(n => n.missing))], 'or');
+  notice.replaceChildren(
+    el('h2', {}, 'Parent settings not used'),
+    el('p', {}, `Kopia doesn't use your ${missing} inside `,
+      el('b', { title: settingsOffer.map(n => `${n.path} in ${n.container}`).join('\n') }, plural(settingsOffer.length, 'nested location')),
+      ' when backing up the locations around them.'),
+    el('div', { class: 'actions' },
+      el('button', { class: 'btn', onclick: () => changeSettings(false) }, 'Apply parent settings fix'),
+      el('button', { class: 'linklike', onclick: () => { settingsOffer = null; renderNotice(); } }, 'Not now')));
+}
+
+// Applying the parent settings fix to locations inside others, or removing it, in the panel at the bottom: an
+// item for each location, with undoing it, unless it's been changed again since. Before the locations are
+// known, or if none needed it, it's a single item.
+export function settingsItems(j) {
+  const what = path => el('div', { class: 'what' }, el('span', { class: 'muted' }, 'Parent settings fix for '), el('b', {}, path));
+  const whole = (state, status) => el('li', { class: `${state}${jobActive(j) ? ' active' : ''}` }, what('nested locations'), status);
+  if (j.state === 'checking') {
+    return whole('checking', el('div', { class: 'status muted' },
+      j.undo ? 'Searching for nested locations with the fix applied…' : 'Searching for nested locations requiring the fix…'));
+  }
+  if (j.state === 'failed') return whole('failed', el('div', { class: 'status c-removed' }, `Failed: ${j.error}`));
+  if (!j.items.length) {
+    return whole('done', el('div', { class: 'status muted' }, j.undo ? 'None had it applied' : 'None needed it'));
+  }
+  return j.items.map(item => {
+    const later = jobList.some(o => o.kind === 'settings' && o.id > j.id && o.items?.some(i => i.path === item.path));
+    const status = {
+      waiting: () => el('div', { class: 'status muted' }, 'Waiting…'),
+      running: () => el('div', { class: 'status muted' }, j.undo ? 'Removing…' : 'Applying…'),
+      done: () => el('div', { class: 'status' },
+        el('span', { class: 'c-added' }, j.undo ? '✓ Removed' : '✓ Applied'),
+        later ? null : el('button', { class: 'linklike', onclick: () => changeSettings(!j.undo, [item.path]) }, 'Undo')),
+      failed: () => el('div', { class: 'status c-removed' }, `Failed: ${item.error}`),
+    }[item.state]();
+    return el('li', { class: `${item.state}${item.state === 'running' ? ' active' : ''}` }, what(item.path), status);
+  });
 }
 
 // A snapshot being deleted, in the panel at the bottom

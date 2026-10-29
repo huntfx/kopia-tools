@@ -35,6 +35,13 @@
       </label>
     </div>
   </div>
+  <div class="tools" id="tools">
+    <button type="button" class="btn" id="tools-button" aria-haspopup="menu" aria-expanded="false">Tools <span aria-hidden="true">▾</span></button>
+    <div class="tools-menu" id="tools-menu" role="menu" hidden>
+      <button type="button" role="menuitem" data-tool="copy-settings" title="So backups of the locations they're in use your settings inside them">Apply parent settings fix to all nested locations</button>
+      <button type="button" role="menuitem" data-tool="undo-settings">Remove parent settings fix from all</button>
+    </div>
+  </div>
 </header>
 
 <div class="app" id="app">
@@ -55,7 +62,11 @@
   <aside class="history" id="history" hidden></aside>
 </div>
 <div class="progress" id="progress" role="status" hidden></div>
-<section class="jobs" id="jobs" aria-label="Backups, restores and deletions" aria-live="polite" hidden></section>
+<!-- Bottom right: warnings about the repository, then the panel following backups, restores and so on -->
+<div class="corner">
+  <section class="notice" id="notice" role="alert" hidden></section>
+  <section class="jobs" id="jobs" aria-label="Backups, restores and deletions" aria-live="polite" hidden></section>
+</div>
 
 <script type="module" src="js/main.js"></script>
 </body>
