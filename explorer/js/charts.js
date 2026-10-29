@@ -350,7 +350,18 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
   const magnitude = 10 ** Math.floor(Math.log10(raw || 1));
   const step = [1, 2, 2.5, 5, 10].map(m => m * magnitude).find(s => s >= raw);
   const top = Math.ceil(max / step) * step || 1;
-  const x = t => pad.left + (t - times[0]) / (now - times[0] || 1) * (width - pad.left - pad.right);
+  // Time runs left to right, but the last snapshot holding until now gets a few pixels at least, as one taken
+  // moments ago would otherwise show nothing of what it changed; the rest is squeezed up to make room
+  const plot = width - pad.left - pad.right;
+  const last = times[times.length - 2];
+  const tail = Math.max((now - last) / (now - times[0] || 1) * plot, 6);
+  const split = width - pad.right - tail;
+  const x = t => (t <= last
+    ? pad.left + (t - times[0]) / (last - times[0] || 1) * (split - pad.left)
+    : split + (t - last) / (now - last || 1) * tail);
+  const timeAt = px => (px <= split
+    ? times[0] + (px - pad.left) / (split - pad.left) * (last - times[0])
+    : last + (px - split) / tail * (now - last));
   const y = v => height - pad.bottom - v / top * (height - pad.top - pad.bottom);
 
   // Steps, as a value only changes when a snapshot is taken
@@ -406,7 +417,7 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
     const box = svg.getBoundingClientRect();
     const px = Math.min(Math.max((event.clientX - box.left) / box.width * width, x(times[0])), x(now));
     const py = (event.clientY - box.top) / box.height * height;
-    const t = times[0] + (px - pad.left) / (width - pad.left - pad.right) * (now - times[0]);
+    const t = timeAt(px);
     // The last snapshot by then, and the band under the pointer then, if any
     let j = 0;
     while (j + 1 < times.length - 1 && times[j + 1] <= t) j++;
