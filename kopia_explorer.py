@@ -68,8 +68,12 @@ class DiskCache:
             value = compute()
             # Written to a temporary file of its own first, so a half-written file is never read back
             partial = path.with_name(f'{key}.{threading.get_ident()}.tmp')
-            partial.write_text(json.dumps(value, separators=(',', ':')), encoding='utf-8')
-            self.replace(partial, path)
+            try:
+                partial.write_text(json.dumps(value, separators=(',', ':')), encoding='utf-8')
+                self.replace(partial, path)
+            except OSError:
+                # Such as the disk being full: it's still served, just worked out again next time
+                partial.unlink(missing_ok=True)
         with self.locks_lock:
             self.locks.pop(key, None)
         return value
@@ -108,7 +112,11 @@ class Repository:
     def __init__(self):
         self.lock = threading.Lock()
         self.stats_path = CACHE_DIR / 'storage.json'
-        self.stats = json.loads(self.stats_path.read_text(encoding='utf-8')) if self.stats_path.exists() else {}
+        # Unreadable, they're just worked out again
+        try:
+            self.stats = json.loads(self.stats_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            self.stats = {}
         self.stats_thread = None
         self.sources = set()  # Every backup location's path
         self.snapshots = {}   # id -> kopia's snapshot JSON, for diffs and downloads
@@ -176,7 +184,14 @@ class Repository:
                 except Exception as e:
                     print(f'  {source}: {kopia_reason(e)}', flush=True)
                 self.progress['done'] += 1
-            self.stats_path.write_text(json.dumps(dict(self.stats), separators=(',', ':')), encoding='utf-8')
+            # Written to a temporary file first, so a full disk can't leave it half written
+            partial = self.stats_path.with_suffix('.tmp')
+            try:
+                partial.write_text(json.dumps(dict(self.stats), separators=(',', ':')), encoding='utf-8')
+                DiskCache.replace(partial, self.stats_path)
+            except OSError as e:
+                partial.unlink(missing_ok=True)
+                print(f'  couldn\'t save them: {e}', flush=True)
             print(f'  done in {time.time() - started:.0f}s', flush=True)
         finally:
             self.progress = {}
