@@ -208,6 +208,13 @@ export function pathInScope(loc, name) {
 // isn't in that snapshot, or undefined if it isn't loaded (yet) or wasn't captured. Listings missing on
 // the way are loaded unless only peeking.
 export function snapshotListing(snap, scope, fetchIfMissing = true) {
+  const obj = folderObj(snap, scope, fetchIfMissing);
+  return obj ? api.listing(obj, fetchIfMissing) : obj;
+}
+
+// The object ID of the folder in scope at a snapshot, from the listings on the way to it: null if the folder
+// isn't in that snapshot, or undefined if they aren't loaded (yet)
+export function folderObj(snap, scope, fetchIfMissing = true) {
   let obj = snap.root;
   for (const part of scope ? scope.split('/') : []) {
     const entries = api.listing(obj, fetchIfMissing);
@@ -216,7 +223,7 @@ export function snapshotListing(snap, scope, fetchIfMissing = true) {
     if (!entry) return null;
     obj = entry.o;
   }
-  return api.listing(obj, fetchIfMissing);
+  return obj;
 }
 
 // The nearest location a location sits inside, with the scope of the folder containing it there

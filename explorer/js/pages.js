@@ -2,6 +2,7 @@
 import { isGone, renderChanges } from './changes.js';
 import { renderSizeChart, renderStorageChart } from './charts.js';
 import { renderChurn } from './churn.js';
+import { renderFileTypes } from './filetypes.js';
 import { settingsStatus, settingsWarning } from './schedules.js';
 import { notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
@@ -173,7 +174,8 @@ export function renderMain() {
   // snapshot, then what changed in it, which can be long, and where the changes happen. The snapshots
   // themselves are on the right.
   // The size chart isn't there with too little to chart, such as a single snapshot
-  main.replaceChildren(...[head, settingsWarning(loc), renderSnapshotContents(loc, selected), restore, renderSizeChart(loc), renderChanges(loc, selected), renderChurn(loc)].filter(Boolean));
+  main.replaceChildren(...[head, settingsWarning(loc), renderSnapshotContents(loc, selected), restore, renderSizeChart(loc),
+    renderFileTypes(loc, selected), renderChanges(loc, selected), renderChurn(loc)].filter(Boolean));
 }
 
 // Size and file count of the folder in scope at a snapshot: the snapshot's own for the location's top,

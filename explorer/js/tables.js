@@ -39,7 +39,7 @@ export function contentsTable(legend, up, items, rerender) {
 }
 
 // How each table is sorted, kept while moving between folders
-export const tableSorts = { contents: { key: 'name', desc: false }, changes: { key: 'name', desc: false } };
+export const tableSorts = { contents: { key: 'name', desc: false }, changes: { key: 'name', desc: false }, types: { key: 'size', desc: true } };
 
 // A header row whose headings sort the table; clicking the current one reverses it
 export function sortableHead(sort, columns, rerender) {

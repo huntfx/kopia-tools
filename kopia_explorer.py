@@ -1,6 +1,6 @@
-"""Browse kopia snapshots in a web page: backup locations, their snapshots, folder contents, what changed
-between snapshots, and file histories, restore files and folders from any snapshot, back up a location now,
-delete snapshots, and set how often a folder is backed up.
+"""Browse kopia snapshots in a web page: backup locations, their snapshots, folder contents and file types, what
+changed between snapshots, and file histories, restore files and folders from any snapshot, back up a location
+now, delete snapshots, and set how often a folder is backed up.
 
 Runs a small local web server for the page in explorer/ (index.html, style.css and the modules in js/),
 fetching from kopia as you browse. Diffs and folder listings never change for a given snapshot, so they're
@@ -20,6 +20,7 @@ import queue
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -314,6 +315,76 @@ def listing(obj):
             result.append(item)
         return result
     return listing_cache.get(obj, compute)
+
+
+class FileTypes:
+    """How many files of each type a folder has and how big they are, counting everything inside it:
+    { extension: [files, bytes] }, by the folder's object ID, with '' for files without one. A folder with the
+    same ID never changes, so they're kept for good. kopia lists a whole tree in one go far faster than folder by
+    folder, so each tree listed tallies every folder in it, kept in one SQLite file as there are thousands."""
+
+    def __init__(self):
+        self.db = sqlite3.connect(CACHE_DIR / 'types.sqlite', check_same_thread=False)
+        self.db.execute('CREATE TABLE IF NOT EXISTS tallies (obj TEXT PRIMARY KEY, tally TEXT NOT NULL)')
+        self.db_lock = threading.Lock()
+        self.locks = {}
+        self.locks_lock = threading.Lock()
+        # A big tree takes kopia a while, so only a couple at once
+        self.listing = threading.Semaphore(2)
+
+    def get(self, obj):
+        found = self.read(obj)
+        if found is not None:
+            return found
+        # Worked out once at a time, as several requests can want the same one together
+        with self.locks_lock:
+            lock = self.locks.setdefault(obj, threading.Lock())
+        with lock:
+            found = self.read(obj)
+            if found is None:
+                with self.listing:
+                    found = self.count(obj)
+        with self.locks_lock:
+            self.locks.pop(obj, None)
+        return found
+
+    def read(self, obj):
+        with self.db_lock:
+            row = self.db.execute('SELECT tally FROM tallies WHERE obj = ?', (obj,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def count(self, obj):
+        # Each folder by its path inside the tree, '' for the tree itself
+        tallies, objs = {'': {}}, {'': obj}
+        # Lines are: mode, size, date, time, time zone, object ID, path, with a / after a folder's
+        for line in kopia('ls', '-r', '-l', '-o', obj).splitlines():
+            parts = line.split(None, 6)
+            if len(parts) < 7:
+                continue
+            mode, size, oid, path = parts[0], parts[1], parts[5], parts[6]
+            if mode.startswith('d'):
+                objs[path.rstrip('/')] = oid
+                continue
+            # Files only, not links
+            if not mode.startswith('-'):
+                continue
+            names = path.split('/')
+            # A name starting with a dot, like .gitignore, has no extension
+            dot = names[-1].rfind('.')
+            extension = names[-1][dot:].lower() if dot > 0 else ''
+            for depth in range(len(names)):
+                counts = tallies.setdefault('/'.join(names[:depth]), {}).setdefault(extension, [0, 0])
+                counts[0] += 1
+                counts[1] += int(size) if size.isdigit() else 0
+        rows = [(objs[path], json.dumps(tally, separators=(',', ':'))) for path, tally in tallies.items() if path in objs]
+        # Empty folders have nothing in them to put them in the tallies
+        rows += [(oid, '{}') for path, oid in objs.items() if path not in tallies]
+        with self.db_lock, self.db:
+            self.db.executemany('INSERT OR IGNORE INTO tallies VALUES (?, ?)', rows)
+        return tallies['']
+
+
+file_types = FileTypes()
 
 
 class Dialogs:
@@ -998,6 +1069,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(date_changes(query['from'], query['to']))
             if url.path == '/api/listing':
                 return self.send_json(listing(query['obj']))
+            if url.path == '/api/types':
+                return self.send_json(file_types.get(query['obj']))
             if url.path == '/api/schedule':
                 return self.send_json(schedule_of(query['path']))
             if url.path == '/api/copied-settings':

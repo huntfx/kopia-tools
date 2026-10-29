@@ -1,10 +1,12 @@
-// Loading from kopia_explorer.py: snapshots, diffs, folder listings and date-only changes, with the progress bar
-import { el, plural } from './format.js';
+// Loading from kopia_explorer.py: snapshots, diffs, folder listings, date-only changes and file types, with the
+// progress bar
+import { el, listOf, plural } from './format.js';
 import { render } from './render.js';
 import { storage } from './storage.js';
 
-// What's been loaded: the repository, and diffs, folder listings and date-only changes by what they're between
-export const DATA = { diffs: {}, listings: {}, dates: {} };
+// What's been loaded: the repository, and diffs, folder listings and date-only changes by what they're between,
+// and file types by folder
+export const DATA = { diffs: {}, listings: {}, dates: {}, types: {} };
 
 export const requested = new Set();  // Each request is only made once, so a failure isn't retried in a loop
 
@@ -13,7 +15,10 @@ export const pending = new Set();    // Requests in flight, for saying something
 export const failures = new Map();   // Requests that failed, with why, until retried
 
 // How many of each kind of request have been made and finished, for the progress bar; reset once all are in
-export const progress = { changes: { done: 0, total: 0 }, folders: { done: 0, total: 0 } };
+export const progress = { changes: { done: 0, total: 0 }, folders: { done: 0, total: 0 }, types: { done: 0, total: 0 } };
+
+// Each kind in words, for the progress bar: what it is, and what it's counted in
+const KINDS = { changes: ['changes for ', 'snapshot'], folders: ['', 'folder'], types: ['file types for ', 'snapshot'] };
 
 // Fetch something not loaded yet, and redraw once it arrives. Until then the page says it's loading.
 export function load(url, kind, store) {
@@ -53,27 +58,22 @@ export function showProgress() {
   const box = document.getElementById('progress');
   box.hidden = !pending.size && !failures.size;
   const count = (kind, done, total) => {
-    const what = kind === 'changes' ? 'snapshot' : 'folder';
-    return done == null ? plural(total, what) : `${done.toLocaleString('en-GB')} of ${plural(total, what)}`;
+    const [what, unit] = KINDS[kind];
+    return what + (done == null ? plural(total, unit) : `${done.toLocaleString('en-GB')} of ${plural(total, unit)}`);
   };
   if (pending.size) {
-    const { changes, folders } = progress;
-    const done = changes.done + folders.done, total = changes.total + folders.total;
-    const parts = [
-      changes.total ? `changes for ${count('changes', changes.done, changes.total)}` : null,
-      folders.total ? count('folders', folders.done, folders.total) : null,
-    ].filter(Boolean);
+    const kinds = Object.keys(KINDS).filter(kind => progress[kind].total);
+    const done = kinds.reduce((sum, kind) => sum + progress[kind].done, 0);
+    const total = kinds.reduce((sum, kind) => sum + progress[kind].total, 0);
+    const parts = kinds.map(kind => count(kind, progress[kind].done, progress[kind].total));
     box.replaceChildren(
-      el('span', {}, `Loading ${parts.join(' and ')}…`),
+      el('span', {}, `Loading ${listOf(parts)}…`),
       el('span', { class: 'bar' }, el('span', { class: 'fill', style: `display:block;width:${100 * done / total}%` })));
   } else if (failures.size) {
     const failed = kind => [...failures.values()].filter(f => f.kind === kind).length;
-    const parts = [
-      failed('changes') ? `changes for ${count('changes', null, failed('changes'))}` : null,
-      failed('folders') ? count('folders', null, failed('folders')) : null,
-    ].filter(Boolean);
+    const parts = Object.keys(KINDS).filter(failed).map(kind => count(kind, null, failed(kind)));
     box.replaceChildren(
-      el('span', { class: 'c-removed' }, `Couldn't load ${parts.join(' or ')}: ${failureReason()}`),
+      el('span', { class: 'c-removed' }, `Couldn't load ${listOf(parts, 'or')}: ${failureReason()}`),
       el('button', { class: 'btn', onclick: retryFailed }, 'Retry'));
   }
 }
@@ -168,6 +168,12 @@ export const api = {
     const entries = DATA.listings[obj];
     if (!entries && fetchIfMissing) load(`/api/listing?obj=${obj}`, 'folders', result => { DATA.listings[obj] = result; });
     return entries;
+  },
+  // How many files of each type a folder has and how big they are, counting everything inside it, by its object
+  // ID: { extension: [files, bytes] }, with '' for files without one
+  types(obj) {
+    if (!DATA.types[obj]) load(`/api/types?obj=${obj}`, 'types', result => { DATA.types[obj] = result; });
+    return DATA.types[obj];
   },
   // Files whose modified date changed but not their contents, between any two snapshots of a location
   dates(fromId, toId) {

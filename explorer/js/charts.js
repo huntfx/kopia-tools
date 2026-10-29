@@ -1,11 +1,12 @@
 // Charts of size over time, stacked or overlaid
-import { notLoaded } from './data.js';
+import { api, notLoaded } from './data.js';
 import { el, formatFull, formatSize, plural, svgEl } from './format.js';
+import { typeName } from './filetypes.js';
 import { render } from './render.js';
 import { joinRel, locationsBelow, treeNodes } from './sidebar.js';
 import { openHistory } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
-import { pathInScope, snapshotListing } from './storage.js';
+import { folderObj, pathInScope, snapshotListing } from './storage.js';
 
 // How the space the locations inside a folder take on disk grew over time, stacked: each location's running
 // total as of its latest snapshot at each moment. kopia counts storage per location, so data shared between
@@ -49,8 +50,11 @@ export function renderStorageChart(node) {
 export function renderSizeChart(loc) {
   const complete = loc.snapshots.filter(s => !s.incomplete);
   if (complete.length < 2) return null;
+  // While loading, it can still be switched between folders and files, and file types
+  const panel = (...body) => el('section', { class: 'panel' },
+    el('div', { class: 'chart-head' }, el('h2', {}, 'Size over time'), sizeViews()), ...body);
+  if (sizeByType) return renderTypesChart(loc, complete, panel);
   const listings = complete.map(snap => snapshotListing(snap, state.scope));
-  const panel = (...body) => el('section', { class: 'panel' }, el('h2', {}, 'Size over time'), ...body);
   if (listings.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
 
   // Each thing in it at each snapshot, holding until the next, then the same now
@@ -81,9 +85,52 @@ export function renderSizeChart(loc) {
   }).sort((a, b) => b.peak - a.peak);
 
   return stackedChart({
-    key: `size:${loc.path}:${state.scope}`, heading: 'Size over time', what: ['item', 'items'], items, times, now,
+    key: `size:${loc.path}:${state.scope}`, heading: 'Size over time', what: ['item', 'items'], items, times, now, views: sizeViews(),
     note: 'How big each folder and file in here was at each snapshot. kopia only counts space on disk for a whole location, so this is their size rather than what they take up in the repository.',
   });
+}
+
+// The size chart by file type instead: how much of each type was in the folder in scope at each snapshot,
+// counting everything inside it. The biggest types at their peak get their own bands, like folders and files.
+function renderTypesChart(loc, complete, panel) {
+  const objs = complete.map(snap => folderObj(snap, state.scope));
+  if (objs.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
+  // Not in a snapshot, it had nothing then
+  const tallies = objs.map(obj => (obj === null ? {} : api.types(obj)));
+  if (tallies.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('file types')));
+
+  const now = Date.now();
+  const times = [...complete.map(s => Date.parse(s.time)), now];
+  const lastAt = t => Math.max(0, ...times.slice(0, -1).filter(time => time <= t));
+  const extensions = [...new Set(tallies.flatMap(Object.keys))];
+  if (!extensions.length) return null;
+  const items = extensions.map(extension => {
+    const values = [...tallies.map(tally => tally[extension]?.[1] || 0)];
+    values.push(values[values.length - 1]);
+    const name = typeName(extension);
+    return { name, title: extension ? `${extension} files` : 'Files with no extension', values, lastAt, peak: Math.max(...values), hint: null };
+  }).sort((a, b) => b.peak - a.peak);
+
+  return stackedChart({
+    key: `types:${loc.path}:${state.scope}`, heading: 'Size over time', what: ['type', 'types'], items, times, now, views: sizeViews(),
+    note: 'How much of each file type was in here at each snapshot, counting everything inside it. This is their size rather than what they take up in the repository.',
+  });
+}
+
+// The size chart's bands are the folders and files in the folder in scope, or file types; remembered
+export let sizeByType = false;
+
+try { sizeByType = localStorage.getItem('sizeChart') === 'types'; } catch {}
+
+function sizeViews() {
+  const setByType = byType => {
+    sizeByType = byType;
+    try { localStorage.setItem('sizeChart', byType ? 'types' : 'contents'); } catch {}
+    render();
+  };
+  return el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What the bands are' },
+    [['Folders & files', false, 'A band for each folder and file in here'], ['File types', true, 'A band for each file type, counting everything in here']]
+      .map(([label, byType, title]) => el('button', { 'aria-pressed': String(sizeByType === byType), title, onclick: () => setByType(byType) }, label)));
 }
 
 // Clicking a band hides it, and clicking Others hides all the ones shown, to see what's left in more detail.
@@ -98,10 +145,11 @@ try { chartOverlaid = localStorage.getItem('chartMode') === 'overlaid'; } catch 
 
 // A stacked chart of things over time, biggest at the bottom: items are { name, title (unique), values (one per
 // time), lastAt(t) (the snapshot a value at t is from), pick(), open() (what single and double clicks on its
-// band do, like its row in Contents) }, biggest first. The first seven shown get
-// their own colours; any more are added together as Others.
+// band do, like its row in Contents), hint (saying so, or null where they do nothing) }, biggest first. The first
+// seven shown get their own colours; any more are added together as Others. views, if given, switches what the
+// bands are, beside switching between stacked and overlaid.
 export function stackedChart(options) {
-  const { key, heading, what, items, times, now, note } = options;
+  const { key, heading, what, items, times, now, note, views } = options;
   const hidden = chartHidden.key === key ? chartHidden.titles : new Set();
   const shown = items.filter(item => !hidden.has(item.title));
   const setHidden = titles => {
@@ -172,7 +220,7 @@ export function stackedChart(options) {
         `${plural(hidden.size, what[0])} hidden · `,
         el('button', { class: 'linklike', onclick: () => setHidden(new Set()) }, 'Show all')) : null,
       el('span', { class: 'legend', style: 'margin-left:auto' }, `${formatSize(tops[tops.length - 1][times.length - 1])} now`),
-      modes),
+      views, modes),
     chart,
     legend,
     el('p', { class: 'note', style: 'margin:8px 0 0' }, note));
@@ -270,7 +318,8 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
       when(t, isNow), row(band, j),
       el('div', { class: 'path' }, series[band].title),
       fromSnapshot(series[band].lastAt(t)),
-      el('div', { class: 'hint' }, series[band].others ? 'Click to hide the bigger ones and show these separately' : 'Click for its snapshots - double-click to open it'),
+      series[band].hint === null ? null : el('div', { class: 'hint' }, series[band].others ? 'Click to hide the bigger ones and show these separately'
+        : series[band].hint ?? 'Click for its snapshots - double-click to open it'),
     ] : [
       when(t, isNow),
       ...[...series.keys()].reverse().map(i => row(i, j)),
@@ -292,12 +341,12 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
     // The second click of a double click is the double click's
     if (event.detail > 1) return;
     const { t, band, isNow } = pointed(event);
-    if (band >= 0) return series[band].others ? openOthers() : series[band].pick();
+    if (band >= 0) return series[band].others ? openOthers() : series[band].pick?.();
     navigate({ asOf: isNow ? null : new Date(t).toISOString() });
   });
   svg.addEventListener('dblclick', event => {
     const { band } = pointed(event);
-    if (band >= 0 && !series[band].others) series[band].open();
+    if (band >= 0 && !series[band].others) series[band].open?.();
   });
   chart.replaceChildren(svg, tip);
   return highlight;
