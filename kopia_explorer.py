@@ -363,6 +363,12 @@ class FileTypes:
             self.locks.pop(obj, None)
         return found
 
+    def inside(self, obj):
+        """Each folder directly inside a folder's tally, by name. Counting the folder tallies everything in it,
+        so they're all known by then."""
+        self.get(obj)
+        return {e['n']: self.get(e['o']) for e in listing(obj) if e['t'] == 'd'}
+
     def read(self, obj):
         with self.db_lock:
             row = self.db.execute('SELECT tally FROM tallies WHERE obj = ?', (obj,)).fetchone()
@@ -1085,7 +1091,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/listing':
                 return self.send_json(listing(query['obj']))
             if url.path == '/api/types':
-                return self.send_json(file_types.get(query['obj']))
+                return self.send_json(file_types.inside(query['obj']) if query.get('inside') else file_types.get(query['obj']))
             if url.path == '/api/schedule':
                 return self.send_json(schedule_of(query['path']))
             if url.path == '/api/copied-settings':

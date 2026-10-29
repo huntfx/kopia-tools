@@ -7,11 +7,12 @@ import { currentFolder, storage } from './storage.js';
 
 // The middle shows either a backup location or a plain folder above locations, never both.
 // scope is a folder inside the location (with / separators), which narrows everything shown to it,
-// and file is a file in that folder whose own page is shown instead.
+// and file is a file in that folder whose own page is shown instead. type narrows a location's page to files of
+// one type, by extension ('' for files without one), or null for all of them.
 // The right-hand panel lists the snapshots of the folder or file being looked at, from each location it's in, or
 // for history, a path picked with a single click, until moving somewhere else.
 export const state = {
-  location: null, folder: null, scope: '', file: null, snapshot: null, compare: null, history: null,
+  location: null, folder: null, scope: '', file: null, type: null, snapshot: null, compare: null, history: null,
   // * is for things that only existed between two snapshots compared, which are always shown, greyed out;
   // i (⊘) is for things that went from one snapshot to the next because kopia's ignore rules leave them out.
   // Files whose modified date changed but not their contents (d, •) go with modified ones (~).
@@ -24,6 +25,7 @@ export function readHash() {
   state.folder = state.location ? null : params.get('dir');
   state.scope = state.location ? params.get('in') || '' : '';
   state.file = state.location ? params.get('file') : null;
+  state.type = state.location && params.has('type') ? params.get('type') : null;
   state.snapshot = params.get('snap');
   state.compare = params.get('cmp');
   state.history = params.get('hist');
@@ -35,6 +37,7 @@ export function writeHash(replace = false) {
   if (state.location) params.set('loc', state.location);
   if (state.scope) params.set('in', state.scope);
   if (state.file) params.set('file', state.file);
+  if (state.type != null) params.set('type', state.type);
   if (state.folder) params.set('dir', state.folder);
   if (state.snapshot) params.set('snap', state.snapshot);
   if (state.compare) params.set('cmp', state.compare);
@@ -65,11 +68,13 @@ export function navigate(changes, replace = false) {
   if (changes.folder) {
     changes.location = null;
     changes.snapshot = null;
+    changes.type = null;
   }
   if (changes.location && changes.location !== state.location) {
     // The folder in scope, filters and opened folders belong to the old location
     if (!('scope' in changes)) changes.scope = '';
     if (!('filterText' in changes)) changes.filterText = '';
+    if (!('type' in changes)) changes.type = null;
     changeFolders.clear();
   }
   if (changes.folder) changes.scope = '';

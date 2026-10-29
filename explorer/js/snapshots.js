@@ -1,6 +1,7 @@
 // The snapshots panel on the right: the history of the folder or file being looked at
 import { compareTarget, ignoredReason, isGone, kindCount } from './changes.js';
 import { api, pending } from './data.js';
+import { ofType, typeFiles } from './filetypes.js';
 import { el, fillColour, formatFull, formatSize, gradientPositions, gradientRgb, plural, signedSize, timeAgo } from './format.js';
 import { backupButton, beingDeleted, confirmDelete } from './jobs.js';
 import { scheduleLine, separateLine } from './schedules.js';
@@ -42,21 +43,24 @@ export function realCase(loc, rel) {
 // kopia's diff only reports changes to contents, so with none, touched says whether the path itself still
 // differs, as a file's modified date changing without its contents (git does this) makes kopia store it, and
 // every folder above it, again. Otherwise the snapshot differs only because of something elsewhere.
+// With the page narrowed to a type, a folder's counts are only of files of that type, which say enough on their
+// own, and narrowed says so.
 export function stepChange(older, newer, rel, isFolder) {
   if (older.root === newer.root) return { identical: true };
   const list = api.diff(older.id, newer.id);
   if (!list) return null;
-  const result = { counts: { '+': 0, '-': 0, '~': 0, i: 0 } };
+  const narrowed = isFolder && state.type != null;
+  const result = { counts: { '+': 0, '-': 0, '~': 0, i: 0 }, narrowed };
   for (const change of list) {
     if (!isFolder) {
       if (change.p === rel) Object.assign(result, { kind: change.k, size: change.s, oldSize: change.o, why: change.why });
     } else if (rel && change.p === `${rel}/`) {
-      Object.assign(result, { kind: change.k, size: change.s, files: change.f, why: change.why });
-    } else if ((!rel || change.p.startsWith(`${rel}/`)) && !change.p.endsWith('/')) {
+      if (!narrowed) Object.assign(result, { kind: change.k, size: change.s, files: change.f, why: change.why });
+    } else if ((!rel || change.p.startsWith(`${rel}/`)) && !change.p.endsWith('/') && ofType(change.p)) {
       result.counts[change.k]++;
     }
   }
-  if (!changedAtAll(result)) {
+  if (!changedAtAll(result) && !narrowed) {
     // A folder by the object kopia stored for it, a file by its modified date, from the listing it's in
     const parent = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
     const name = rel.slice(rel.lastIndexOf('/') + 1);
@@ -84,6 +88,7 @@ export function describeStep(change, isFolder) {
     const what = isGone(change.kind) ? '' : ` · ${formatSize(change.size)}${delta}${isFolder && change.files != null ? ` in ${plural(change.files, 'file')}` : ''}`;
     return el('span', { title: change.why ? ignoredReason(change.why) : null }, el('span', { class: cls }, word), what);
   }
+  if (!changedAtAll(change) && change.narrowed) return el('span', { class: 'muted' }, `No ${typeFiles(state.type)} changed`);
   if (!changedAtAll(change)) {
     // Until the listings to compare are in, it isn't known which; if they can't be, all that's known is the diff's
     if (change.touched === undefined) return el('span', { class: 'muted' }, pending.size ? 'Checking…' : 'No content changes');

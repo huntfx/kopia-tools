@@ -170,6 +170,11 @@ a.btn { color: inherit; text-decoration: none; display: inline-block; }
 .loc-head h1 { font-family: var(--font-data); font-size: 1.15rem; font-weight: 500; margin: 0; word-break: break-all; }
 .loc-head .meta { color: var(--ink-2); margin-top: 2px; display: flex; flex-wrap: wrap; gap: 4px 18px; }
 .loc-head .meta b { font-weight: 600; color: var(--ink); }
+/* The page narrowed to one file type, which × clears */
+.type-filter { display: inline-flex; align-items: baseline; gap: 4px; padding: 0 4px 0 8px; border-radius: 4px; background: var(--accent-bg); color: var(--ink); }
+.type-filter .linklike { padding: 0 4px; text-decoration: none; }
+.file-types tr.type-row { cursor: pointer; }
+.file-types tr.type-row:hover { background: var(--accent-bg); }
 .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 
 .chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }

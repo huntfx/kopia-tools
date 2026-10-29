@@ -5,8 +5,8 @@ import { render } from './render.js';
 import { storage } from './storage.js';
 
 // What's been loaded: the repository, and diffs, folder listings and date-only changes by what they're between,
-// and file types by folder
-export const DATA = { diffs: {}, listings: {}, dates: {}, types: {} };
+// and file types by folder, and of the folders inside one
+export const DATA = { diffs: {}, listings: {}, dates: {}, types: {}, typesInside: {} };
 
 export const requested = new Set();  // Each request is only made once, so a failure isn't retried in a loop
 
@@ -174,6 +174,11 @@ export const api = {
   types(obj) {
     if (!DATA.types[obj]) load(`/api/types?obj=${obj}`, 'types', result => { DATA.types[obj] = result; });
     return DATA.types[obj];
+  },
+  // The same for each folder directly inside one, by name
+  typesInside(obj) {
+    if (!DATA.typesInside[obj]) load(`/api/types?obj=${obj}&inside=1`, 'types', result => { DATA.typesInside[obj] = result; });
+    return DATA.typesInside[obj];
   },
   // Files whose modified date changed but not their contents, between any two snapshots of a location
   dates(fromId, toId) {

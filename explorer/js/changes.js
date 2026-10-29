@@ -1,6 +1,7 @@
 // What changed between two snapshots, as a tree
 import { api, notLoaded } from './data.js';
 import { appendAll, changeRgb, el, formatFull, formatSize, gradientPositions, plural, shortId, signedSize, textColour, timeAgo } from './format.js';
+import { ofType, typeFiles } from './filetypes.js';
 import { openHistory } from './snapshots.js';
 import { navigate, state } from './state.js';
 import { unfinished } from './storage.js';
@@ -158,8 +159,9 @@ export function compareSelect(complete, selected, other) {
 }
 
 // The snapshot the selected one is compared with: the chosen one, or by default the nearest earlier one
-// with changes in the folder in scope since, so there's something to see. Steps whose changes aren't
-// loaded yet count if the snapshots differ at all. With no changes since the oldest, it's the oldest.
+// with changes in the folder in scope since, to files of the type the page is narrowed to if it is, so there's
+// something to see. Steps whose changes aren't loaded yet count if the snapshots differ at all. With no changes
+// since the oldest, it's the oldest.
 export function compareTarget(loc, selected) {
   if (selected.incomplete) return undefined;
   const complete = loc.snapshots.filter(s => !s.incomplete);
@@ -171,7 +173,7 @@ export function compareTarget(loc, selected) {
     const [older, newer] = [complete[i - 1], complete[i]];
     if (older.root === newer.root) continue;
     const list = api.diff(older.id, newer.id);
-    if (!list || list.some(c => c.p.startsWith(prefix))) return older;
+    if (!list || list.some(c => c.p.startsWith(prefix) && ofType(c.p))) return older;
   }
   return complete.indexOf(selected) > 0 ? complete[0] : undefined;
 }
@@ -204,15 +206,16 @@ export function renderChanges(loc, selected) {
     return panel;
   }
 
-  // Only what's inside the folder in scope, with paths starting inside it
+  // Only what's inside the folder in scope, with paths starting inside it, and only files of the type the page
+  // is narrowed to, if it is
   const prefix = state.scope ? `${state.scope}/` : '';
-  const inScope = prefix
+  const inScope = (prefix
     ? changes.filter(c => c.p.startsWith(prefix) && c.p.length > prefix.length).map(c => ({ ...c, p: c.p.slice(prefix.length) }))
-    : changes;
+    : changes).filter(c => ofType(c.p));
   // Files whose modified date changed but not their contents, which the server finds, as kopia's diff only
   // counts them; like the other kinds, they're counted whether or not they're shown
   const dates = dateOnlyChanges(older, newer, state.scope, new Set(inScope.map(c => c.p)));
-  const scoped = [...inScope, ...dates.found];
+  const scoped = [...inScope, ...dates.found.filter(c => ofType(c.p))];
   const tree = buildTree(scoped);
   // Files that only existed between the snapshots compared, which are shown greyed out
   const transient = tree.counts['*'];
@@ -270,6 +273,7 @@ export function renderChanges(loc, selected) {
   treeBox.append(...topFolder(visible));
   if (!visible.children.size) {
     treeBox.append(el('p', { class: 'note' }, scoped.length ? 'Nothing matches the filters.'
+      : state.type != null ? `No ${typeFiles(state.type)} ${state.scope ? 'in this folder ' : ''}changed in this snapshot.`
       : state.scope ? 'Nothing in this folder changed in this snapshot.' : 'No changes in this snapshot.'));
   }
 

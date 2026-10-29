@@ -4,8 +4,9 @@ import { navigate, ui } from './state.js';
 import { LOCATION_DOT, currentPath } from './storage.js';
 
 // items: { key, label, prefix?, folder, location?, live?, size, files, modified, pick?, open }
-// up: { label, go } or null. rerender returns a fresh copy of the panel, for re-sorting.
-export function contentsTable(legend, up, items, rerender) {
+// up: { label, go } or null. rerender returns a fresh copy of the panel, for re-sorting. empty is what to say with
+// no items.
+export function contentsTable(legend, up, items, rerender, empty = 'Empty folder') {
   const columns = [
     { key: 'name', label: 'Name', value: i => (i.prefix || '') + i.label },
     { key: 'size', label: 'Size', value: i => i.size, desc: true },
@@ -34,7 +35,7 @@ export function contentsTable(legend, up, items, rerender) {
         el('tbody', {},
           up ? upTableRow(up.label, up.go, 3) : null,
           sorted.map(row),
-          sorted.length ? null : el('tr', {}, el('td', { class: 'muted', colspan: 4 }, 'Empty folder'))))));
+          sorted.length ? null : el('tr', {}, el('td', { class: 'muted', colspan: 4 }, empty))))));
   return panel;
 }
 

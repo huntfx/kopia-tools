@@ -2,15 +2,15 @@
 import { isGone, renderChanges } from './changes.js';
 import { renderSizeChart, renderStorageChart } from './charts.js';
 import { renderChurn } from './churn.js';
-import { renderFileTypes } from './filetypes.js';
+import { ofType, renderFileTypes, typeFiles, typeFilter } from './filetypes.js';
 import { settingsStatus, settingsWarning } from './schedules.js';
-import { notKnown, notLoaded, pending } from './data.js';
+import { api, notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
 import { beingDeleted, restoreItem, showInExplorer } from './jobs.js';
 import { compactFolder, diskText, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
 import { describeStep, openHistory, stepChange } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
-import { asOfSnapshot, backingUpNow, enclosingLocation, hiddenAsOf, isCancelled, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
+import { asOfSnapshot, backingUpNow, enclosingLocation, folderObj, hiddenAsOf, isCancelled, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
 import { contentsTable } from './tables.js';
 
 // What's directly inside a folder: merged folder chains and backup locations, like the sidebar
@@ -151,7 +151,8 @@ export function renderMain() {
       here ? el('span', {}, el('b', {}, formatSize(here.size))) : null,
       here ? el('span', {}, plural(here.files, 'file')) : null,
       state.scope ? null : el('span', {}, `${diskText(selected.total)} on disk`),
-      settingsStatus(loc)));
+      settingsStatus(loc),
+      typeFilter(selected)));
 
   // The folder as it was in the snapshot, to restore: its own modified time is in the listing of the
   // folder above it, or for the location, the snapshot's
@@ -321,13 +322,26 @@ export function renderSnapshotContents(loc, selected) {
     : outer ? { label: outer.parentPath, go: () => navigate({ location: outer.loc.path, snapshot: null, scope: outer.scope }) }
     : above ? { label: above.path, go: () => navigate(above.location ? { location: above.location.path, snapshot: null } : { folder: above.path }) } : null;
 
+  // Narrowed to a type, only files of it, and folders with some inside, by how much
+  let inside = null;
+  if (state.type != null) {
+    inside = api.typesInside(folderObj(selected, state.scope));
+    if (!inside) {
+      appendAll(panel, head, el('p', { class: 'note' }, notLoaded('file types')));
+      return panel;
+    }
+  }
+  const ofTypeIn = entry => inside?.[entry.n]?.[state.type];
+  const shown = inside ? entries.filter(entry => (entry.t === 'd' ? ofTypeIn(entry) : ofType(entry.n))) : entries;
+
   const base = [loc.path.replace(/\\$/, ''), ...scopeParts].join('\\');
-  const items = entries.map(entry => {
+  const items = shown.map(entry => {
     const full = `${base}\\${entry.n}`;
     const nested = entry.t === 'd' ? treeNodes.get(full.toLowerCase())?.location : null;
+    const [files, size] = inside && entry.t === 'd' ? ofTypeIn(entry) : [entry.f, entry.s];
     return {
       key: full, label: entry.n, folder: entry.t === 'd', location: nested,
-      size: entry.s, files: entry.t === 'd' ? entry.f : null, modified: entry.m,
+      size, files: entry.t === 'd' ? files : null, modified: entry.m,
       pick: () => openHistory(entry.n, entry.t === 'd'),
       // Double click goes into it: a nested location, a folder, or a file's own page
       open: nested ? () => navigate({ location: nested.path, snapshot: null })
@@ -336,7 +350,7 @@ export function renderSnapshotContents(loc, selected) {
     };
   });
   return contentsTable(`At ${formatFull(selected.time)}, ${timeAgo(selected.time)} (${shortId(selected.id)})`, up, items,
-    () => renderSnapshotContents(loc, selected));
+    () => renderSnapshotContents(loc, selected), inside ? `No ${typeFiles(state.type)} in here` : 'Empty folder');
 }
 
 // Copying a path from the breadcrumbs gives it on one line, as it's shown: its parts are separate elements,
