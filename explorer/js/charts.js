@@ -36,7 +36,7 @@ export function renderStorageChart(node) {
       pick: () => { ui.pickedRow = loc.path; ui.pickedIsFolder = true; navigate({ history: loc.path }); },
       open: () => navigate({ location: loc.path, snapshot: null }),
     };
-  }).sort((a, b) => b.values[b.values.length - 1] - a.values[a.values.length - 1]);
+  });
 
   return stackedChart({
     key: `folder:${node.path}`, heading: 'Space on disk over time', pieHeading: 'Space on disk', what: ['location', 'locations'], items, times, now,
@@ -46,7 +46,6 @@ export function renderStorageChart(node) {
 
 // How big each folder and file in the folder in scope was at each of a location's snapshots, stacked, from
 // the folder's listing at each one. kopia only counts space on disk for whole locations, so this is size.
-// The biggest at their peak get their own bands, so something big that's since gone still stands out.
 export function renderSizeChart(loc) {
   const complete = loc.snapshots.filter(s => !s.incomplete);
   if (complete.length < 2) return null;
@@ -76,13 +75,13 @@ export function renderSizeChart(loc) {
     const full = pathInScope(loc, entry.n);
     const nested = isFolder ? treeNodes.get(full.toLowerCase())?.location : null;
     return {
-      name: entry.n + (isFolder ? '\\' : ''), title: full, values, lastAt, peak: Math.max(...values),
+      name: entry.n + (isFolder ? '\\' : ''), title: full, values, lastAt,
       // Like its row in Contents: its snapshots, then going into it, a location inside, or a file's own page
       pick: () => { ui.pickedRow = full; openHistory(entry.n, isFolder); },
       open: () => navigate(nested ? { location: nested.path, snapshot: null }
         : isFolder ? { scope: joinRel(state.scope, entry.n) } : { file: entry.n }),
     };
-  }).sort((a, b) => b.peak - a.peak);
+  });
 
   return stackedChart({
     key: `size:${loc.path}:${state.scope}`, heading: 'Size over time', pieHeading: 'Size', at: viewedAt(complete, loc),
@@ -92,7 +91,7 @@ export function renderSizeChart(loc) {
 }
 
 // The size chart by file type instead: how much of each type was in the folder in scope at each snapshot,
-// counting everything inside it. The biggest types at their peak get their own bands, like folders and files.
+// counting everything inside it.
 function renderTypesChart(loc, complete, panel) {
   const objs = complete.map(snap => folderObj(snap, state.scope));
   if (objs.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
@@ -109,8 +108,8 @@ function renderTypesChart(loc, complete, panel) {
     const values = [...tallies.map(tally => tally[extension]?.[1] || 0)];
     values.push(values[values.length - 1]);
     const name = typeName(extension);
-    return { name, title: extension ? `${extension} files` : 'Files with no extension', values, lastAt, peak: Math.max(...values), hint: null };
-  }).sort((a, b) => b.peak - a.peak);
+    return { name, title: extension ? `${extension} files` : 'Files with no extension', values, lastAt, hint: null };
+  });
 
   return stackedChart({
     key: `types:${loc.path}:${state.scope}`, heading: 'Size over time', pieHeading: 'Size', at: viewedAt(complete, loc),
@@ -155,10 +154,10 @@ try { chartMode = ['overlaid', 'pie'].includes(localStorage.getItem('chartMode')
 
 // A stacked chart of things over time, smallest at the bottom: items are { name, title (unique), values (one per
 // time), lastAt(t) (the snapshot a value at t is from), pick(), open() (what single and double clicks on its
-// band do, like its row in Contents), hint (saying so, or null where they do nothing) }, biggest first. The first
-// seven shown get their own colours, or up to 14 if Others would be big; any more are added together as
-// Others. views, if given, switches what the
-// bands are, beside switching between stacked, overlaid and pie. The pie, the legend and the total are at the
+// band do, like its row in Contents), hint (saying so, or null where they do nothing) }. They go biggest first
+// overall, by the area under each one, so something big that's since gone still counts. The first seven shown get
+// their own colours, or up to 14 if Others would be big; any more are added together as Others. views, if given,
+// switches what the bands are, beside switching between stacked, overlaid and pie. The pie, the legend and the total are at the
 // time at (an index into times, the last by default); the pie's headed pieHeading. Whichever way it's shown, the
 // legend's the same, and hiding one hides it in all of them.
 export function stackedChart(options) {
@@ -167,13 +166,17 @@ export function stackedChart(options) {
   const pie = chartMode === 'pie';
   const chartOverlaid = chartMode === 'overlaid';
   const hidden = chartHidden.key === key ? chartHidden.titles : new Set();
-  const shown = items.filter(item => !hidden.has(item.title));
+  // Each value holds until the next time
+  const area = new Map(items.map(item => [item, item.values.reduce((sum, v, j) => sum + v * ((times[j + 1] ?? times[j]) - times[j]), 0)]));
+  const byArea = (a, b) => area.get(b) - area.get(a);
+  const sorted = [...items].sort(byArea);
+  const shown = sorted.filter(item => !hidden.has(item.title));
   const setHidden = titles => {
     chartHidden = { key, titles };
     panel.replaceWith(stackedChart(options));
   };
-  // The biggest at their peak get colours of their own. While what's left would still be more than a fifth of
-  // the total then, the biggest of the rest then get one too, in lighter shades of the same colours, up to 14.
+  // The biggest overall get colours of their own. While what's left would still be more than a fifth of the total
+  // at the time shown, the biggest of the rest then get one too, in lighter shades of the same colours, up to 14.
   // Others of just one would be no better than naming it.
   const named = shown.length > 8 ? shown.slice(0, 7) : [...shown];
   const sizeAt = list => list.reduce((sum, item) => sum + item.values[at], 0);
@@ -185,11 +188,10 @@ export function stackedChart(options) {
   // The last one shown stays, so there's always something to see
   const hideItem = item => { if (shown.length > 1) setHidden(new Set([...hidden, item.title])); };
   const openOthers = () => setHidden(new Set([...hidden, ...named.map(item => item.title)]));
-  // Coloured in that order, past seven in lighter shades, then put in order of size then, biggest first, like
-  // the legend's sizes
+  // Biggest overall first, coloured in that order, past seven in lighter shades, so each keeps its colour
+  // whichever time's shown
   const bySize = [
-    ...named.map((item, i) => ({ ...item, colour: i < 7 ? `var(--series-${i + 1})` : `color-mix(in srgb, var(--series-${i - 6}) 55%, var(--surface))` }))
-      .sort((a, b) => b.values[at] - a.values[at]),
+    ...named.sort(byArea).map((item, i) => ({ ...item, colour: i < 7 ? `var(--series-${i + 1})` : `color-mix(in srgb, var(--series-${i - 6}) 55%, var(--surface))` })),
     ...(others.length ? [{
       name: `${others.length} others`, title: `${others.length} smaller ${what[1]} added together`, colour: 'var(--series-other)', others: true,
       values: times.map((_, j) => others.reduce((sum, item) => sum + item.values[j], 0)),
@@ -229,7 +231,7 @@ export function stackedChart(options) {
   // In the order they're coloured, then Others, then any hidden
   const entries = [
     ...series.map((s, i) => ({ s, i, order: bySize.indexOf(s) })),
-    ...items.filter(item => hidden.has(item.title)).map(item => ({ s: item, hidden: true, order: bySize.length + items.indexOf(item) })),
+    ...items.filter(item => hidden.has(item.title)).map(item => ({ s: item, hidden: true, order: bySize.length + sorted.indexOf(item) })),
   ].sort((a, b) => a.order - b.order);
   const legend = el('div', { class: 'chart-legend' }, entries.map(({ s, i, hidden: isHidden }) => el('button', {
     class: isHidden ? 'hidden-item' : null,
