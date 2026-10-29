@@ -201,9 +201,14 @@ export function stackedChart(options) {
   // The total and each one's share then, as the legend and the pie say them
   const total = bySize.reduce((sum, s) => sum + s.values[at], 0);
   const share = value => `${(total ? 100 * value / total : 0).toFixed(1)}%`;
-  // From the bottom up: stacked, the smallest at the bottom, with Others there, so the big ones sit on top. The pie
-  // goes round biggest first, like the legend.
-  const series = chartOverlaid || pie ? bySize : [...bySize].reverse();
+  // From the bottom up: stacked, the ones that barely change at this scale at the bottom, biggest first, as a solid
+  // base, then the rest, steadiest first, so one changing only moves those above it, which change more anyway. The
+  // pie goes round biggest first, like the legend.
+  const changed = s => s.values.reduce((sum, v, j) => sum + (j ? Math.abs(v - s.values[j - 1]) : 0), 0);
+  const height = Math.max(...times.map((_, j) => bySize.reduce((sum, s) => sum + s.values[j], 0)));
+  const steady = s => changed(s) < height / 50;
+  const series = chartOverlaid || pie ? bySize
+    : [...bySize].sort((a, b) => steady(b) - steady(a) || (steady(a) ? 0 : changed(a) - changed(b)));
   // Each band's top at each moment, stacked in order from the bottom; overlaid, the scale goes up to the biggest one
   const tops = [];
   series.forEach((s, i) => tops.push(s.values.map((v, j) => v + (i ? tops[i - 1][j] : 0))));
