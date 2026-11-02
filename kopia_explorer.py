@@ -11,12 +11,14 @@ Example:
     py kopia_explorer.py
     py kopia_explorer.py --browser
     py kopia_explorer.py --port 9000 --no-browser
+    py kopia_explorer.py --quiet
 """
 
 import argparse
 import hashlib
 import itertools
 import json
+import logging
 import os
 import queue
 import re
@@ -24,6 +26,7 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -37,7 +40,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 from urllib.parse import parse_qs, urlparse
 
-from snapshot_diff import ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, kopia, list_snapshots
+from snapshot_diff import ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, kopia, list_snapshots, log_command
 
 PAGE_DIR = Path(__file__).parent / 'explorer'
 # In the temp folder, as it can be thrown away and can get big
@@ -526,6 +529,7 @@ def run_restore(job, snap, path, is_folder):
             working = target.with_name(f'{target.name}.kopia-restoring-{job["id"]}')
         job.update(state='restoring', target=str(target), working=str(working))
         # Progress lines end in carriage returns, which text mode reads as line ends
+        started = time.time()
         process = subprocess.Popen(['kopia', 'restore', '--progress', source, str(working)], stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
         last = ''
@@ -536,7 +540,8 @@ def run_restore(job, snap, path, is_folder):
                            bytes=min(size_of(size, unit), size_of(total, total_unit)), totalBytes=size_of(total, total_unit))
             elif line.strip():
                 last = line.strip()
-        if process.wait():
+        log_command(process.args[1:], started, process.wait() and (last or f'exit code {process.returncode}'))
+        if process.returncode:
             raise RuntimeError(last or f'kopia restore failed with exit code {process.returncode}')
         # Complete, so it can't be half done any more: what's left is moving it into place
         job.update(state='finishing', files=job['totalFiles'] or job['files'], bytes=job['totalBytes'] or job['bytes'])
@@ -663,7 +668,8 @@ def run_backup(job, process):
                 job['errors'] = sum(int(count) for count in BACKUP_PROGRESS['errors'].findall(line))
             elif line and not line.startswith('Snapshotting '):
                 last = line
-        if process.wait() or not result:
+        log_command(process.args[1:], job['started'], process.wait() and (last or f'exit code {process.returncode}'))
+        if process.returncode or not result:
             raise RuntimeError(last or f'kopia snapshot create failed with exit code {process.returncode}')
         job['snapshot'] = result['id']
         # Known straight away, so it can be browsed, and the page can show it, before the snapshots are read
@@ -785,10 +791,7 @@ def set_schedule(path, interval, manual=False, copy_settings=False):
 
 
 def import_policy(key, policy):
-    result = subprocess.run(['kopia', 'policy', 'import', key], input=json.dumps({key: policy}), text=True,
-                            encoding='utf-8', capture_output=True)
-    if result.returncode:
-        raise RuntimeError(f'kopia policy import failed:\n{result.stderr.strip()}')
+    kopia('policy', 'import', key, input=json.dumps({key: policy}))
 
 
 # Settings kopia reads folder by folder while backing up. Inside a folder with a policy of its own, while a
@@ -1232,7 +1235,14 @@ def main():
     shown = parser.add_mutually_exclusive_group()
     shown.add_argument('--browser', action='store_true', help='open the page in a browser rather than a window')
     shown.add_argument('--no-browser', action='store_true', help="don't open the page anywhere, just serve it")
+    parser.add_argument('--quiet', action='store_true', help="don't print each kopia command as it finishes, with how long it took")
     args = parser.parse_args()
+    if not args.quiet:
+        # Only kopia's commands, not everything else that logs at debug level, such as pywebview
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter('%(asctime)s %(message)s', '%H:%M:%S'))
+        logging.getLogger('kopia').addHandler(handler)
+        logging.getLogger('kopia').setLevel(logging.DEBUG)
     if not args.browser and not args.no_browser:
         try:
             import webview  # noqa: F401

@@ -10,10 +10,12 @@ Examples:
 
 import argparse
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -36,12 +38,25 @@ DIFF_CHANGED = re.compile(r'^changed \./(.*) at \d{4}-\d\d-\d\d .* \(size (\d+) 
 SNAPSHOT_ID = re.compile(r'^[0-9a-fA-F]{6,32}$')
 
 
-def kopia(*args):
-    """Run a kopia command and return its output."""
-    result = subprocess.run(['kopia', *args], capture_output=True, text=True, encoding='utf-8')
+def kopia(*args, input=None):
+    """Run a kopia command, with anything given to it as input, and return its output."""
+    started = time.time()
+    result = subprocess.run(['kopia', *args], input=input, capture_output=True, text=True, encoding='utf-8')
+    log_command(args, started, result.returncode and result.stderr.strip())
     if result.returncode:
         raise RuntimeError(f'kopia {" ".join(args)} failed:\n{result.stderr.strip()}')
     return result.stdout
+
+
+# Each kopia command is logged at debug level once it's finished, which nothing shows unless it's asked for,
+# as the explorer does unless it's run with --quiet
+log = logging.getLogger('kopia')
+
+
+def log_command(args, started, error=None):
+    """Log a kopia command that's finished, with how long it took, and if it failed, the last thing kopia said."""
+    failed = f'  FAILED: {error.strip().splitlines()[-1]}' if error else ''
+    log.debug('%6.2fs  %s%s', time.time() - started, subprocess.list2cmdline(['kopia', *args]), failed)
 
 
 def list_snapshots(*args, include_incomplete=False):
