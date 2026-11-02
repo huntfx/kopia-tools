@@ -139,6 +139,9 @@ a.btn { color: inherit; text-decoration: none; display: inline-block; }
 .sort button { flex: 1; background: none; border: 0; padding: 3px 0; font-size: 0.8rem; color: var(--ink-2); }
 .sort button + button { border-left: 1px solid var(--axis); }
 .sort button[aria-pressed="true"] { background: var(--accent-bg); color: var(--ink); font-weight: 500; }
+.sort[hidden] { display: none; }
+/* The locations' order sits just under the view it belongs to */
+#sort:has(+ #sort-order:not([hidden])) { margin-bottom: 4px; }
 .locations { font-family: var(--font-data); font-size: 0.8rem; }
 .fsrow {
   display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 4px; align-items: center;
@@ -158,6 +161,7 @@ a.btn { color: inherit; text-decoration: none; display: inline-block; }
 .fsrow.group .label { color: var(--ink-2); }
 .fsrow .total { color: var(--ink-2); white-space: nowrap; }
 .fsrow.group .total { color: var(--muted); }
+.fsrow .total.due { color: var(--warn-line); }
 .fsrow .badge { margin-left: 2px; }
 .fsrow mark { background: var(--warn-bg); color: inherit; border-radius: 2px; box-shadow: 0 0 0 1px var(--warn-line); }
 .linklike { background: none; border: 0; padding: 0; color: var(--accent); font-size: inherit; }

@@ -1,9 +1,10 @@
-// The sidebar: the tree of backup locations, or them listed by name, size or when they were last backed up
+// The sidebar: the tree of backup locations, or them listed by name, size, or when they were last or are next backed up
 import { DATA, repositoryTitle } from './data.js';
 import { el, formatFull, formatSize, gradientPositions, gradientRgb, textColour, timeAgo } from './format.js';
 import { render } from './render.js';
 import { renderMatches, sidebarFilter } from './search.js';
 import { navigate, state } from './state.js';
+import { OVERDUE, loadAllSchedules, nextScheduled, scheduleText, schedules } from './schedules.js';
 import { LOCATION_DOT, asOfSnapshot, backingUpNow, currentFolder, hiddenAsOf, locationOf, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf } from './storage.js';
 
 // Build a folder tree from the backup locations: the PC at the top, named after the computer the
@@ -113,12 +114,12 @@ export const collapsedFolders = new Set();
 export const openFolders = new Set();
 
 // Open the folders above a path, so it shows and is highlighted in the sidebar, without listing its own
-// contents. In the lists by size or name, each location is a row of its own, so only folders inside the
-// path's own location are opened, not the locations it's nested in; switching to the tree opens those.
+// contents. In the list of locations, each is a row of its own, so only folders inside the path's own
+// location are opened, not the locations it's nested in; switching to the tree opens those.
 export function reveal(path) {
   if (!path) return;
   collapsedFolders.delete(locationTree.path);
-  const owner = sidebarSort === 'tree' ? null : locationOf(path)?.path.replace(/\\$/, '').toLowerCase();
+  const owner = sidebarView === 'tree' ? null : locationOf(path)?.path.replace(/\\$/, '').toLowerCase();
   const parts = path.replace(/\\$/, '').split('\\');
   for (let i = 1; i < parts.length; i++) {
     const sub = i === 1 ? `${parts[0]}\\` : parts.slice(0, i).join('\\');
@@ -153,45 +154,74 @@ export function rescaleTree() {
   treePositions = treeScale();
 }
 
-// How the sidebar is sorted, remembered in this browser. Clicking the current sort again reverses it.
-export const SORTS = { tree: 'Folders', name: 'Name', size: 'Size', date: 'Date' };
+// How the sidebar's shown, remembered in this browser: the tree of folders, or the locations listed in an
+// order. Clicking the current one again reverses it.
+export const VIEWS = { tree: 'Folders', list: 'Locations' };
 
-// What each sorts by, for its button's tooltip
-export const SORT_TITLES = { tree: 'folders', name: 'name', size: 'size', date: 'latest snapshot' };
+export const ORDERS = { name: 'Name', size: 'Size', last: 'Last', next: 'Next' };
 
-// Size starts largest first and date newest first, the others A–Z
-export const DESCENDING_BY_DEFAULT = { tree: false, name: false, size: true, date: true };
+// What each order sorts by, for its button's tooltip
+export const ORDER_TITLES = { name: 'name', size: 'size', last: 'latest snapshot', next: 'next scheduled snapshot' };
 
-export let sidebarSort = 'tree';
+// Size starts largest first and the latest snapshot newest first, the others A–Z or soonest first
+export const DESCENDING_BY_DEFAULT = { name: false, size: true, last: true, next: false };
 
-export let sidebarReversed = false;
+export let sidebarView = 'tree';
+
+export let sidebarOrder = 'name';
+
+export let treeReversed = false;
+
+export let orderReversed = false;
 
 try {
-  if (SORTS[localStorage.getItem('sidebarSort')]) sidebarSort = localStorage.getItem('sidebarSort');
-  sidebarReversed = localStorage.getItem('sidebarReversed') === '1';
+  if (VIEWS[localStorage.getItem('sidebarView')]) sidebarView = localStorage.getItem('sidebarView');
+  if (ORDERS[localStorage.getItem('sidebarOrder')]) sidebarOrder = localStorage.getItem('sidebarOrder');
+  treeReversed = localStorage.getItem('treeReversed') === '1';
+  orderReversed = localStorage.getItem('orderReversed') === '1';
 } catch {}
 
-export function renderSort() {
-  document.getElementById('sort').replaceChildren(...Object.entries(SORTS).map(([key, label]) => {
-    const active = key === sidebarSort;
-    const descending = DESCENDING_BY_DEFAULT[key] !== (active && sidebarReversed);
+// A row of buttons, with the current one marked by which way it's sorted, if it can be reversed
+function sortButtons(id, labels, current, titles, descending, pick) {
+  document.getElementById(id).replaceChildren(...Object.entries(labels).map(([key, label]) => {
+    const active = key === current;
+    const arrow = active && descending[key] != null ? ` ${descending[key] ? '▼' : '▲'}` : '';
     return el('button', {
       'aria-pressed': String(active),
-      title: active ? 'Click again to reverse' : `Sort by ${SORT_TITLES[key]}`,
-      onclick: () => {
-        if (active) sidebarReversed = !sidebarReversed;
-        else { sidebarSort = key; sidebarReversed = false; }
-        // The tree shows what's open through the locations above it, which the lists leave closed
-        if (sidebarSort === 'tree') reveal(currentFolder());
-        try {
-          localStorage.setItem('sidebarSort', sidebarSort);
-          localStorage.setItem('sidebarReversed', sidebarReversed ? '1' : '0');
-        } catch {}
-        renderSort();
-        renderLocations();
-      },
-    }, active ? `${label} ${descending ? '▼' : '▲'}` : label);
+      title: active ? (arrow ? 'Click again to reverse' : null) : titles[key],
+      onclick: () => pick(key, active),
+    }, label + arrow);
   }));
+}
+
+export function renderSort() {
+  const remember = () => {
+    try {
+      localStorage.setItem('sidebarView', sidebarView);
+      localStorage.setItem('sidebarOrder', sidebarOrder);
+      localStorage.setItem('treeReversed', treeReversed ? '1' : '0');
+      localStorage.setItem('orderReversed', orderReversed ? '1' : '0');
+    } catch {}
+    renderSort();
+    renderLocations();
+  };
+  // Folders can be reversed; the locations' order has its own row of buttons under them
+  sortButtons('sort', VIEWS, sidebarView, { tree: 'Show the folders the locations are in', list: 'List the locations' },
+    { tree: treeReversed }, (key, active) => {
+      if (active && key === 'tree') treeReversed = !treeReversed;
+      sidebarView = key;
+      // The tree shows what's open through the locations above it, which the list leaves closed
+      if (key === 'tree') reveal(currentFolder());
+      remember();
+    });
+  document.getElementById('sort-order').hidden = sidebarView !== 'list';
+  sortButtons('sort-order', ORDERS, sidebarOrder,
+    Object.fromEntries(Object.entries(ORDER_TITLES).map(([key, what]) => [key, `Sort by ${what}`])),
+    { [sidebarOrder]: DESCENDING_BY_DEFAULT[sidebarOrder] !== orderReversed }, (key, active) => {
+      if (active) orderReversed = !orderReversed;
+      else { sidebarOrder = key; orderReversed = false; }
+      remember();
+    });
 }
 
 /* Sidebar items. Above the locations, folders come from the tree of locations. Inside a location,
@@ -204,6 +234,40 @@ export const joinRel = (rel, name) => (rel ? `${rel}/${name}` : name);
 export function lastBackedUp(loc) {
   const snap = !tooOld(loc) && asOfSnapshot(loc);
   return snap && !snap.incomplete ? snap : null;
+}
+
+// When a location's next backed up, in milliseconds: with an as-of date, its first complete snapshot after
+// that, which has happened; otherwise when its schedule says. Undefined while its schedule's loading, and null
+// with none to come: manual snapshots only, or nothing after the as-of date.
+export function nextBackedUp(loc) {
+  if (state.asOf) {
+    const snap = loc.snapshots.find(s => !s.incomplete && new Date(s.time) > new Date(state.asOf));
+    return snap ? new Date(snap.time).getTime() : null;
+  }
+  return nextScheduled(loc);
+}
+
+// Listed by when they were last or will next be backed up, a location shows that in place of its size
+function whenCell(loc) {
+  if (sidebarOrder === 'last') {
+    const snap = lastBackedUp(loc);
+    return snap ? el('span', { class: 'total', title: `${state.asOf ? 'Snapshot' : 'Latest'} ${formatFull(snap.time)}` }, timeAgo(snap.time))
+      : el('span', { class: 'total muted' }, state.asOf ? 'None that old' : 'No snapshots');
+  }
+  const next = nextBackedUp(loc);
+  if (next === undefined) return el('span', { class: 'total muted', title: 'Reading its schedule…' }, '…');
+  const schedule = schedules.get(loc.path.toLowerCase());
+  if (next === null) {
+    return state.asOf ? el('span', { class: 'total muted' }, 'None after')
+      : el('span', { class: 'total muted', title: schedule ? scheduleText(schedule) : 'Couldn\'t read its schedule' }, schedule ? 'Manual' : '?');
+  }
+  if (state.asOf || next > Date.now()) {
+    return el('span', { class: 'total', title: `Next snapshot ${formatFull(next)}${state.asOf ? '' : ` (${scheduleText(schedule).toLowerCase()})`}` }, timeAgo(next));
+  }
+  // Long past due means kopia's scheduler isn't running, such as KopiaUI being closed
+  return Date.now() - next >= OVERDUE && !backingUpNow(loc)
+    ? el('span', { class: 'total due', title: `Due since ${formatFull(next)} - it's backed up as soon as KopiaUI is running` }, 'overdue')
+    : el('span', { class: 'total', title: `Due at ${formatFull(next)} - KopiaUI backs it up as soon as it gets to it` }, 'due now');
 }
 
 // The snapshot a location's folders are read from: the one selected if it's open, otherwise its latest
@@ -295,10 +359,9 @@ export function renderLocations() {
   rescaleTree();
   // The line under the heading is only for filtering; the PC's page says how many locations and how much
   document.getElementById('sum').hidden = true;
-  const direction = sidebarReversed ? -1 : 1;
   const rows = [];
-  // In the flat lists the direction is for path, size or date, so what's inside a location is always A–Z
-  const nameDirection = sidebarSort === 'tree' ? direction : 1;
+  // In the list the direction is for its order, so what's inside a location is always A–Z
+  const nameDirection = sidebarView === 'tree' && treeReversed ? -1 : 1;
   const sorted = items => items.sort((a, b) => nameDirection * a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
 
   // A row for an item, with label parts given: the path leading to it dimmed, then its own name
@@ -309,8 +372,7 @@ export function renderLocations() {
     // Sizes on disk for locations and the folders above them; plain sizes, greyed, for folders inside
     const onDisk = item.tree && (loc || !item.owner);
     const total = onDisk ? treeTotal(item.tree) : null;
-    // Sorted by date, a location shows how long ago it was last backed up in place of its size
-    const backedUp = loc && sidebarSort === 'date' ? lastBackedUp(loc) : undefined;
+    const showWhen = loc && sidebarView === 'list' && (sidebarOrder === 'last' || sidebarOrder === 'next');
     rows.push(el('div', {
       class: `fsrow${loc ? '' : ' group'}`, 'aria-current': isCurrent(item) ? 'true' : 'false',
       style: `padding-left:${6 + depth * 12}px`,
@@ -334,8 +396,7 @@ export function renderLocations() {
         // Folders end in a backslash, like drives and the contents tables; the PC isn't a folder
         el('span', { class: 'text' }, item.tree?.root || label.endsWith('\\') ? label : `${label}\\`),
         loc && backingUpNow(loc) ? el('span', { class: 'badge', title: 'A snapshot is in progress' }, 'Live') : null),
-      backedUp ? el('span', { class: 'total', title: `${state.asOf ? 'Snapshot' : 'Latest'} ${formatFull(backedUp.time)}` }, timeAgo(backedUp.time))
-        : backedUp === null ? el('span', { class: 'total muted' }, state.asOf ? 'None that old' : 'No snapshots')
+      showWhen ? whenCell(loc)
         // The PC's total is everything, so it's left off the colour scale
         : onDisk && total == null ? el('span', { class: 'total muted', title: 'Working out space on disk…' }, '…')
           : total != null
@@ -355,16 +416,23 @@ export function renderLocations() {
     row(item, depth, '', item.name, sidebarChildren(item));
   };
 
-  if (sidebarSort === 'tree') {
+  if (sidebarView === 'tree') {
     walk(treeItem(locationTree), 0);
   } else {
     // Every location as a top-level row with its full path, each expandable like in the tree
-    // Locations never backed up count as oldest
+    if (sidebarOrder === 'next' && !state.asOf) loadAllSchedules();
+    const direction = orderReversed ? -1 : 1;
+    // Locations never backed up count as oldest, and ones with none to come as furthest off
     const backedUpAt = loc => (lastBackedUp(loc) ? new Date(lastBackedUp(loc).time).getTime() : 0);
-    const locations = storage.filter(l => !hiddenAsOf(l)).sort(
-      sidebarSort === 'size' ? (a, b) => direction * (totalAsOf(b) - totalAsOf(a))
-        : sidebarSort === 'date' ? (a, b) => direction * (backedUpAt(b) - backedUpAt(a))
-          : (a, b) => direction * a.path.localeCompare(b.path, 'en', { sensitivity: 'base' }));
+    const nextAt = loc => nextBackedUp(loc) ?? Infinity;
+    const byName = (a, b) => a.path.localeCompare(b.path, 'en', { sensitivity: 'base' });
+    const locations = storage.filter(l => !hiddenAsOf(l)).sort({
+      name: (a, b) => direction * byName(a, b),
+      size: (a, b) => direction * (totalAsOf(b) - totalAsOf(a)),
+      last: (a, b) => direction * (backedUpAt(b) - backedUpAt(a)),
+      // Ones due at the same time, or with none to come, by name
+      next: (a, b) => direction * ((nextAt(a) - nextAt(b)) || 0) || byName(a, b),
+    }[sidebarOrder]);
     for (const loc of locations) {
       const item = treeItem(treeNodes.get(loc.path.toLowerCase()));
       const cut = loc.path.replace(/\\$/, '').lastIndexOf('\\') + 1;

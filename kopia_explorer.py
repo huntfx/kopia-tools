@@ -693,12 +693,14 @@ def policy_key(path):
     return f'{repository.info["user"]}@{repository.info["host"]}:{path}'
 
 
-def schedule_of(path):
+def schedule_of(path, policies=None, nested=True):
     """How often a folder is backed up on its own, as kopia works it out: from its own policy, or the nearest
     folder above with one, or the user's, the computer's or the global policy, each setting from the first
     that has it. Says where its schedule came from, whether the folder has its own (an interval, or manual
-    snapshots only), and what the interval would be without it."""
-    policies = json.loads(kopia('policy', 'export'))
+    snapshots only), and what the interval would be without it. The policies are read unless given. Whether
+    it's missing settings from a location it's inside is left out unless nested, as that asks kopia again."""
+    if policies is None:
+        policies = json.loads(kopia('policy', 'export'))
     user, host = repository.info['user'], repository.info['host']
     folder = Path(path)
     chain = [(policy_key(p), str(p)) for p in [folder, *folder.parents]]
@@ -725,8 +727,15 @@ def schedule_of(path):
         'cron': found.get('cron', ([], None))[0], 'manual': found.get('manual', (False, None))[0],
         'own': 'intervalSeconds' in own or bool(own.get('manual')), 'ownManual': bool(own.get('manual')),
         'inherited': dict(zip(('interval', 'from'), above.get('intervalSeconds', (None, None)))),
-        'nested': nested_status(path, policies),
+        **({'nested': nested_status(path, policies)} if nested else {}),
     }
+
+
+def all_schedules():
+    """Every backup location's schedule by its path, for the sidebar's next snapshots. The policies are read
+    once and nothing else asks kopia, so it's quick, and doesn't wait behind the pool's work."""
+    policies = json.loads(kopia('policy', 'export'))
+    return {path: schedule_of(path, policies, nested=False) for path in sorted(repository.sources)}
 
 
 def set_schedule(path, interval, manual=False, copy_settings=False):
@@ -1096,6 +1105,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(file_types.inside(query['obj']) if query.get('inside') else file_types.get(query['obj']))
             if url.path == '/api/schedule':
                 return self.send_json(schedule_of(query['path']))
+            if url.path == '/api/schedules':
+                return self.send_json(all_schedules())
             if url.path == '/api/copied-settings':
                 return self.send_json(needing_settings())
             if url.path == '/api/repository-size':

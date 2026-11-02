@@ -3,25 +3,95 @@ import { api, redrawSoon } from './data.js';
 import { el, listOf, plural } from './format.js';
 import { backUp, changeSettings, offerSettings } from './jobs.js';
 import { navigate } from './state.js';
-import { enclosingLocation, refreshStorage, storage } from './storage.js';
+import { enclosingLocation, latest, refreshStorage, storage } from './storage.js';
 
 // How often a folder is backed up on its own, from kopia's policies via the server, loaded once each, and
-// again after one's changed: { interval, times, cron, manual, from, own, inherited }
+// again after one's changed: { interval, times, cron, manual, from, own, inherited, nested }. Ones loaded
+// all together for the sidebar leave out nested, which is loaded on its own where it's wanted.
 export const schedules = new Map();
 
+// Requests under way, by lower-cased path, so each is only asked for once at a time
+const loading = new Map();
+
+let loadingAll = false;
+
+const complete = schedule => schedule === null || (schedule !== undefined && 'nested' in schedule);
+
 export function scheduleOf(path) {
-  if (!schedules.has(path.toLowerCase())) loadSchedule(path).then(redrawSoon);
-  return schedules.get(path.toLowerCase());
+  const schedule = schedules.get(path.toLowerCase());
+  if (!complete(schedule)) loadSchedule(path).then(redrawSoon);
+  return schedule;
 }
 
-// The same, waiting for it if it isn't loaded yet; null if it can't be
+// The same, waiting for it if it isn't loaded yet; null if it can't be. One loaded with the others is kept
+// meanwhile, so the sidebar doesn't lose it.
 export function loadSchedule(path) {
   const key = path.toLowerCase();
-  if (schedules.has(key) && schedules.get(key) !== undefined) return Promise.resolve(schedules.get(key));
-  schedules.set(key, undefined);
-  return fetch(`/api/schedule?path=${encodeURIComponent(path)}`)
-    .then(response => (response.ok ? response.json() : null)).catch(() => null)
-    .then(schedule => { schedules.set(key, schedule); return schedule; });
+  if (complete(schedules.get(key))) return Promise.resolve(schedules.get(key));
+  if (!loading.has(key)) {
+    loading.set(key, fetch(`/api/schedule?path=${encodeURIComponent(path)}`)
+      .then(response => (response.ok ? response.json() : null)).catch(() => null)
+      .then(schedule => {
+        loading.delete(key);
+        schedules.set(key, schedule);
+        return schedule;
+      }));
+  }
+  return loading.get(key);
+}
+
+// Every location's schedule at once, for the sidebar's next snapshots, rather than one request each. Asked
+// for again once any are missing, as they are after one's changed or a location's added; any it can't
+// find are null, like one that can't be loaded.
+export function loadAllSchedules() {
+  const missing = storage.map(l => l.path.toLowerCase()).filter(key => schedules.get(key) === undefined && !loading.has(key));
+  if (loadingAll || !missing.length) return;
+  loadingAll = true;
+  fetch('/api/schedules')
+    .then(response => (response.ok ? response.json() : {})).catch(() => ({}))
+    .then(found => {
+      loadingAll = false;
+      const byKey = new Map(Object.entries(found).map(([path, schedule]) => [path.toLowerCase(), schedule]));
+      // Any loaded on their own meanwhile are kept, as they're complete
+      for (const key of missing) if (schedules.get(key) === undefined) schedules.set(key, byKey.get(key) || null);
+      redrawSoon();
+    });
+}
+
+// Seconds from 1 Jan 0001, which kopia rounds intervals down from, to 1970
+const GO_EPOCH = 62135596800;
+
+// When kopia's scheduler next backs a location up, as kopia works it out: the interval after its last complete
+// snapshot rounded down to a whole number of intervals, or the next of its times of day if that's sooner. That
+// can have passed, which kopia takes as due now, and so is one that's never been backed up. Custom (cron)
+// schedules aren't worked out. Null with no schedule, or manual snapshots only.
+export function nextSnapshotTime(schedule, last, now = Date.now()) {
+  if (!schedule || schedule.manual) return null;
+  let next = null;
+  if (schedule.interval) {
+    const after = new Date(last).getTime() / 1000 + schedule.interval;
+    next = last ? (Math.floor((after + GO_EPOCH) / schedule.interval) * schedule.interval - GO_EPOCH) * 1000 : now;
+  }
+  for (const time of schedule.times) {
+    const [hour, minute] = time.split(':').map(Number);
+    const at = new Date(now);
+    at.setHours(hour, minute, 0, 0);
+    if (at < now) at.setDate(at.getDate() + 1);
+    if (next == null || at < next) next = at.getTime();
+  }
+  return next;
+}
+
+// How long after a snapshot's due it's taken as overdue, rather than KopiaUI still getting round to it, as it
+// backs locations up one after another when several are due together
+export const OVERDUE = 60 * 60 * 1000;
+
+// When kopia's scheduler next backs a location up, after its last complete snapshot, as of a time, which may
+// have passed: undefined while its schedule's loading, and null with none to come
+export function nextScheduled(loc, now = Date.now()) {
+  const schedule = schedules.get(loc.path.toLowerCase());
+  const last = latest(loc);
+  return schedule === undefined ? undefined : nextSnapshotTime(schedule, last && !last.incomplete ? last.time : null, now);
 }
 
 // The intervals that can be picked, as in KopiaUI
