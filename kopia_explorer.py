@@ -33,7 +33,7 @@ import time
 import tkinter
 import traceback
 import webbrowser
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1093,7 +1093,19 @@ def reveal(path):
     return {'shown': str(target)}
 
 
+# What happens to requests still going when the window's closed: the page is gone, so there's no one to answer,
+# and kopia work waiting its turn is cancelled. Nothing's gone wrong, so nothing's said.
+CLOSING = (ConnectionError, CancelledError)
+
+
 class Handler(BaseHTTPRequestHandler):
+    def handle(self):
+        # Including saying something went wrong, to a page that's gone
+        try:
+            super().handle()
+        except CLOSING:
+            pass
+
     def do_GET(self):
         url = urlparse(self.path)
         query = {key: values[0] for key, values in parse_qs(url.query).items()}
@@ -1128,6 +1140,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/jobs':
                 return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
             self.send_error(404)
+        except CLOSING:
+            pass
         except KeyError as e:
             self.send_error(400, f'Missing or unknown {e}')
         except RuntimeError as e:
@@ -1168,6 +1182,8 @@ class Handler(BaseHTTPRequestHandler):
                 repository.forget()
                 return self.send_json({})
             self.send_error(404)
+        except CLOSING:
+            pass
         except KeyError as e:
             self.send_error(400, f'Missing or unknown {e}')
         except ValueError as e:
@@ -1205,6 +1221,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         # Only errors are worth printing, with their reason, but not browsers looking for icons that aren't there
         if format.startswith('code ') and args[0] != 404:
+            # Refused, so say what asked, to tell where it came from
+            if args[0] == 403:
+                origin = self.headers.get('Origin') or self.headers.get('Referer') or 'no page'
+                asker = f' - {self.command} {self.path} from {origin}, {self.headers.get("User-Agent") or "no user agent"}'
+                format += asker.replace('%', '%%')
             super().log_message(format, *args)
 
 
