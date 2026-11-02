@@ -1,10 +1,10 @@
-// The sidebar: the tree of backup locations, or them listed by size or name
+// The sidebar: the tree of backup locations, or them listed by name, size or when they were last backed up
 import { DATA, repositoryTitle } from './data.js';
-import { el, formatSize, gradientPositions, gradientRgb, textColour } from './format.js';
+import { el, formatFull, formatSize, gradientPositions, gradientRgb, textColour, timeAgo } from './format.js';
 import { render } from './render.js';
 import { renderMatches, sidebarFilter } from './search.js';
 import { navigate, state } from './state.js';
-import { LOCATION_DOT, asOfSnapshot, backingUpNow, currentFolder, hiddenAsOf, locationOf, selectedSnapshot, snapshotListing, storage, totalAsOf } from './storage.js';
+import { LOCATION_DOT, asOfSnapshot, backingUpNow, currentFolder, hiddenAsOf, locationOf, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf } from './storage.js';
 
 // Build a folder tree from the backup locations: the PC at the top, named after the computer the
 // snapshots were taken on, then its drives, with locations nested inside each other
@@ -154,10 +154,13 @@ export function rescaleTree() {
 }
 
 // How the sidebar is sorted, remembered in this browser. Clicking the current sort again reverses it.
-export const SORTS = { tree: 'Folders', size: 'Size', name: 'Name' };
+export const SORTS = { tree: 'Folders', name: 'Name', size: 'Size', date: 'Date' };
 
-// Size starts largest first, the others A–Z
-export const DESCENDING_BY_DEFAULT = { tree: false, size: true, name: false };
+// What each sorts by, for its button's tooltip
+export const SORT_TITLES = { tree: 'folders', name: 'name', size: 'size', date: 'latest snapshot' };
+
+// Size starts largest first and date newest first, the others A–Z
+export const DESCENDING_BY_DEFAULT = { tree: false, name: false, size: true, date: true };
 
 export let sidebarSort = 'tree';
 
@@ -174,7 +177,7 @@ export function renderSort() {
     const descending = DESCENDING_BY_DEFAULT[key] !== (active && sidebarReversed);
     return el('button', {
       'aria-pressed': String(active),
-      title: active ? 'Click again to reverse' : `Sort by ${label.toLowerCase()}`,
+      title: active ? 'Click again to reverse' : `Sort by ${SORT_TITLES[key]}`,
       onclick: () => {
         if (active) sidebarReversed = !sidebarReversed;
         else { sidebarSort = key; sidebarReversed = false; }
@@ -196,6 +199,12 @@ export function renderSort() {
    slotted in among them. Each item knows the location it's in (owner) and its path there (rel). */
 
 export const joinRel = (rel, name) => (rel ? `${rel}/${name}` : name);
+
+// A location's last complete snapshot as of the as-of date (the latest with none set), or none if it hasn't one
+export function lastBackedUp(loc) {
+  const snap = !tooOld(loc) && asOfSnapshot(loc);
+  return snap && !snap.incomplete ? snap : null;
+}
 
 // The snapshot a location's folders are read from: the one selected if it's open, otherwise its latest
 export function sidebarSnapshot(loc) {
@@ -288,7 +297,7 @@ export function renderLocations() {
   document.getElementById('sum').hidden = true;
   const direction = sidebarReversed ? -1 : 1;
   const rows = [];
-  // In the flat lists the direction is for size or path, so what's inside a location is always A–Z
+  // In the flat lists the direction is for path, size or date, so what's inside a location is always A–Z
   const nameDirection = sidebarSort === 'tree' ? direction : 1;
   const sorted = items => items.sort((a, b) => nameDirection * a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
 
@@ -300,6 +309,8 @@ export function renderLocations() {
     // Sizes on disk for locations and the folders above them; plain sizes, greyed, for folders inside
     const onDisk = item.tree && (loc || !item.owner);
     const total = onDisk ? treeTotal(item.tree) : null;
+    // Sorted by date, a location shows how long ago it was last backed up in place of its size
+    const backedUp = loc && sidebarSort === 'date' ? lastBackedUp(loc) : undefined;
     rows.push(el('div', {
       class: `fsrow${loc ? '' : ' group'}`, 'aria-current': isCurrent(item) ? 'true' : 'false',
       style: `padding-left:${6 + depth * 12}px`,
@@ -323,12 +334,14 @@ export function renderLocations() {
         // Folders end in a backslash, like drives and the contents tables; the PC isn't a folder
         el('span', { class: 'text' }, item.tree?.root || label.endsWith('\\') ? label : `${label}\\`),
         loc && backingUpNow(loc) ? el('span', { class: 'badge', title: 'A snapshot is in progress' }, 'Live') : null),
-      // The PC's total is everything, so it's left off the colour scale
-      onDisk && total == null ? el('span', { class: 'total muted', title: 'Working out space on disk…' }, '…')
-        : total != null
-          ? el('span', { class: 'total', style: total && !item.tree.root ? `color:${textColour(gradientRgb(treePositions.get(total)))}` : null },
-            item.tree.root ? repositoryDiskText(total) : formatSize(total))
-          : el('span', { class: 'total muted' }, item.size != null ? formatSize(item.size) : '')));
+      backedUp ? el('span', { class: 'total', title: `${state.asOf ? 'Snapshot' : 'Latest'} ${formatFull(backedUp.time)}` }, timeAgo(backedUp.time))
+        : backedUp === null ? el('span', { class: 'total muted' }, state.asOf ? 'None that old' : 'No snapshots')
+        // The PC's total is everything, so it's left off the colour scale
+        : onDisk && total == null ? el('span', { class: 'total muted', title: 'Working out space on disk…' }, '…')
+          : total != null
+            ? el('span', { class: 'total', style: total && !item.tree.root ? `color:${textColour(gradientRgb(treePositions.get(total)))}` : null },
+              item.tree.root ? repositoryDiskText(total) : formatSize(total))
+            : el('span', { class: 'total muted' }, item.size != null ? formatSize(item.size) : '')));
     if (open) for (const child of sorted(children)) walk(child, depth + 1);
   };
 
@@ -346,9 +359,12 @@ export function renderLocations() {
     walk(treeItem(locationTree), 0);
   } else {
     // Every location as a top-level row with its full path, each expandable like in the tree
-    const locations = storage.filter(l => !hiddenAsOf(l)).sort(sidebarSort === 'size'
-      ? (a, b) => direction * (totalAsOf(b) - totalAsOf(a))
-      : (a, b) => direction * a.path.localeCompare(b.path, 'en', { sensitivity: 'base' }));
+    // Locations never backed up count as oldest
+    const backedUpAt = loc => (lastBackedUp(loc) ? new Date(lastBackedUp(loc).time).getTime() : 0);
+    const locations = storage.filter(l => !hiddenAsOf(l)).sort(
+      sidebarSort === 'size' ? (a, b) => direction * (totalAsOf(b) - totalAsOf(a))
+        : sidebarSort === 'date' ? (a, b) => direction * (backedUpAt(b) - backedUpAt(a))
+          : (a, b) => direction * a.path.localeCompare(b.path, 'en', { sensitivity: 'base' }));
     for (const loc of locations) {
       const item = treeItem(treeNodes.get(loc.path.toLowerCase()));
       const cut = loc.path.replace(/\\$/, '').lastIndexOf('\\') + 1;
