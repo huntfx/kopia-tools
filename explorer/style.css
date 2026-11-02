@@ -61,6 +61,11 @@ h2 { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spa
 }
 .topbar h1 { font-size: 1.1rem; font-weight: 600; margin: 0; white-space: nowrap; }
 .topbar .repo-status { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+/* Reading the snapshots again, which turns while they're being read */
+.topbar .refresh { display: flex; margin-left: -10px; padding: 4px; background: none; border: 0; border-radius: 6px; color: var(--muted); }
+.topbar .refresh:hover { color: var(--ink); background: var(--surface-2); }
+.topbar .refresh.busy svg { animation: turn 1s linear infinite; }
+@keyframes turn { to { transform: rotate(360deg); } }
 /* Files as of: a button showing the date, between steps to the snapshot before and after, opening a picker */
 .as-of { position: relative; display: flex; align-items: stretch; margin-left: auto; font-size: 0.85rem; color: var(--ink-2); white-space: nowrap; }
 .as-of > button { background: var(--surface); border: 1px solid var(--axis); padding: 5px 10px; font-size: 0.85rem; color: var(--ink); }
@@ -92,6 +97,7 @@ h2 { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spa
 .tools-menu button { display: block; width: 100%; background: none; border: 0; padding: 6px 14px; font-size: 0.85rem; text-align: left; white-space: nowrap; }
 .tools-menu button:hover, .tools-menu button:focus-visible { background: var(--surface-2); outline: none; }
 .tools-menu button:disabled { color: var(--muted); cursor: default; background: none; }
+.tools-menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
 .as-of-menu input { width: 100%; background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 6px 8px; font-size: 0.85rem; color-scheme: inherit; }
 .as-of-menu input:focus { border-color: var(--accent); outline: none; }
 .as-of-menu .typed { padding: 0 10px 6px; }

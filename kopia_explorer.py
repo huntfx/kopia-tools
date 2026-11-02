@@ -124,13 +124,24 @@ class Repository:
         self.snapshots = {}   # id -> kopia's snapshot JSON, for diffs and downloads
         self.ignores = {}     # source -> its ignore rules, read once
         self.progress = {}    # How working out storage stats is getting on, for the page to show
+        self.info = self.read_info()
+
+    @staticmethod
+    def read_info():
         status = json.loads(kopia('repository', 'status', '--json'))
-        self.info = {
+        return {
             'description': status['clientOptions'].get('description', ''),
             'path': status['storage'].get('config', {}).get('path', ''),
             'host': status['clientOptions'].get('hostname', ''),
             'user': status['clientOptions'].get('username', ''),
         }
+
+    def forget(self):
+        """For a hard refresh: what's read once while the server runs is read again, as it may have changed since,
+        such as ignore rules in .kopiaignore files, and the repository's description. Diffs, listings and file
+        types stay cached, as they never change for a given snapshot."""
+        self.ignores.clear()
+        self.info = self.read_info()
 
     def storage(self):
         """Every source with its snapshots, oldest first, as the page wants them, straight away. Storage stats
@@ -1150,6 +1161,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({})
             if self.path == '/api/reveal':
                 return self.send_json(reveal(body['path']))
+            if self.path == '/api/forget':
+                repository.forget()
+                return self.send_json({})
             self.send_error(404)
         except KeyError as e:
             self.send_error(400, f'Missing or unknown {e}')

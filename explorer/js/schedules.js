@@ -15,6 +15,8 @@ const loading = new Map();
 
 let loadingAll = false;
 
+let loadAllAgain = false;  // Asked to read them all again while they were being read, so they're read once more after
+
 const complete = schedule => schedule === null || (schedule !== undefined && 'nested' in schedule);
 
 export function scheduleOf(path) {
@@ -42,19 +44,27 @@ export function loadSchedule(path) {
 
 // Every location's schedule at once, for the sidebar's next snapshots, rather than one request each. Asked
 // for again once any are missing, as they are after one's changed or a location's added; any it can't
-// find are null, like one that can't be loaded.
-export function loadAllSchedules() {
-  const missing = storage.map(l => l.path.toLowerCase()).filter(key => schedules.get(key) === undefined && !loading.has(key));
-  if (loadingAll || !missing.length) return;
+// find are null, like one that can't be loaded. On a refresh they're all read again, as they may have been
+// changed in KopiaUI, with the ones known kept until the new ones come, or if they can't be read.
+export function loadAllSchedules(again = false) {
+  const wanted = storage.map(l => l.path.toLowerCase()).filter(key => again || (schedules.get(key) === undefined && !loading.has(key)));
+  if (loadingAll) loadAllAgain ||= again;
+  if (loadingAll || !wanted.length) return;
   loadingAll = true;
   fetch('/api/schedules')
-    .then(response => (response.ok ? response.json() : {})).catch(() => ({}))
+    .then(response => (response.ok ? response.json() : null)).catch(() => null)
     .then(found => {
       loadingAll = false;
-      const byKey = new Map(Object.entries(found).map(([path, schedule]) => [path.toLowerCase(), schedule]));
+      const byKey = new Map(Object.entries(found || {}).map(([path, schedule]) => [path.toLowerCase(), schedule]));
       // Any loaded on their own meanwhile are kept, as they're complete
-      for (const key of missing) if (schedules.get(key) === undefined) schedules.set(key, byKey.get(key) || null);
+      for (const key of wanted) {
+        if (again ? found : schedules.get(key) === undefined) schedules.set(key, byKey.get(key) || null);
+      }
       redrawSoon();
+      if (loadAllAgain) {
+        loadAllAgain = false;
+        loadAllSchedules(true);
+      }
     });
 }
 

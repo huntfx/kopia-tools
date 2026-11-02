@@ -13,6 +13,9 @@
 <header class="topbar">
   <h1>Kopia Explorer</h1>
   <span class="repo-status" id="repo-status"></span>
+  <button type="button" class="refresh" id="refresh" aria-label="Refresh" title="Read the snapshots and schedules again now - Shift+click for a hard refresh">
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M12.5 1.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
   <div class="as-of" id="as-of" role="group" aria-label="Show files as of a date">
     <button type="button" id="as-of-older" aria-label="Snapshot before">‹</button>
     <button type="button" id="as-of-button" class="when-button" aria-haspopup="dialog" aria-expanded="false" title="Show files as of another date">
@@ -40,6 +43,8 @@
     <div class="tools-menu" id="tools-menu" role="menu" hidden>
       <button type="button" role="menuitem" data-tool="copy-settings" title="So backups of the locations they're in use your settings inside them">Apply parent settings fix to all nested locations</button>
       <button type="button" role="menuitem" data-tool="undo-settings">Remove parent settings fix from all</button>
+      <hr>
+      <button type="button" role="menuitem" data-tool="hard-refresh" title="Read everything from kopia again, as when the explorer starts, apart from diffs, listings and file types, which never change for a snapshot">Hard refresh</button>
     </div>
   </div>
 </header>

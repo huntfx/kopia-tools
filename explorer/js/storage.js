@@ -95,6 +95,9 @@ export function refreshStorage() {
     refreshAgain = true;
     return refreshing;
   }
+  // The refresh button in the header turns meanwhile, however it was asked for
+  const button = document.getElementById('refresh');
+  button.classList.add('busy');
   refreshing = (async () => {
     do {
       refreshAgain = false;
@@ -128,8 +131,23 @@ export function refreshStorage() {
         return;
       }
     } while (refreshAgain);
-  })().finally(() => { refreshing = null; });
+  })().finally(() => {
+    refreshing = null;
+    button.classList.remove('busy');
+  });
   return refreshing;
+}
+
+// The refresh button: the snapshots and schedules read again now, rather than waiting
+export function refreshNow() {
+  loadAllSchedules(true);
+  return refreshStorage();
+}
+
+// A hard refresh: the server reads again what it otherwise reads once, such as ignore rules, and the page starts
+// again, forgetting everything it's loaded. Reloaded even if the server can't be asked, which the page then says.
+export function hardRefresh() {
+  api.post('/api/forget', {}).catch(() => {}).finally(() => location.reload());
 }
 
 // Keeping up while the page stays open, as the explorer isn't told about snapshots KopiaUI makes. Every half
