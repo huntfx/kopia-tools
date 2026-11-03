@@ -290,7 +290,19 @@ def snapshot_info(snap, stats):
         'keep': snap.get('retentionReason') or [],
         # Names it's pinned under, which stop kopia's retention policy deleting it
         'pins': snap.get('pins') or [],
+        # Files and folders kopia couldn't read, so left out of it, such as ones another program had open
+        'failed': snap['rootEntry'].get('summ', {}).get('numFailed', 0),
+        'errors': [{'path': e['path'], 'error': error_reason(e['error'])}
+                   for e in snap['rootEntry'].get('summ', {}).get('errors') or []],
     }
+
+
+def error_reason(error):
+    """Why kopia couldn't read something, without what it was doing: the end of the first line of its error, which
+    it can repeat hundreds of times, like "The process cannot access the file because it is being used by another
+    process." from "error uploading parts: unable to open file: ...: The process cannot access..." """
+    first = error.strip().splitlines()[0] if error.strip() else ''
+    return first.rsplit(': ', 1)[-1] or first
 
 
 repository = Repository()

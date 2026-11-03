@@ -3,11 +3,11 @@ import { compareTarget, ignoredReason, isGone, kindCount } from './changes.js';
 import { api, pending } from './data.js';
 import { ofType, typeFiles } from './filetypes.js';
 import { el, fillColour, formatFull, formatSize, gradientPositions, gradientRgb, plural, signedSize, timeAgo } from './format.js';
-import { backupButton, beingDeleted, beingPinned, confirmDelete, confirmPin, pinNames } from './jobs.js';
+import { backupButton, beingDeleted, beingPinned, confirmDelete, confirmPin } from './jobs.js';
 import { scheduleLine, separateLine } from './schedules.js';
 import { diskText, locationsBelow, sidebarSnapshot, treeNodes } from './sidebar.js';
 import { navigate, state, ui } from './state.js';
-import { LOCATION_DOT, asOfSnapshot, backingUpNow, currentPath, hiddenAsOf, isCancelled, latest, locationOf, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf, unfinished } from './storage.js';
+import { asOfSnapshot, backingUpNow, currentPath, hiddenAsOf, isCancelled, latest, locationDot, locationOf, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf, unfinished, unreadLines } from './storage.js';
 
 // Viewing a snapshot sets "files as of" to its time, so every location follows; the newest goes back to now
 export const asOfFor = (loc, snap) => (snap === latest(loc) ? null : snap.time);
@@ -113,31 +113,16 @@ export function isFolderPath(loc, rel) {
   return entry ? entry.t === 'd' : true;
 }
 
-// Why kopia's retention policy keeps a snapshot, from its reasons like latest-1, daily-3 or annual-1. The one
-// that keeps it longest decides how long it stays, so that's shown, with all of them on hover.
+// The kinds of reason kopia's retention policy keeps a snapshot for, like latest-1, daily-3 or annual-1, longest
+// kept first, each in words
 export const KEEP_KINDS = [['annual', 'yearly'], ['monthly', 'monthly'], ['weekly', 'weekly'], ['daily', 'daily'], ['hourly', 'hourly'], ['latest', 'as recent']];
 
 // A pushpin for the pin button, drawn in the text's colour, filled in once it's pinned
-const PIN_ICON = () => {
+export const PIN_ICON = () => {
   const icon = el('span', { 'aria-hidden': 'true' });
   icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M5.5 1.5h5l-1 4.5 2.5 2.5v1h-8v-1L6.5 6z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 9.5v5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
   return icon;
 };
-
-export function keptFor(snap) {
-  // Pinned ones are kept whatever the retention policy says
-  if (snap.pins?.length) {
-    return el('span', { class: 'keep', title: `Pinned as ${pinNames(snap.pins)}, so kopia's retention policy never deletes it` }, 'pinned');
-  }
-  if (!snap.keep?.length) return null;
-  const reasons = snap.keep.map(r => r.split('-'));
-  const [kind, word] = KEEP_KINDS.find(([k]) => reasons.some(([r]) => r === k)) || [];
-  if (!kind) return null;
-  const named = Object.fromEntries(KEEP_KINDS);
-  const all = reasons.map(([r, n]) => `${r === 'latest' ? 'one of the latest' : named[r] || r} #${n}`).join(', ');
-  return el('span', { class: 'keep', title: `Kept by kopia's retention policy as ${all}. ${kind === 'latest'
-    ? 'Only as one of the latest, so it goes when newer snapshots replace it.' : `The ${word} one keeps it longest.`}` }, `kept ${word}`);
-}
 
 // For the PC or a folder above the backup locations, which have no snapshots of their own: the locations
 // inside, each with its latest snapshot, so it's clear at a glance which are being backed up
@@ -154,7 +139,7 @@ export function renderFolderSide(aside) {
       const cut = loc.path.lastIndexOf('\\') + 1;
       return el('li', { class: 'snaprow', title: `Open ${loc.path}`, onclick: () => navigate({ location: loc.path, snapshot: null }) },
         el('div', { class: 'top' },
-          el('span', { class: 'marker', style: 'color:var(--accent)', title: LOCATION_DOT }, '●'),
+          el('span', { class: 'marker', style: `color:${locationDot(loc).colour}`, title: locationDot(loc).title }, '●'),
           // The path leading to the location gives way first, so its own name stays readable
           el('span', { class: 'when mono churn-name' },
             el('span', { class: 'lead' }, loc.path.slice(node.root ? 0 : state.folder.replace(/\\$/, '').length + 1, cut)),
@@ -284,6 +269,8 @@ function snapshotList(loc, target, isFolder) {
         snap === other ? el('span', { class: 'tag' }, 'compared') : null,
         snap.incomplete ? el('span', { class: 'badge' }, isCancelled(snap) ? 'Cancelled' : 'In progress') : null,
         deleting ? el('span', { class: 'badge' }, 'Deleting…') : null,
+        // Left out what it couldn't read
+        !snap.incomplete && snap.failed ? el('span', { class: 'badge error', title: `Couldn't read, so not in this snapshot:\n${unreadLines(snap)}` }, plural(snap.failed, 'error')) : null,
         sizeAt(snap),
         // Space the snapshot added on disk is for the whole location, so it's only shown for the location
         // itself; for anything inside, the row's own change says what happened to it
@@ -298,7 +285,7 @@ function snapshotList(loc, target, isFolder) {
           class: `pin${snap.pins?.length ? ' pinned' : ''}`, disabled: pinningIt,
           'aria-label': snap.pins?.length ? 'Unpin this snapshot' : 'Pin this snapshot',
           title: pinningIt ? `${snap.pins?.length ? 'Unpinning' : 'Pinning'}…` : snap.pins?.length ? 'Unpin this snapshot' : 'Pin this snapshot',
-          onclick: event => { event.stopPropagation(); confirmPin(loc, snap); },
+          onclick: event => { event.stopPropagation(); confirmPin(loc, snap, snap.pins?.length ? snap.pins : null); },
         }, PIN_ICON()) : null,
         // Not one still being made, which kopia replaces as it goes, nor while it's being pinned, as kopia gives
         // it a new ID
@@ -309,7 +296,6 @@ function snapshotList(loc, target, isFolder) {
         }, '×') : null),
       el('div', { class: 'what' },
         snap.incomplete ? el('span', { class: 'muted' }, 'Stored so far') : describeStep(change, isFolder),
-        keptFor(snap),
         el('span', { class: 'ago' }, timeAgo(snap.time))));
   };
 

@@ -6,11 +6,11 @@ import { ofType, renderFileTypes, typeFiles, typeFilter } from './filetypes.js';
 import { settingsStatus, settingsWarning } from './schedules.js';
 import { api, notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
-import { beingDeleted, restoreItem, showInExplorer } from './jobs.js';
+import { beingDeleted, beingPinned, confirmPin, restoreItem, showInExplorer } from './jobs.js';
 import { compactFolder, diskText, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
-import { describeStep, openHistory, stepChange } from './snapshots.js';
+import { KEEP_KINDS, PIN_ICON, describeStep, openHistory, stepChange } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
-import { asOfSnapshot, backingUpNow, enclosingLocation, folderObj, hiddenAsOf, isCancelled, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
+import { asOfSnapshot, backingUpNow, enclosingLocation, folderObj, hiddenAsOf, isCancelled, latest, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
 import { contentsTable } from './tables.js';
 
 // What's directly inside a folder: merged folder chains and backup locations, like the sidebar
@@ -154,14 +154,14 @@ export function renderMain() {
       settingsStatus(loc),
       typeFilter(selected)));
 
-  // The folder as it was in the snapshot, to restore: its own modified time is in the listing of the
+  // The snapshot, with the folder as it was in it, to restore: its own modified time is in the listing of the
   // folder above it, or for the location, the snapshot's
   const complete = loc.snapshots.filter(s => !s.incomplete);
   const at = complete.indexOf(selected);
   const parts = state.scope ? state.scope.split('/') : [];
   const modified = !state.scope ? selected.mtime
     : snapshotListing(selected, parts.slice(0, -1).join('/'))?.find(e => e.n === parts[parts.length - 1] && e.t === 'd')?.m;
-  const restore = restorePanel({
+  const snapshot = snapshotPanel({
     selected, rel: state.scope, present: !!here, size: here?.size, what: 'folder', wide: true,
     facts: selected.incomplete ? [['Status', isCancelled(selected) ? 'Cancelled before it finished' : 'Still in progress']] : [
       ['Size', here ? formatSize(here.size) : notKnown()],
@@ -171,11 +171,11 @@ export function renderMain() {
     ],
   });
 
-  // What's in the folder at the snapshot picked in the right-hand panel, restoring it, its size across every
-  // snapshot, then what changed in it, which can be long, and where the changes happen. The snapshots
-  // themselves are on the right.
+  // The snapshot picked in the right-hand panel, with restoring the folder from it, then what's in the folder
+  // then, its size across every snapshot, then what changed in it, which can be long, and where the changes
+  // happen. The snapshots themselves are on the right.
   // The size chart isn't there with too little to chart, such as a single snapshot
-  main.replaceChildren(...[head, settingsWarning(loc), renderSnapshotContents(loc, selected), restore, renderSizeChart(loc),
+  main.replaceChildren(...[head, settingsWarning(loc), snapshot, renderSnapshotContents(loc, selected), renderSizeChart(loc),
     renderFileTypes(loc, selected), renderChanges(loc, selected), renderChurn(loc)].filter(Boolean));
 }
 
@@ -245,7 +245,7 @@ export function renderFilePage(main, loc) {
         info.present && info.size != null ? el('span', {}, el('b', {}, formatSize(info.size))) : null,
         info.modified ? el('span', {}, `modified ${formatFull(info.modified)}`) : null,
         info.present ? null : el('span', { class: 'c-removed' }, 'Not in this snapshot'))),
-    restorePanel({
+    snapshotPanel({
       selected, rel, present: info.present, size: info.size, what: 'version',
       facts: [
         ...(info.present ? [
@@ -262,9 +262,10 @@ export function renderFilePage(main, loc) {
     }));
 }
 
-// The Restore panel on file and folder pages: what it was like in the snapshot being viewed, and a button
-// to restore it as it was then. Folders' fewer facts go two to a row, to keep it short above the contents.
-export function restorePanel({ selected, rel, present, size, what, facts, buttons = [], note = null, wide = false }) {
+// The Snapshot panel on file and folder pages: the snapshot being viewed, with its tags, then what the file or
+// folder was like in it, what in there kopia couldn't read, and a button to restore it as it was then. Folders'
+// fewer facts go two to a row, to keep it short above the contents.
+export function snapshotPanel({ selected, rel, present, size, what, facts, buttons = [], note = null, wide = false }) {
   const detail = ([label, value]) => [el('dt', {}, label), el('dd', {}, value)];
   const loc = storage.find(l => l.snapshots.includes(selected));
   const onDisk = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
@@ -274,9 +275,11 @@ export function restorePanel({ selected, rel, present, size, what, facts, button
   }, 'Show in Explorer');
   return el('section', { class: 'panel' },
     el('div', { class: 'chart-head' },
-      el('h2', {}, 'Restore'),
-      el('span', { class: 'legend' }, `At ${formatFull(selected.time)}, ${timeAgo(selected.time)} (${shortId(selected.id)})`)),
+      el('h2', {}, 'Snapshot'),
+      el('span', { class: 'legend' }, `${formatFull(selected.time)}, ${timeAgo(selected.time)} (${shortId(selected.id)})`)),
+    snapshotTags(loc, selected),
     el('dl', { class: `facts${wide ? ' wide' : ''}` }, facts.map(detail)),
+    unreadIn(loc, selected, rel),
     el('div', { class: 'facts-actions' },
       el('button', {
         class: 'btn primary', disabled: !present || beingDeleted(selected),
@@ -287,6 +290,44 @@ export function restorePanel({ selected, rel, present, size, what, facts, button
       }, `Restore this ${what}${size != null ? ` (${formatSize(size)})` : ''}…`),
       explorerButton, buttons),
     note ? el('p', { class: 'note', style: 'margin:10px 0 0' }, note) : null);
+}
+
+// What's known about a snapshot, as tags: whether it's the latest or unfinished, then like KopiaUI's, every reason
+// kopia's retention policy keeps it, as kopia names them, shortest kept first, and its pins, each of which can be
+// taken off, then one to pin it under another name. What it couldn't read is under its facts instead.
+function snapshotTags(loc, snap) {
+  const words = { ...Object.fromEntries(KEEP_KINDS), latest: 'latest' };
+  // KopiaUI's order, the reverse of how long each keeps it
+  const order = kind => -KEEP_KINDS.findIndex(([k]) => k === kind);
+  const reasons = (snap.keep || []).map(r => r.split('-')).filter(([kind]) => kind in words).sort((a, b) => order(a[0]) - order(b[0]));
+  const busy = beingDeleted(snap) || beingPinned(snap);
+  return el('div', { class: 'snap-tags' },
+    snap === latest(loc) ? el('span', { class: 'tag' }, 'latest') : null,
+    snap.incomplete ? el('span', { class: 'badge' }, isCancelled(snap) ? 'Cancelled' : 'In progress') : null,
+    reasons.map(([kind, n]) => el('span', { class: `keep-tag ${kind}`, title: `Kept by kopia's retention policy as ${words[kind]} #${n}` }, `${kind}-${n}`)),
+    (snap.pins || []).map(pin => el('button', {
+      class: 'keep-tag pinned', disabled: busy, title: 'Pinned, so kopia\'s retention policy never deletes it - click to remove the pin',
+      onclick: () => confirmPin(loc, snap, [pin]),
+    }, PIN_ICON(), pin)),
+    snap.incomplete ? null : el('button', {
+      class: 'pin', disabled: busy, 'aria-label': 'Pin this snapshot',
+      title: snap.pins?.length ? 'Pin this snapshot under another name' : 'Pin this snapshot',
+      onclick: () => confirmPin(loc, snap),
+    }, PIN_ICON()));
+}
+
+// What kopia couldn't read in a snapshot, so left out, such as files another program had open: in the file or
+// folder being looked at, or anywhere for the location's top, which also says how many it didn't list
+function unreadIn(loc, snap, rel) {
+  if (snap.incomplete || !snap.failed) return null;
+  const listed = snap.errors.filter(e => !rel || e.path === rel || e.path.startsWith(`${rel}/`));
+  const more = rel ? 0 : snap.failed - listed.length;
+  if (!listed.length && !more) return null;
+  return el('div', { class: 'unread' },
+    el('p', {}, 'Couldn\'t read, so not in this snapshot:'),
+    el('ul', {},
+      listed.map(e => el('li', {}, el('span', { class: 'mono' }, `${loc.path.replace(/\\$/, '')}\\${e.path.replaceAll('/', '\\')}`), ` - ${e.error}`)),
+      more ? el('li', {}, `and ${more} more`) : null));
 }
 
 // Contents of the folder in scope at the selected snapshot, like an Explorer window

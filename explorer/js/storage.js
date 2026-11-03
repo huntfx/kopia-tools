@@ -1,6 +1,6 @@
 // The backup locations and their snapshots: reading them, keeping them up to date, and finding things in them
 import { DATA, api, failures, redrawSoon, showProgress } from './data.js';
-import { el, formatFull, plural } from './format.js';
+import { el, formatFull, listOf, plural } from './format.js';
 import { jobList } from './jobs.js';
 import { render } from './render.js';
 import { OVERDUE, loadAllSchedules, nextScheduled } from './schedules.js';
@@ -179,6 +179,38 @@ export const backingUpNow = loc => loc.snapshots.some(s => s.incomplete && !isCa
 
 // What the blue dot beside a backup location means, wherever one's listed
 export const LOCATION_DOT = 'Backup location, with its own policy';
+
+// What a finished snapshot couldn't read, so left out, such as files another program had open: kopia lists the
+// paths and why, as far as it keeps them
+const unreadPath = e => e.path.replaceAll('/', '\\');
+
+// In words, like "Stuff" or "a, b, c and 2 more"
+export function unreadNames(snap, limit = 3) {
+  const names = snap.errors.slice(0, limit).map(unreadPath);
+  const more = snap.failed - names.length;
+  if (more <= 0) return listOf(names);
+  return names.length ? `${names.join(', ')} and ${more} more` : plural(more, 'file');
+}
+
+// A line each with why, for tooltips
+export function unreadLines(snap) {
+  const more = snap.failed - snap.errors.length;
+  return [...snap.errors.map(e => `${unreadPath(e)}: ${e.error}`), more > 0 ? `and ${more} more` : null].filter(Boolean).join('\n');
+}
+
+// A location's snapshot as of the as-of date (its latest with none set), if it couldn't read everything
+export function unreadAsOf(loc) {
+  const snap = !tooOld(loc) && asOfSnapshot(loc);
+  return snap && !snap.incomplete && snap.failed ? snap : null;
+}
+
+// The dot marking a backup location, in the error colour once its snapshot couldn't read everything
+export function locationDot(loc) {
+  const snap = loc && unreadAsOf(loc);
+  return snap
+    ? { colour: 'var(--removed)', title: `${LOCATION_DOT} - ${state.asOf ? 'its snapshot then' : 'its latest snapshot'} couldn't read ${unreadNames(snap)}` }
+    : { colour: 'var(--accent)', title: LOCATION_DOT };
+}
 
 // Every backup location with its snapshots, oldest first, which everything else is built from: read when the
 // page starts, then kept up to date

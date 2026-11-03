@@ -5,7 +5,7 @@ import { render } from './render.js';
 import { renderMatches, sidebarFilter } from './search.js';
 import { navigate, state } from './state.js';
 import { OVERDUE, loadAllSchedules, nextScheduled, scheduleText, schedules } from './schedules.js';
-import { LOCATION_DOT, asOfSnapshot, backingUpNow, currentFolder, hiddenAsOf, locationOf, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf } from './storage.js';
+import { asOfSnapshot, backingUpNow, currentFolder, hiddenAsOf, locationDot, locationOf, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf } from './storage.js';
 
 // Build a folder tree from the backup locations: the PC at the top, named after the computer the
 // snapshots were taken on, then its drives, with locations nested inside each other
@@ -399,7 +399,7 @@ export function renderLocations() {
           else if (expandable) toggleOpen(item);
         },
       },
-        loc ? el('span', { class: 'dot', title: LOCATION_DOT }) : null,
+        loc ? el('span', { class: 'dot', style: `background:${locationDot(loc).colour}`, title: locationDot(loc).title }) : null,
         prefix ? el('span', { class: 'prefix' }, prefix) : null,
         // Folders end in a backslash, like drives and the contents tables; the PC isn't a folder
         el('span', { class: 'text' }, item.tree?.root || label.endsWith('\\') ? label : `${label}\\`),

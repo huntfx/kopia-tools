@@ -13,6 +13,7 @@
   --accent-bg: #e8f1fc;
   --warn-bg: #fff6e0;
   --warn-line: #eda100;
+  --error-bg: #fdecea;
   --added: #1a8f5c;
   --removed: #c9372c;
   --modified: #a87400;
@@ -26,7 +27,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0f1216; --surface: #171b21; --surface-2: #1b2027; --ink: #eef1f5; --ink-2: #b9c1cc; --muted: #8a93a0;
-    --line: #262c35; --axis: #38404b; --accent: #3987e5; --accent-bg: #172638; --warn-bg: #2a2310; --warn-line: #c98500;
+    --line: #262c35; --axis: #38404b; --accent: #3987e5; --accent-bg: #172638; --warn-bg: #2a2310; --warn-line: #c98500; --error-bg: #301816;
     --added: #5ac87e; --removed: #f0675a; --modified: #e6c25a; --ignored: #9085e9;
     --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
     --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-other: #5a5955;
@@ -35,7 +36,7 @@
 }
 :root[data-theme="dark"] {
   --bg: #0f1216; --surface: #171b21; --surface-2: #1b2027; --ink: #eef1f5; --ink-2: #b9c1cc; --muted: #8a93a0;
-  --line: #262c35; --axis: #38404b; --accent: #3987e5; --accent-bg: #172638; --warn-bg: #2a2310; --warn-line: #c98500;
+  --line: #262c35; --axis: #38404b; --accent: #3987e5; --accent-bg: #172638; --warn-bg: #2a2310; --warn-line: #c98500; --error-bg: #301816;
   --added: #5ac87e; --removed: #f0675a; --modified: #e6c25a; --ignored: #9085e9;
   --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
   --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-other: #5a5955;
@@ -318,6 +319,32 @@ th[aria-sort] { color: var(--ink); }
 .panel.warning { background: var(--warn-bg); border-color: var(--warn-line); }
 .panel.warning p { margin: 0 0 10px; font-size: 0.88rem; }
 .panel.warning .actions { display: flex; gap: 8px; }
+/* The Snapshot panel's tags, like KopiaUI's: whether it's the latest, why it's kept, its pins and pinning it */
+.snap-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 12px; }
+.snap-tags .tag { margin-left: 0; }
+/* Why kopia's retention policy keeps it, and its pins, coloured as in KopiaUI, the same in light and dark */
+.keep-tag {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 0; border-radius: 5px;
+  font-size: 0.75rem; font-weight: 600; line-height: 1.4; color: #fff; white-space: nowrap;
+}
+.keep-tag.latest { background: #4b8b3b; }
+.keep-tag.hourly { background: #4a77a8; }
+.keep-tag.daily { background: #17857b; }
+.keep-tag.weekly { background: #c4501b; }
+.keep-tag.monthly { background: #6b6e72; }
+.keep-tag.annual { background: #c99a0e; }
+.keep-tag.pinned { background: #1d6fd6; cursor: pointer; }
+.keep-tag.pinned svg { fill: currentColor; }
+.keep-tag.pinned:hover:not(:disabled) { background: var(--removed); }
+.snap-tags .pin { display: flex; padding: 0 2px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+.snap-tags .pin svg { fill: none; }
+.snap-tags .pin:hover:not(:disabled) { color: var(--accent); }
+.snap-tags button:disabled { opacity: 0.5; cursor: default; }
+/* What a snapshot couldn't read, so left out */
+.unread { margin: 12px 0 0; padding: 8px 12px; border: 1px solid var(--removed); border-radius: 6px; background: var(--error-bg); font-size: 0.88rem; }
+.unread p { margin: 0 0 4px; color: var(--removed); font-weight: 500; }
+.unread ul { margin: 0; padding-left: 18px; }
+.unread li { margin-bottom: 2px; overflow-wrap: anywhere; }
 .close { background: none; border: 1px solid var(--axis); border-radius: 6px; width: 28px; height: 28px; flex: none; }
 
 /* A file's details */
@@ -341,15 +368,14 @@ th[aria-sort] { color: var(--ink); }
 .snaprow .marker { width: 10px; flex: none; color: var(--accent); font-size: 0.7rem; }
 .snaprow.compared .marker { color: var(--ink-2); }
 .snaprow .when { white-space: nowrap; }
+.snaprow .badge { white-space: nowrap; }
+.badge.error { background: var(--error-bg); color: var(--removed); border-color: var(--removed); }
 /* The folder pages' panel lists locations, whose names stand out more than snapshots' dates */
 .snaprow .when.churn-name { font-weight: 500; }
 .snaprow .disk { margin-left: auto; font-family: var(--font-data); font-size: 0.78rem; color: var(--ink-2); white-space: nowrap; }
 /* The size, then what the snapshot added on disk */
 .snaprow .disk + .disk { margin-left: 10px; }
 .snaprow .what { display: flex; gap: 8px; margin: 2px 0 0 16px; font-family: var(--font-data); font-size: 0.78rem; color: var(--ink-2); }
-/* Kept for how long, on the right beside how long ago */
-.snaprow .keep { margin-left: auto; color: var(--muted); font-family: var(--font-ui); font-size: 0.75rem; white-space: nowrap; }
-.snaprow .keep + .ago { margin-left: 0; }
 .snaprow .ago { margin-left: auto; color: var(--muted); font-family: var(--font-ui); white-space: nowrap; }
 .snaprow.unchanged .when { color: var(--muted); }
 .snaprow.deleting { opacity: 0.5; cursor: default; }

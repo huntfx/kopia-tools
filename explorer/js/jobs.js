@@ -153,32 +153,34 @@ export function changePins(loc, snap, add, remove) {
     { kind: 'pin', name: loc.path, source: loc.path, snapshot: snap.id, snapshotTime: snap.time, add, remove }).then(render);
 }
 
-// Pinning asks what to call the pin, as KopiaUI does, starting with the name KopiaUI suggests; unpinning takes
-// all its pins off. Either way it's asked first, so it's never done by an accidental click.
-export function confirmPin(loc, snap) {
-  const unpin = !!snap.pins?.length;
-  const name = el('input', { type: 'text', value: 'do-not-delete', autocomplete: 'off' });
+// Pinning asks what to call the pin, as KopiaUI does, starting with the name KopiaUI suggests unless it's pinned
+// as that already; unpinning takes off the pins given. Either way it's asked first, so it's never done by an
+// accidental click.
+export function confirmPin(loc, snap, remove = null) {
+  const unpin = !!remove?.length;
+  const pins = snap.pins || [];
+  const name = el('input', { type: 'text', value: pins.includes('do-not-delete') ? '' : 'do-not-delete', autocomplete: 'off' });
   const error = el('p', { class: 'error', hidden: true });
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
   const go = el('button', {
     class: 'btn primary',
     onclick: () => {
       const pin = name.value.trim();
-      if (!unpin && !pin) {
-        error.textContent = 'The pin needs a name';
+      if (!unpin && (!pin || pins.includes(pin))) {
+        error.textContent = pin ? 'It\'s pinned as that already' : 'The pin needs a name';
         error.hidden = false;
         return name.focus();
       }
       dialog.close();
-      changePins(loc, snap, unpin ? [] : [pin], unpin ? snap.pins : []);
+      changePins(loc, snap, unpin ? [] : [pin], unpin ? remove : []);
     },
   }, unpin ? 'Unpin' : 'Pin');
   name.addEventListener('keydown', event => { if (event.key === 'Enter') go.click(); });
   const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
     // Headings are in capitals, so the pin's name, which they'd change, goes under it
-    el('h2', { id: 'confirm-title' }, unpin ? `Remove the ${snap.pins.length === 1 ? 'pin' : 'pins'}?` : 'Pin this snapshot?'),
+    el('h2', { id: 'confirm-title' }, unpin ? `Remove the ${remove.length === 1 ? 'pin' : 'pins'}?` : 'Pin this snapshot?'),
     el('p', { class: 'what' }, el('b', {}, loc.path), `, ${formatFull(snap.time)} (${shortId(snap.id)})`,
-      unpin ? `, pinned as ${pinNames(snap.pins)}` : ''),
+      unpin ? `, pinned as ${pinNames(remove)}` : pins.length ? `, pinned as ${pinNames(pins)} already` : ''),
     unpin ? null : [el('label', { class: 'field' }, 'Name of the pin', name),
       el('p', {}, 'Kopia\'s retention policy never deletes a pinned snapshot.')],
     error,
