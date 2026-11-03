@@ -9,7 +9,7 @@ import { offerToCopySettings } from './schedules.js';
 // These only listen for things, such as the search box and the "files as of" picker
 import './search.js';
 import './asof.js';
-import './tools.js';
+import './header.js';
 
 await loadStorage();
 pickUpJobs();

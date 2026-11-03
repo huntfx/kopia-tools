@@ -1,5 +1,6 @@
 // The backup locations and their snapshots: reading them, keeping them up to date, and finding things in them
 import { DATA, api, failures, redrawSoon, showProgress } from './data.js';
+import { renderFixes } from './fixes.js';
 import { el, formatFull, listOf, plural } from './format.js';
 import { jobList, renderNotice } from './jobs.js';
 import { render } from './render.js';
@@ -78,6 +79,7 @@ export function snapshotsChanged() {
   }
   showProgress();
   renderNotice();
+  renderFixes();
   const gone = id => id && !known.has(id);
   if (gone(state.snapshot) || gone(state.compare)) {
     return navigate({ snapshot: gone(state.snapshot) ? null : state.snapshot, compare: gone(state.compare) ? null : state.compare }, true);

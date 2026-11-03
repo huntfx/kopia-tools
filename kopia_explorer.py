@@ -1204,14 +1204,20 @@ def write_marker(policy, old, codes):
         files.pop('ignoreDotFiles', None)
 
 
-def needing_settings():
-    """Every location inside another whose backups don't use some of the settings it would inherit in there,
-    and that's had none copied in yet"""
+def nested_settings():
+    """Every location inside another whose backups don't use some of the settings it would inherit in there, or
+    that's had them copied in, with which"""
     policies = json.loads(kopia('policy', 'export'))
     prefix = policy_key('')
     paths = sorted(key[len(prefix):] for key in policies if key.startswith(prefix))
     found = zip(paths, pool.map(lambda path: nested_status(path, policies), paths))
-    return [{'path': path, **status} for path, status in found if status and status['missing'] and not status['copied']]
+    return [{'path': path, **status} for path, status in found if status and (status['missing'] or status['copied'])]
+
+
+def needing_settings():
+    """Every location inside another whose backups don't use some of the settings it would inherit in there,
+    and that's had none copied in yet"""
+    return [n for n in nested_settings() if n['missing'] and not n['copied']]
 
 
 def with_copied_settings():
@@ -1431,6 +1437,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(all_schedules())
             if url.path == '/api/copied-settings':
                 return self.send_json(needing_settings())
+            if url.path == '/api/nested-settings':
+                return self.send_json(nested_settings())
             if url.path == '/api/repository-size':
                 return self.send_json(repository_size())
             if url.path == '/api/jobs':

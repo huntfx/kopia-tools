@@ -17,16 +17,16 @@ const FAILING = 2;
 const isGood = snap => !snap.incomplete && !snap.failed;
 
 // A location's newest good snapshot, and the one pinned as its last good one, if any
-const lastGood = loc => loc.snapshots.findLast(isGood);
-const lastGoodPinned = loc => loc.snapshots.findLast(s => s.pins?.includes(LAST_GOOD));
+export const lastGood = loc => loc.snapshots.findLast(isGood);
+export const lastGoodPinned = loc => loc.snapshots.findLast(s => s.pins?.includes(LAST_GOOD));
 
 // How many of a location's newest finished snapshots in a row have had missing files
-function failingRun(loc) {
+export function failingRun(loc) {
   const complete = loc.snapshots.filter(s => !s.incomplete);
   return complete.length - 1 - complete.findLastIndex(isGood);
 }
 
-const pinLastGood = loc => changePins(loc, lastGood(loc), [LAST_GOOD], []);
+export const pinLastGood = loc => changePins(loc, lastGood(loc), [LAST_GOOD], []);
 
 const view = snap => () => navigate({ snapshot: snap.id });
 
@@ -36,7 +36,7 @@ const PINNED = 'so Kopia\'s retention settings won\'t delete these files.';
 
 // Warned about: several backups in a row with missing files since a good one. One that's never had a good one isn't,
 // as there's nothing to keep.
-const warned = loc => failingRun(loc) >= FAILING && !!lastGood(loc);
+export const warned = loc => failingRun(loc) >= FAILING && !!lastGood(loc);
 
 // Above a location's contents when it's warned about: how many, and its latest good snapshot, with pinning it unless
 // it's pinned already

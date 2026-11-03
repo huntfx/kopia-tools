@@ -1,6 +1,7 @@
 // Restores, backups, deletes and settings changes, which run on the server, and the panel at the bottom that
 // follows them
 import { api, redrawSoon } from './data.js';
+import { loadFixes, renderFixes } from './fixes.js';
 import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
 import { LAST_GOOD, failingNotice } from './lastgood.js';
 import { render } from './render.js';
@@ -81,10 +82,11 @@ export async function startJob(url, body, job) {
   followJobs();
 }
 
-// The panel at the bottom, and the snapshots panel's backup buttons, one for each location, which say whether
-// one's going
+// The panel at the bottom, the snapshots panel's backup buttons, one for each location, and the Fixes window,
+// which say whether one's going
 export function jobsChanged() {
   renderJobs();
+  renderFixes();
   for (const button of document.querySelectorAll('.backup-now')) {
     const loc = storage.find(l => l.path === button.dataset.location);
     if (loc) button.replaceWith(backupButton(loc));
@@ -254,6 +256,7 @@ export function followJobs() {
     if (settingsEnded) {
       schedules.clear();
       redrawSoon();
+      loadFixes();
     }
     if (!jobList.some(jobActive)) {
       clearInterval(jobPolling);
