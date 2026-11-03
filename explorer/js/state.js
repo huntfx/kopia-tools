@@ -1,5 +1,6 @@
 // What the page shows, kept in the URL so back and bookmarks work, and going somewhere
 import { changeFolders } from './changes.js';
+import { keepTyped } from './filter.js';
 import { render } from './render.js';
 import { reveal } from './sidebar.js';
 import { renderSide } from './snapshots.js';
@@ -80,6 +81,8 @@ export function navigate(changes, replace = false) {
   // Picking another snapshot or location goes back to comparing with the previous snapshot
   if (('snapshot' in changes || 'location' in changes) && !('compare' in changes)) changes.compare = null;
   const moved = !('history' in changes) && ['location', 'folder', 'scope', 'file'].some(key => key in changes);
+  // What's typed in the filter box and not kept yet is kept on the way
+  if (moved && !('match' in changes)) changes.match = keepTyped();
   Object.assign(state, changes);
   // The sidebar opens down to wherever you go, and the snapshots panel goes back to following it
   if (moved) {
@@ -94,6 +97,12 @@ window.addEventListener('popstate', () => {
   // Until the locations are read, there's nothing to show; the page reads the address itself once they are
   if (!storage) return;
   readHash();
+  // What's typed in the filter box and not kept yet is kept here too, in place of this address
+  const match = keepTyped();
+  if (match !== state.match) {
+    state.match = match;
+    writeHash(true);
+  }
   reveal(currentFolder());
   render();
 });

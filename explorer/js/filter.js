@@ -117,6 +117,15 @@ export function matchingFiles() {
   return `files${include.length ? ` matching ${words(include)}` : ''}${exclude.length ? `${include.length ? ' but' : ''} not matching ${words(exclude)}` : ''}`;
 }
 
+// What's typed kept as a tag, as Enter does, and moving somewhere else, so it carries on filtering there: the tags
+// with it, or as they were if there's nothing new
+export function keepTyped() {
+  const text = typed.trim();
+  typed = '';
+  clearTimeout(redraw);
+  return text && text !== '!' && !hasPattern(text) ? [...state.match, text] : state.match;
+}
+
 // Adding a tag, or taking it out
 export function togglePattern(pattern) {
   navigate({ match: hasPattern(pattern) ? state.match.filter(p => p.toLowerCase() !== pattern.toLowerCase()) : [...state.match, pattern] });
@@ -141,8 +150,8 @@ const help = () => el('div', { class: 'filter-help', id: 'filter-help', role: 't
 
 // The box to type a pattern in, at the right of the page's path, which filters as it's typed, once typing pauses,
 // with the tags under it, each with a way to take it out, then what the filter lets through in here at the snapshot
-// being viewed. Enter keeps what's typed as a tag, Backspace in an empty box takes the last tag out, and Escape
-// empties it. The page is redrawn whenever anything arrives, so the cursor carries over to the new box.
+// being viewed. Enter keeps what's typed as a tag, as moving somewhere else does, Backspace in an empty box takes
+// the last tag out, and Escape empties it. The page is redrawn whenever anything arrives, so the cursor carries over to the new box.
 export function filterControls(selected) {
   const old = document.querySelector('.filter-box');
   const input = el('input', {
@@ -156,9 +165,7 @@ export function filterControls(selected) {
     onkeydown: event => {
       const text = input.value.trim();
       if (event.key === 'Enter' && text && text !== '!') {
-        typed = '';
-        clearTimeout(redraw);
-        navigate({ match: hasPattern(text) ? state.match : [...state.match, text] });
+        navigate({ match: keepTyped() });
       } else if (event.key === 'Backspace' && !input.value && state.match.length) {
         navigate({ match: state.match.slice(0, -1) });
       } else if (event.key === 'Escape' && input.value) {
