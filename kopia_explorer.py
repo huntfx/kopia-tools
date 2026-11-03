@@ -1369,6 +1369,34 @@ def repository_size():
     return {'size': size_of(*match.groups())}
 
 
+KOPIA_UI = 'KopiaUI.exe'
+# Where its installer puts it: for everyone, or just the one user
+KOPIA_UI_PATHS = [Path(os.environ.get(var, '')) / folder / KOPIA_UI for var, folder in
+                  [('ProgramFiles', 'KopiaUI'), ('LOCALAPPDATA', 'Programs/KopiaUI')] if os.environ.get(var)]
+
+
+def kopia_ui():
+    """Whether KopiaUI is running, as only its server makes the scheduled snapshots, and whether it can be
+    started from here. Running is None if it couldn't be told."""
+    try:
+        found = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {KOPIA_UI}', '/FO', 'CSV', '/NH'],
+                               capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        running = f'"{KOPIA_UI.lower()}"' in found.stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        running = None
+    return {'running': running, 'startable': any(p.is_file() for p in KOPIA_UI_PATHS)}
+
+
+def start_kopia_ui():
+    """Start KopiaUI, on its own, so it keeps running after the explorer's closed."""
+    path = next((p for p in KOPIA_UI_PATHS if p.is_file()), None)
+    if not path:
+        raise FileNotFoundError(f'Couldn\'t find {KOPIA_UI} in {" or ".join(str(p.parent) for p in KOPIA_UI_PATHS)}')
+    subprocess.Popen([str(path)], cwd=path.parent, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    return {}
+
+
 def pick_folder():
     """A folder to back up, picked in a folder picker, or None if cancelled."""
     def show(root):
@@ -1443,6 +1471,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(repository_size())
             if url.path == '/api/jobs':
                 return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
+            if url.path == '/api/kopiaui':
+                return self.send_json(kopia_ui())
             self.send_error(404)
         except CLOSING:
             pass
@@ -1484,6 +1514,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({})
             if self.path == '/api/reveal':
                 return self.send_json(reveal(body['path']))
+            if self.path == '/api/kopiaui/start':
+                return self.send_json(start_kopia_ui())
             if self.path == '/api/forget':
                 repository.forget()
                 return self.send_json({})
@@ -1498,6 +1530,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(502, kopia_reason(e))
         except PermissionError as e:
             self.send_error(403, str(e))
+        except FileNotFoundError as e:
+            self.send_error(404, str(e))
         except BusyError as e:
             self.send_error(409, str(e))
         except Exception as e:

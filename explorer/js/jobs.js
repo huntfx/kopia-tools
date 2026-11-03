@@ -3,6 +3,7 @@
 import { api, redrawSoon } from './data.js';
 import { loadFixes, renderFixes } from './fixes.js';
 import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
+import { kopiaUINotice } from './kopiaui.js';
 import { LAST_GOOD, failingNotice } from './lastgood.js';
 import { render } from './render.js';
 import { schedules } from './schedules.js';
@@ -336,12 +337,13 @@ export function renderJobs() {
   if (atBottom) panel.scrollTop = panel.scrollHeight;
 }
 
-// The warnings above the panel at the bottom: locations inside others whose settings aren't used when the
-// locations around them are backed up, and locations whose backups keep having errors. Each time the snapshots
-// change, it's only drawn again if it says something else, so it isn't announced again.
+// The warnings above the panel at the bottom: KopiaUI not running to make the scheduled snapshots, locations
+// inside others whose settings aren't used when the locations around them are backed up, and locations whose
+// backups keep having errors. Each time the snapshots change, it's only drawn again if it says something else,
+// so it isn't announced again.
 export function renderNotice() {
   const notice = document.getElementById('notice');
-  const parts = [settingsNotice(), failingNotice()].filter(Boolean).map(part => el('div', {}, part));
+  const parts = [kopiaUINotice(), settingsNotice(), failingNotice()].filter(Boolean).map(part => el('div', {}, part));
   const fresh = el('section', {}, parts);
   notice.hidden = !parts.length;
   if (fresh.innerHTML !== notice.innerHTML) notice.replaceChildren(...parts);
