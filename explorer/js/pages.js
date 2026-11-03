@@ -8,7 +8,7 @@ import { api, notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
 import { beingDeleted, beingPinned, confirmPin, restoreItem, showInExplorer } from './jobs.js';
 import { compactFolder, diskText, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
-import { KEEP_KINDS, PIN_ICON, describeStep, openHistory, stepChange } from './snapshots.js';
+import { KEEP_KINDS, PIN_ICON, openHistory, stepChange } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
 import { asOfSnapshot, backingUpNow, enclosingLocation, folderObj, hiddenAsOf, isCancelled, latest, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
 import { contentsTable } from './tables.js';
@@ -156,8 +156,6 @@ export function renderMain() {
 
   // The snapshot, with the folder as it was in it, to restore: its own modified time is in the listing of the
   // folder above it, or for the location, the snapshot's
-  const complete = loc.snapshots.filter(s => !s.incomplete);
-  const at = complete.indexOf(selected);
   const parts = state.scope ? state.scope.split('/') : [];
   const modified = !state.scope ? selected.mtime
     : snapshotListing(selected, parts.slice(0, -1).join('/'))?.find(e => e.n === parts[parts.length - 1] && e.t === 'd')?.m;
@@ -166,8 +164,8 @@ export function renderMain() {
     facts: selected.incomplete ? [['Status', isCancelled(selected) ? 'Cancelled before it finished' : 'Still in progress']] : [
       ['Size', here ? formatSize(here.size) : notKnown()],
       ['Files', here ? plural(here.files, 'file') : notKnown()],
+      ['Folders', here?.folders != null ? plural(here.folders, 'folder') : notKnown()],
       ['Modified', modified ? `${formatFull(modified)}, ${timeAgo(modified)}` : notKnown()],
-      ['In this snapshot', describeStep(at > 0 ? stepChange(complete[at - 1], selected, state.scope, true) : 'first', true)],
     ],
   });
 
@@ -183,14 +181,14 @@ export function renderMain() {
 // otherwise from the listing of the folder above it, or null if that wasn't captured
 export function folderSummary(loc, snap) {
   if (snap.incomplete) return null;
-  if (!state.scope) return { size: snap.size, files: snap.files };
+  if (!state.scope) return { size: snap.size, files: snap.files, folders: snap.folders };
   const parts = state.scope.split('/');
   const entry = snapshotListing(snap, parts.slice(0, -1).join('/'))?.find(e => e.n === parts[parts.length - 1] && e.t === 'd');
-  return entry ? { size: entry.s, files: entry.f } : null;
+  return entry ? { size: entry.s, files: entry.f, folders: entry.D } : null;
 }
 
 // What's known about a file at a snapshot, from the folder listing where captured and from the diffs:
-// whether it's there, its size and modified time, what changed since the snapshot before, and its history
+// whether it's there, its size and modified time, and its history
 export function fileInfo(loc, rel, selected) {
   const complete = loc.snapshots.filter(s => !s.incomplete);
   const at = complete.indexOf(selected);
@@ -215,7 +213,6 @@ export function fileInfo(loc, rel, selected) {
     present, captured, steps,
     size: entry?.s ?? (lastStep && !isGone(lastStep.kind) ? lastStep.size : null),
     modified: entry?.m ?? null,
-    here: at > 0 ? stepChange(complete[at - 1], selected, rel, false) : 'first',
     firstSeen: steps[0]?.kind === '+' ? steps[0].snap : null,
     lastChanged: [...steps].reverse().find(s => !isGone(s.kind))?.snap ?? null,
     snapshots: complete.length,
@@ -252,7 +249,6 @@ export function renderFilePage(main, loc) {
           ['Size', info.size != null ? formatSize(info.size) : notKnown()],
           ['Modified', info.modified ? `${formatFull(info.modified)}, ${timeAgo(info.modified)}` : notKnown()],
         ] : [['Status', el('span', { class: 'c-removed' }, 'Not in this snapshot')]]),
-        ['In this snapshot', describeStep(info.here, false)],
         ['Changed in', info.captured ? `${changedIn} of ${plural(info.snapshots, 'snapshot')}` : notKnown()],
         ['First backed up', info.firstSeen ? when(info.firstSeen) : 'In the oldest snapshot still kept'],
         ['Last changed', info.lastChanged ? when(info.lastChanged) : info.captured ? 'Not since the oldest snapshot' : notKnown()],

@@ -115,7 +115,9 @@ class DiskCache:
 
 
 diff_cache = DiskCache('diffs')
-listing_cache = DiskCache('listings')
+# Listings gained folder counts, so they're cached afresh, and the old ones, which can be big, go
+shutil.rmtree(CACHE_DIR / 'listings', ignore_errors=True)
+listing_cache = DiskCache('listings-2')
 dates_cache = DiskCache('dates')
 
 
@@ -282,6 +284,8 @@ def snapshot_info(snap, stats):
         'incomplete': snap.get('incomplete') or False,
         'size': snap['rootEntry'].get('summ', {}).get('size', 0) if complete else None,
         'files': snap['rootEntry'].get('summ', {}).get('files', 0) if complete else None,
+        # Folders inside it, as kopia counts the folder itself too
+        'folders': max(snap['rootEntry'].get('summ', {}).get('dirs', 1) - 1, 0) if complete else None,
         'newFiles': None if unknown else new.get('fileObjects', 0),
         'newData': None if unknown else new.get('originalContentBytes', 0),
         'onDisk': None if unknown else new.get('packedContentBytes', 0),
@@ -394,7 +398,9 @@ def listing(obj):
         for e in json.loads(kopia('show', obj)).get('entries') or []:
             item = {'n': e['name'], 't': 'd' if e['type'] == 'd' else 'f', 'm': e.get('mtime')}
             if item['t'] == 'd':
-                item.update(s=e.get('summ', {}).get('size', 0), f=e.get('summ', {}).get('files', 0), o=e['obj'])
+                # Folders inside it (D), as kopia counts the folder itself too
+                summ = e.get('summ', {})
+                item.update(s=summ.get('size', 0), f=summ.get('files', 0), D=max(summ.get('dirs', 1) - 1, 0), o=e['obj'])
             else:
                 item['s'] = e.get('size')
             result.append(item)
