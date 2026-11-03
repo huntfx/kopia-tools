@@ -4,6 +4,7 @@ import { api, redrawSoon } from './data.js';
 import { loadFixes, renderFixes } from './fixes.js';
 import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
 import { kopiaUINotice } from './kopiaui.js';
+import { renderMounts } from './mounts.js';
 import { LAST_GOOD, failingNotice } from './lastgood.js';
 import { render } from './render.js';
 import { schedules } from './schedules.js';
@@ -23,9 +24,13 @@ export let jobPolling = null;
 export let jobsUnreachable = false;  // The server stopped answering while following them
 
 // Still going: choosing where, restoring, moving the finished restore into place, backing up or changing
-// settings, cancelling, deleting a snapshot, finding the locations whose settings to change, or waiting for
-// another settings change to finish
-export const jobActive = j => ['picking', 'restoring', 'finishing', 'running', 'cancelling', 'deleting', 'checking', 'waiting'].includes(j.state);
+// settings, cancelling, deleting a snapshot, finding the locations whose settings to change, waiting for
+// another settings change to finish, or a folder mounted as a drive, or being mounted or unmounted
+export const jobActive = j => ['picking', 'restoring', 'finishing', 'running', 'cancelling', 'deleting', 'checking', 'waiting',
+  'mounting', 'mounted', 'unmounting'].includes(j.state);
+
+// Going, and changing, so followed: not a folder that's just mounted, which stays that way until it's unmounted
+const jobMoving = j => jobActive(j) && j.state !== 'mounted';
 
 // Locations inside others whose settings aren't used in the backups of the locations they're in, warned about
 // when the page opens, above the panel at the bottom, until copied in or put off
@@ -65,16 +70,94 @@ export function restoreItem(snap, rel, folder) {
     { kind: 'restore', name: rel.split('/').pop() || 'this location', snapshotTime: snap.time });
 }
 
+// The drive last mounted on, offered again while it's free
+let lastDrive = null;
+
+// Mount a folder (rel inside the location, '' for all of it) as it was in a snapshot as a drive, once a dialog
+// has asked which, offering the free ones. It opens in Explorer once it's ready. One mounted already is just
+// opened again.
+async function mountFolder(snap, rel) {
+  if (mountOf(snap, rel)) return mountOn(snap, rel, null);
+  const loc = storage.find(l => l.snapshots.includes(snap));
+  const drives = await fetch('/api/free-drives').then(r => (r.ok ? r.json() : null)).catch(() => null);
+  const select = el('select', { disabled: !drives?.length }, (drives || []).map(drive => el('option', { value: drive }, drive)));
+  // The last free one, as Windows picks, unless another was picked last time and is still free
+  select.value = drives?.includes(lastDrive) ? lastDrive : drives?.at(-1) ?? '';
+  const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
+  const go = el('button', {
+    class: 'btn primary', disabled: !drives?.length,
+    onclick: () => {
+      lastDrive = select.value;
+      dialog.close();
+      mountOn(snap, rel, select.value);
+    },
+  }, 'Mount');
+  const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
+    el('h2', { id: 'confirm-title' }, 'Mount as a drive?'),
+    el('p', { class: 'what' }, el('b', {}, rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path),
+      `, ${formatFull(snap.time)} (${shortId(snap.id)})`),
+    el('label', { class: 'field' }, 'Drive', select),
+    drives?.length ? el('p', {}, rel ? 'Mounts the folder from the snapshot as a read-only drive in Explorer.' : 'Mounts the snapshot as a read-only drive in Explorer.')
+      : el('p', { class: 'error' }, drives ? 'There are no free drive letters to mount it on.' : 'Couldn\'t find out which drive letters are free.'),
+    el('div', { class: 'actions' }, cancel, go));
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  (drives?.length ? go : cancel).focus();
+}
+
+// A folder's mount still going, if it's mounted, or being mounted or unmounted: by what's mounted, so any
+// snapshot with the same contents has it too, as it's only one of them a mount found running is put down to
+const mountOf = (snap, rel) => jobList.find(j => j.kind === 'mount' && j.obj === (rel ? `${snap.root}/${rel}` : snap.root) && jobActive(j));
+
+// A drive as it's shown, like Y:, without the backslash that opens it
+export const driveName = drive => drive?.replace(/\\$/, '');
+
+// Mount a folder as it was in a snapshot as a drive, or once it's mounted, unmount it
+export function mountButton(snap, rel, present) {
+  const job = mountOf(snap, rel);
+  const deleting = beingDeleted(snap);
+  const drive = driveName(job?.drive);
+  return el('button', {
+    class: 'btn mount', 'data-snapshot': snap.id, 'data-path': rel, 'data-present': present ? '1' : '',
+    disabled: job ? job.state !== 'mounted' : !present || deleting,
+    title: job?.state === 'mounted' ? `Take drive ${drive} away again`
+      : job ? null
+      : !present ? 'It isn\'t in this snapshot'
+      : deleting ? 'This snapshot is being deleted'
+      : `Mount it as a read-only drive in Explorer, as it was on ${formatFull(snap.time)}`,
+    onclick: () => (job ? unmount(job) : mountFolder(snap, rel)),
+  }, { mounting: 'Mounting…', mounted: `Unmount ${drive}`, unmounting: 'Unmounting…' }[job?.state] || 'Mount as drive…');
+}
+
+function mountOn(snap, rel, drive) {
+  jobsShown = true;
+  startJob('/api/mount', { snapshot: snap.id, path: rel, drive },
+    { kind: 'mount', name: rel.split('/').pop() || 'this location', snapshotTime: snap.time });
+}
+
+export async function unmount(job) {
+  try {
+    Object.assign(job, await api.post('/api/unmount', { id: job.id }));
+  } catch (error) {
+    job.error = `Couldn't unmount: ${error instanceof TypeError ? 'can\'t reach the server' : error.message}`;
+  }
+  jobsChanged();
+  followJobs();
+}
+
 // Back up a location now, or a folder inside one on its own, which makes it a location of its own
 export function backUp(path) {
   jobsShown = true;
   startJob('/api/backup', { source: path }, { kind: 'backup', name: path, source: path });
 }
 
-// Start a restore, backup or delete, or if the server won't, list it as failed, saying why
+// Start a restore, backup, mount or delete, or if the server won't, list it as failed, saying why. A mount
+// already going comes back as it is, so it's listed once.
 export async function startJob(url, body, job) {
   try {
-    jobList = [...jobList, await api.post(url, body)];
+    const started = await api.post(url, body);
+    jobList = [...jobList.filter(j => j.id !== started.id), started];
   } catch (error) {
     jobList = [...jobList, { ...job, id: `failed-${Date.now()}`, state: 'failed',
       error: error instanceof TypeError ? 'Can\'t reach the server' : error.message }];
@@ -83,14 +166,19 @@ export async function startJob(url, body, job) {
   followJobs();
 }
 
-// The panel at the bottom, the snapshots panel's backup buttons, one for each location, and the Fixes window,
-// which say whether one's going
+// The panel at the bottom, the snapshots panel's backup buttons, one for each location, the Snapshot panel's
+// mount button, and the Mounts and Fixes windows, which say whether one's going
 export function jobsChanged() {
   renderJobs();
   renderFixes();
+  renderMounts();
   for (const button of document.querySelectorAll('.backup-now')) {
     const loc = storage.find(l => l.path === button.dataset.location);
     if (loc) button.replaceWith(backupButton(loc));
+  }
+  for (const button of document.querySelectorAll('.btn.mount')) {
+    const snap = storage.flatMap(l => l.snapshots).find(s => s.id === button.dataset.snapshot);
+    if (snap) button.replaceWith(mountButton(snap, button.dataset.path, !!button.dataset.present));
   }
 }
 
@@ -259,7 +347,7 @@ export function followJobs() {
       redrawSoon();
       loadFixes();
     }
-    if (!jobList.some(jobActive)) {
+    if (!jobList.some(jobMoving)) {
       clearInterval(jobPolling);
       jobPolling = null;
     }
@@ -276,6 +364,7 @@ export function renderJobs() {
     if (r.kind === 'backup') return backupItem(r);
     if (r.kind === 'delete') return deleteItem(r);
     if (r.kind === 'pin') return pinItem(r);
+    if (r.kind === 'mount') return mountItem(r);
     if (r.kind === 'settings') return settingsItems(r);
     const percent = r.totalBytes ? 100 * r.bytes / r.totalBytes : 0;
     const status = {
@@ -306,13 +395,14 @@ export function renderJobs() {
   const going = kind => of(kind).filter(jobActive).length;
   const pinsGoing = pinning => of('pin').filter(j => jobActive(j) && !!j.add.length === pinning).length;
   const active = jobList.filter(jobActive).length;
-  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['delete', 'deletions'], ['pin', 'pins'], ['settings', 'parent settings fixes']]
+  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['mount', 'mounts'], ['delete', 'deletions'], ['pin', 'pins'], ['settings', 'parent settings fixes']]
     .filter(([kind]) => of(kind).length).map(([, name]) => name);
   const listed = listOf(kinds);
   const settingsJob = of('settings').find(jobActive);
   const heading = [
     going('backup') && `Backing up ${plural(going('backup'), 'location')}`,
     going('restore') && `Restoring ${going('restore')} of ${of('restore').length}`,
+    going('mount') && `${plural(going('mount'), 'folder')} mounted`,
     going('delete') && `Deleting ${plural(going('delete'), 'snapshot')}`,
     pinsGoing(true) && `Pinning ${plural(pinsGoing(true), 'snapshot')}`,
     pinsGoing(false) && `Unpinning ${plural(pinsGoing(false), 'snapshot')}`,
@@ -426,6 +516,32 @@ export function pinItem(j) {
     status);
 }
 
+// A folder mounted as a drive in the panel at the bottom, with opening it again and unmounting it
+export function mountItem(j) {
+  const status = {
+    mounting: () => el('div', { class: 'status muted' }, 'Mounting…'),
+    mounted: () => el('div', { class: 'status' },
+      el('span', { class: 'c-added' }, '✓ Mounted'), ' as ', el('b', {}, driveName(j.drive)),
+      el('button', { class: 'linklike', onclick: event => showInExplorer(j.drive, event.currentTarget) }, 'Open'),
+      el('button', { class: 'linklike', title: 'Take the drive away again', onclick: () => unmount(j) }, 'Unmount'),
+      j.error ? el('span', { class: 'c-removed' }, j.error) : null),
+    unmounting: () => el('div', { class: 'status muted' }, 'Unmounting…'),
+    unmounted: () => el('div', { class: 'status muted' }, 'Unmounted'),
+    failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
+  }[j.state]();
+  // Where it's from in full, location and all, as it stays mounted. One found running was mounted some other
+  // way, such as by an explorer that was ended outright, so it's put down to the newest snapshot with the same
+  // contents, if there is one: one mounted at the command line may not be the top of a snapshot, or a folder
+  // in one, so all that's known is kopia's ID for it.
+  return el('li', {
+    class: `${j.state}${jobActive(j) ? ' active' : ''}`,
+    title: j.found ? `Found mounted, not mounted here${j.snapshotTime ? ' - the newest snapshot with the same contents' : ''}` : null,
+  },
+    el('div', { class: 'what' }, el('b', {}, j.from),
+      el('span', { class: 'muted' }, j.snapshotTime ? ` as of ${formatFull(j.snapshotTime)}` : ' (not from a snapshot found here)')),
+    status);
+}
+
 // A backup in the panel at the bottom: how far it's got, which kopia can only say once it's worked out
 // roughly how much there is, then what it made
 export function backupItem(j) {
@@ -476,3 +592,16 @@ export function pickUpJobs() {
   }
   }).catch(() => {});
 }
+
+// Mounts can come and go with nothing here doing it, as the server checks every minute: ones found running, and
+// ones whose drive was taken away in Explorer. So while nothing's being followed, the list is asked for again
+// every half minute, while the page is showing.
+setInterval(async () => {
+  if (document.hidden || jobPolling) return;
+  const list = await fetch('/api/jobs').then(r => r.json()).catch(() => null);
+  if (!list || JSON.stringify(list) === JSON.stringify(jobList)) return;
+  jobList = list;
+  if (list.some(jobActive)) jobsShown = true;
+  jobsChanged();
+  if (list.some(jobMoving)) followJobs();
+}, 30 * 1000);

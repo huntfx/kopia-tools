@@ -15,6 +15,7 @@ Example:
 """
 
 import argparse
+import ctypes
 import hashlib
 import itertools
 import json
@@ -25,6 +26,7 @@ import re
 import shutil
 import signal
 import sqlite3
+import string
 import subprocess
 import sys
 import tempfile
@@ -712,9 +714,10 @@ class Dialogs:
 
 dialogs = Dialogs()
 restored = set()               # Paths restored, which are the only ones the page may show in Explorer
-jobs = {}                        # Every restore, backup, delete and settings change since the server started, by ID, for the page to follow
+jobs = {}                        # Every restore, backup, mount, delete and settings change since the server started, by ID, for the page to follow
 job_ids = itertools.count(1)
 backup_processes = {}            # Backups still running, by job ID, so they can be cancelled
+mount_processes = {}             # Folders mounted as drives, by job ID, so they can be unmounted
 PROGRESS = re.compile(r'Processed (\d+) \(([\d.]+) (\w+)\) of (\d+) \(([\d.]+) (\w+)\)')
 UNITS = {'B': 1, 'KB': 1e3, 'MB': 1e6, 'GB': 1e9, 'TB': 1e12, 'KiB': 1024, 'MiB': 1024 ** 2, 'GiB': 1024 ** 3, 'TiB': 1024 ** 4}
 # The parts of kopia's backup progress line, such as
@@ -958,6 +961,198 @@ def cancel_backup(job_id):
         timer.daemon = True
         timer.start()
     return job
+
+
+MOUNTED = re.compile(r"^Mounted '.*' on (\S+)")
+# How kopia's mounts show in net use and netstat: a drive mapped to a WebDAV server on this computer, on a port
+# the kopia process is listening on
+WEBDAV_DRIVE = re.compile(r'([A-Z]:)\s+\\\\(?:127\.0\.0\.1|localhost)@(\d+)\\DavWWWRoot', re.I)
+LISTENING = re.compile(r'^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$', re.M)
+MOUNT_CHECK = 60                 # Seconds between checks on what's mounted
+KOPIA_PROCESSES = 'Get-CimInstance Win32_Process -Filter "Name=\'kopia.exe\'" | Select-Object ProcessId,CommandLine | ConvertTo-Json'
+
+
+def free_drives():
+    """The drive letters nothing's using, to mount on: kopia only mounts as a drive on Windows, not in a folder."""
+    used = ctypes.windll.kernel32.GetLogicalDrives()
+    return [f'{letter}:' for i, letter in enumerate(string.ascii_uppercase) if not used & 1 << i]
+
+
+def mount_object(snap, path):
+    """What kopia mounts for a folder in a snapshot: the snapshot's root folder, or a folder inside it."""
+    return f'{snap["rootEntry"]["obj"]}/{path}' if path else snap['rootEntry']['obj']
+
+
+def start_mount(snapshot_id, path, drive):
+    """Mount a folder as it was in a snapshot as a drive, read only, in the background, as KopiaUI does, and open
+    it in Explorer once it's ready. It stays mounted until unmounted, or the explorer's closed. One already
+    mounted is opened again instead, wherever it's mounted, even from another snapshot with the same contents."""
+    snap = repository.snapshots[snapshot_id]
+    if being_deleted(snapshot_id):
+        raise BusyError('That snapshot is being deleted')
+    obj = mount_object(snap, path)
+    already = next((j for j in jobs.values() if j['kind'] == 'mount' and j['obj'] == obj and j['state'] in ('mounting', 'mounted')), None)
+    if already:
+        if already['drive']:
+            subprocess.Popen(['explorer', already['drive']])
+        return already
+    if not re.fullmatch(r'[A-Z]:', drive or ''):
+        raise ValueError(f'{drive} isn\'t a drive letter')
+    # In a process group of its own, so it can be sent Ctrl+Break to unmount it, which kopia needs to take the
+    # drive away again, without stopping this server
+    process = subprocess.Popen(['kopia', 'mount', '--no-browse', obj, drive], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, encoding='utf-8', errors='replace', creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    job = mount_job(obj, snap, path, 'mounting', None, process.pid)
+    mount_processes[job['id']] = process
+    threading.Thread(target=run_mount, args=(job, process), daemon=True).start()
+    return job
+
+
+def mount_job(obj, snap, path, state, drive, pid, found=False):
+    """A mount's record, for the page to follow: what's mounted, from which snapshot if it's known, where, and
+    by which kopia process. Found is one found running rather than started here."""
+    source = Path(snap['source']['path']) if snap else None
+    job = {
+        'id': next(job_ids), 'kind': 'mount', 'obj': obj, 'snapshot': snap and snap['id'], 'path': path,
+        'name': (path.rsplit('/', 1)[-1] if path else str(source)) if snap else obj,
+        'from': (str(source / path) if path else str(source)) if snap else obj,
+        'snapshotTime': snap and snap['startTime'], 'state': state, 'drive': drive, 'pid': pid, 'found': found,
+        'error': None, 'started': time.time(), 'finished': None,
+    }
+    jobs[job['id']] = job
+    return job
+
+
+def run_mount(job, process):
+    """Wait for a mount to be ready, open it, then follow it until it's unmounted, or stops by itself."""
+    last = ''
+    try:
+        for line in process.stdout:
+            line = line.strip()
+            if match := MOUNTED.match(line):
+                job.update(state='mounted', drive=f'{match[1]}\\')
+                subprocess.Popen(['explorer', job['drive']])
+            elif line and not line.startswith(('HINT:', 'Press Ctrl-C')):
+                last = line
+        log_command(process.args[1:], job['started'], process.wait() and job['state'] != 'unmounting'
+                    and (last or f'exit code {process.returncode}'))
+        if job['state'] == 'unmounting':
+            job['state'] = 'unmounted'
+        else:
+            job.update(state='failed', error=last or f'kopia mount stopped with exit code {process.returncode}')
+    except Exception as e:
+        job.update(state='failed', error=kopia_reason(e))
+    finally:
+        mount_processes.pop(job['id'], None)
+        job['finished'] = time.time()
+
+
+def unmount(job_id):
+    """Unmount a folder mounted as a drive, as Ctrl+C would, so kopia takes the drive away. If it hasn't stopped
+    after half a minute, it's ended outright, and the drive taken away here. One found running rather than started
+    here can't be sent Ctrl+Break, so it's ended outright straight away."""
+    job = jobs[job_id]
+    if job['state'] not in ('mounting', 'mounted'):
+        return job
+    job['state'] = 'unmounting'
+    process = mount_processes.get(job_id)
+    if process:
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+
+        def force():
+            if process.poll() is None:
+                process.kill()
+                remove_drive(job['drive'])
+        timer = threading.Timer(30, force)
+        timer.daemon = True
+        timer.start()
+    else:
+        def end():
+            subprocess.run(['taskkill', '/PID', str(job['pid']), '/F'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            remove_drive(job['drive'])
+            job.update(state='unmounted', finished=time.time())
+        threading.Thread(target=end, daemon=True).start()
+    return job
+
+
+def remove_drive(drive):
+    if drive:
+        subprocess.run(['net', 'use', drive.rstrip('\\'), '/delete', '/y'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def command_line_args(command_line):
+    """A program's command line split into its arguments, as Windows does for it."""
+    shell32, kernel32 = ctypes.windll.shell32, ctypes.windll.kernel32
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    count = ctypes.c_int()
+    args = shell32.CommandLineToArgvW(command_line, ctypes.byref(count))
+    if not args:
+        return []
+    try:
+        return [args[i] for i in range(count.value)]
+    finally:
+        kernel32.LocalFree(args)
+
+
+def kopia_drives():
+    """Every drive a kopia process is serving, however it was mounted: the process's ID and arguments, and the drive.
+    A kopia mount serves one; a server, such as KopiaUI's, one for each folder mounted through it."""
+    def run(*command):
+        return subprocess.run(command, capture_output=True, text=True, timeout=60, creationflags=subprocess.CREATE_NO_WINDOW).stdout
+    found = run('powershell', '-NoProfile', '-Command', KOPIA_PROCESSES)
+    processes = json.loads(found) if found.strip() else []
+    args = {p['ProcessId']: command_line_args(p['CommandLine'] or '')[1:] for p in (processes if isinstance(processes, list) else [processes])}
+    if not args:
+        return []
+    drives = {int(port): f'{drive.upper()}\\' for drive, port in WEBDAV_DRIVE.findall(run('net', 'use'))}
+    return [(int(pid), args[int(pid)], drives[int(port)]) for port, pid in LISTENING.findall(run('netstat', '-ano', '-p', 'TCP'))
+            if int(pid) in args and int(port) in drives]
+
+
+def running_mounts():
+    """Every kopia mount running, however it was started, that's mounted on a drive: by process ID, what it mounts
+    and on which drive. Not ones KopiaUI has mounted, as its server does those itself, without saying what they are."""
+    mounted = {}
+    for pid, args, drive in kopia_drives():
+        if 'mount' in args:
+            positional = [a for a in args[args.index('mount') + 1:] if not a.startswith('-')]
+            mounted[pid] = (positional[0] if positional else 'all', drive)
+    return mounted
+
+
+def other_mounts():
+    """Drives mounted through a kopia server, such as KopiaUI's, rather than by kopia mount: all that's known is the
+    drive, and what mounted it, as the server's mounts can only be asked about with its password."""
+    return sorted(({'drive': drive, 'by': 'KopiaUI' if '--ui' in args else 'a kopia server'}
+                   for pid, args, drive in kopia_drives() if 'mount' not in args), key=lambda m: m['drive'])
+
+
+def check_mounts():
+    """Bring the mounts listed up to date with what's really mounted: ones found running that aren't listed, such as
+    ones left by an explorer that was ended outright, or mounted at the command line, are listed, and ones whose
+    drive has been taken away, or whose kopia has stopped, are unmounted. The newest snapshot with what's mounted
+    is taken to be the one it's from."""
+    mounted = running_mounts()
+    listed = {j['pid'] for j in jobs.values() if j['kind'] == 'mount' and j['state'] in ('mounting', 'mounted', 'unmounting')}
+    for job in [j for j in jobs.values() if j['kind'] == 'mount' and j['state'] == 'mounted']:
+        if job['pid'] not in mounted:
+            unmount(job['id'])
+    for pid, (obj, drive) in mounted.items():
+        if pid in listed:
+            continue
+        root, _, path = obj.partition('/')
+        snaps = [s for s in repository.snapshots.values() if s['rootEntry']['obj'] == root]
+        mount_job(obj, max(snaps, key=lambda s: s['startTime'], default=None), path, 'mounted', drive, pid, found=True)
+
+
+def keep_checking_mounts():
+    while True:
+        try:
+            check_mounts()
+        except Exception:
+            traceback.print_exc()
+        time.sleep(MOUNT_CHECK)
 
 
 def policy_key(path):
@@ -1407,10 +1602,13 @@ def pick_folder():
 
 def reveal(path):
     """Show something in Windows Explorer: a folder opened, or a file selected in its folder. If it's gone,
-    the nearest folder above it that's still there. Only for things restored or inside a backup location."""
+    the nearest folder above it that's still there. Only for things restored, folders mounted as drives, or
+    things inside a backup location."""
     target = Path(os.path.abspath(path))
-    if path not in restored and not inside_location(path):
-        raise PermissionError('Only things restored or in a backup location can be shown')
+    mounted = (any(j['kind'] == 'mount' and j['state'] == 'mounted' and j['drive'] == path for j in jobs.values())
+               or re.fullmatch(r'[A-Z]:\\', path) and any(m['drive'] == path for m in other_mounts()))
+    if path not in restored and not mounted and not inside_location(path):
+        raise PermissionError('Only things restored, mounted or in a backup location can be shown')
     if target.is_dir():
         subprocess.Popen(['explorer', str(target)])
     elif target.exists():
@@ -1473,6 +1671,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
             if url.path == '/api/kopiaui':
                 return self.send_json(kopia_ui())
+            if url.path == '/api/free-drives':
+                return self.send_json(free_drives())
+            if url.path == '/api/other-mounts':
+                return self.send_json(other_mounts())
             self.send_error(404)
         except CLOSING:
             pass
@@ -1497,6 +1699,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(start_backup(body['source']))
             if self.path == '/api/backup/cancel':
                 return self.send_json(cancel_backup(body['id']))
+            if self.path == '/api/mount':
+                return self.send_json(start_mount(body['snapshot'], body['path'], body['drive']))
+            if self.path == '/api/unmount':
+                return self.send_json(unmount(body['id']))
             if self.path == '/api/schedule':
                 return self.send_json(set_schedule(body['path'], body['interval'], bool(body.get('manual')),
                                                    bool(body.get('copySettings'))))
@@ -1614,6 +1820,7 @@ def main():
     print('Reading the repository...', flush=True)
     repository.storage()
     threading.Thread(target=keep_copied_settings_up_to_date, daemon=True).start()
+    threading.Thread(target=keep_checking_mounts, daemon=True).start()
 
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     url = f'http://localhost:{args.port}/'
@@ -1639,6 +1846,15 @@ def main():
             cancel_backup(job_id)
             try:
                 process.wait(60)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        # Mounts would stay with nothing to unmount them, so they're unmounted, apart from ones found running,
+        # which weren't mounted here
+        for job_id, process in list(mount_processes.items()):
+            print(f'Unmounting {jobs[job_id]["from"]}...', flush=True)
+            unmount(job_id)
+            try:
+                process.wait(30)
             except subprocess.TimeoutExpired:
                 process.kill()
 

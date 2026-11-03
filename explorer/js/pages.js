@@ -7,7 +7,7 @@ import { filterControls, filteredCounts, inFilter, matchingFiles, patterns } fro
 import { settingsStatus, settingsWarning } from './schedules.js';
 import { api, notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
-import { beingDeleted, beingPinned, confirmPin, restoreItem, showInExplorer } from './jobs.js';
+import { beingDeleted, beingPinned, confirmPin, mountButton, restoreItem, showInExplorer } from './jobs.js';
 import { LAST_GOOD, failingWarning, lastGoodStatus } from './lastgood.js';
 import { compactFolder, diskText, joinRel, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
 import { render } from './render.js';
@@ -265,8 +265,9 @@ export function renderFilePage(main, loc) {
 }
 
 // The Snapshot panel on file and folder pages: the snapshot being viewed, with its tags, then what the file or
-// folder was like in it, what in there kopia couldn't read, and a button to restore it as it was then. Folders'
-// fewer facts go two to a row, to keep it short above the contents.
+// folder was like in it, what in there kopia couldn't read, and a button to restore it as it was then, or for a
+// folder, mount it as a drive to look around it in Explorer. Folders' fewer facts go two to a row, to keep it short
+// above the contents.
 export function snapshotPanel({ selected, rel, present, size, what, facts, buttons = [], note = null, wide = false }) {
   const detail = ([label, value]) => [el('dt', {}, label), el('dd', {}, value)];
   const loc = storage.find(l => l.snapshots.includes(selected));
@@ -290,6 +291,7 @@ export function snapshotPanel({ selected, rel, present, size, what, facts, butto
           : `${what === 'folder' ? 'Pick a folder to put it in' : 'Pick where to save it'}, keeping modified dates, as it was on ${formatFull(selected.time)}`,
         onclick: () => restoreItem(selected, rel, what === 'folder'),
       }, `Restore this ${what}${size != null ? ` (${formatSize(size)})` : ''}…`),
+      what === 'folder' ? mountButton(selected, rel, present) : null,
       explorerButton, buttons),
     note ? el('p', { class: 'note', style: 'margin:10px 0 0' }, note) : null);
 }

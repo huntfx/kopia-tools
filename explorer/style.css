@@ -87,9 +87,11 @@ h2 { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spa
   white-space: normal;
 }
 .as-of-menu[hidden] { display: none; }
-/* The Fixes window's button */
-.topbar .fixes-button { display: flex; align-items: center; padding: 6px 9px; color: var(--ink-2); }
-.topbar .fixes-button:hover { color: var(--ink); }
+/* The header's buttons for the Fixes and Mounts windows, with how many are mounted */
+.topbar .icon-button { display: flex; align-items: center; padding: 6px 9px; color: var(--ink-2); }
+.topbar .icon-button:hover { color: var(--ink); }
+.topbar .icon-button .count { margin-left: 5px; font-size: 0.8rem; }
+.topbar .icon-button .count:empty { display: none; }
 .as-of-menu input { width: 100%; background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 6px 8px; font-size: 0.85rem; color-scheme: inherit; }
 .as-of-menu input:focus { border-color: var(--accent); outline: none; }
 .as-of-menu .typed { padding: 0 10px 6px; }
@@ -431,19 +433,19 @@ th[aria-sort] { color: var(--ink); }
 .confirm select { background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font-size: 0.85rem; flex: 1; min-width: 0; }
 .confirm .field input[type="text"] { color: var(--ink); background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font-size: 0.85rem; flex: 1; min-width: 0; }
 .confirm .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-/* The Fixes window: a row for each location, with what it has on the left, and what can be done on the right */
-.confirm.fixes { width: min(680px, calc(100vw - 32px)); }
-.fixes .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 16px 0 4px; }
-.fixes .section-head .actions { display: flex; gap: 12px; margin: 0; font-size: 0.85rem; }
-.fixes h3 { margin: 16px 0 4px; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
-.fixes .section-head h3 { margin: 0; }
-.fixes ul { list-style: none; margin: 0; padding: 0; }
-.fixes li { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 0.85rem; }
-.fixes li .what { min-width: 0; overflow-wrap: anywhere; }
-.fixes li .what .linklike { text-align: left; }
-.fixes li .detail { color: var(--muted); font-size: 0.8rem; }
-.fixes li .status { display: flex; gap: 10px; white-space: nowrap; }
-.fixes .warn { color: var(--warn-line); }
+/* The Fixes and Mounts windows: a row for each location or mount, with what it is on the left, and what can be done on the right */
+.confirm.listing { width: min(680px, calc(100vw - 32px)); }
+.listing .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 16px 0 4px; }
+.listing .section-head .actions { display: flex; gap: 12px; margin: 0; font-size: 0.85rem; }
+.listing h3 { margin: 16px 0 4px; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.listing .section-head h3 { margin: 0; }
+.listing ul { list-style: none; margin: 0; padding: 0; }
+.listing li { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 0.85rem; }
+.listing li .what { min-width: 0; overflow-wrap: anywhere; }
+.listing li .what .linklike { text-align: left; }
+.listing li .detail { color: var(--muted); font-size: 0.8rem; }
+.listing li .status { display: flex; gap: 10px; white-space: nowrap; }
+.listing .warn { color: var(--warn-line); }
 .btn.danger:not(:disabled) { background: var(--removed); border-color: var(--removed); color: #fff; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .note { color: var(--muted); font-size: 0.85rem; }

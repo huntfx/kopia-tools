@@ -20,7 +20,7 @@ let reads = 0;  // So only the latest read is shown, if it's read again before t
 
 export function openFixes() {
   if (dialog) return;
-  dialog = el('dialog', { class: 'confirm fixes', 'aria-labelledby': 'fixes-title' });
+  dialog = el('dialog', { class: 'confirm listing fixes', 'aria-labelledby': 'fixes-title' });
   dialog.addEventListener('close', () => {
     dialog.remove();
     dialog = null;
