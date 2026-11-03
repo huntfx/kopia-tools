@@ -1,12 +1,13 @@
 // Restores, backups, deletes and settings changes, which run on the server, and the panel at the bottom that
 // follows them
-import { DATA, api, redrawSoon } from './data.js';
+import { api, redrawSoon } from './data.js';
 import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
+import { LAST_GOOD, failingNotice } from './lastgood.js';
 import { render } from './render.js';
 import { schedules } from './schedules.js';
 import { KEEP_KINDS } from './snapshots.js';
-import { navigate, state, writeHash } from './state.js';
-import { applyJobs, isCancelled, latest, refreshStorage, snapshotsChanged, storage } from './storage.js';
+import { navigate, writeHash } from './state.js';
+import { applyJobs, followRenamed, isCancelled, latest, refreshStorage, snapshotsChanged, storage } from './storage.js';
 
 // Restores and backups run on the server, and the panel at the bottom follows them. A restore asks where in
 // a folder picker, then has kopia write it there, so it keeps its modified times; a backup takes a snapshot
@@ -182,7 +183,8 @@ export function confirmPin(loc, snap, remove = null) {
     el('p', { class: 'what' }, el('b', {}, loc.path), `, ${formatFull(snap.time)} (${shortId(snap.id)})`,
       unpin ? `, pinned as ${pinNames(remove)}` : pins.length ? `, pinned as ${pinNames(pins)} already` : ''),
     unpin ? null : [el('label', { class: 'field' }, 'Name of the pin', name),
-      el('p', {}, 'Kopia\'s retention policy never deletes a pinned snapshot.')],
+      el('p', {}, 'Kopia\'s retention policy never deletes a pinned snapshot. ',
+        `One pinned as “${LAST_GOOD}” has the pin moved on to each new snapshot without missing files.`)],
     error,
     el('div', { class: 'actions' }, cancel, go));
   dialog.addEventListener('close', () => dialog.remove());
@@ -197,16 +199,8 @@ export const pinNames = pins => listOf(pins.map(p => `“${p}”`));
 // Kopia saves a snapshot again under a new ID when it's pinned or unpinned, so once it's done, it's kept as the
 // same object with that ID, and what's loaded or picked for it follows it there
 function pinned(snap, info) {
-  const old = snap.id;
-  for (const cache of [DATA.diffs, DATA.dates]) {
-    for (const key of Object.keys(cache).filter(k => k.split('..').includes(old))) {
-      cache[key.split('..').map(id => (id === old ? info.id : id)).join('..')] = cache[key];
-      delete cache[key];
-    }
-  }
+  followRenamed(snap, info.id);
   Object.assign(snap, info);
-  if (state.snapshot === old) state.snapshot = info.id;
-  if (state.compare === old) state.compare = info.id;
 }
 
 // Open something in Windows Explorer, via the server; if that fails, the button says why
@@ -339,21 +333,30 @@ export function renderJobs() {
   if (atBottom) panel.scrollTop = panel.scrollHeight;
 }
 
-// The warning above the panel at the bottom: locations inside others whose settings aren't used when the
-// locations around them are backed up, with copying them in
+// The warnings above the panel at the bottom: locations inside others whose settings aren't used when the
+// locations around them are backed up, and locations whose backups keep having errors. Each time the snapshots
+// change, it's only drawn again if it says something else, so it isn't announced again.
 export function renderNotice() {
   const notice = document.getElementById('notice');
-  notice.hidden = !settingsOffer;
-  if (!settingsOffer) return;
+  const parts = [settingsNotice(), failingNotice()].filter(Boolean).map(part => el('div', {}, part));
+  const fresh = el('section', {}, parts);
+  notice.hidden = !parts.length;
+  if (fresh.innerHTML !== notice.innerHTML) notice.replaceChildren(...parts);
+}
+
+// Copying in the settings of locations inside others
+function settingsNotice() {
+  if (!settingsOffer) return null;
   const missing = listOf([...new Set(settingsOffer.flatMap(n => n.missing))], 'or');
-  notice.replaceChildren(
+  return [
     el('h2', {}, 'Parent settings not used'),
     el('p', {}, `Kopia doesn't use your ${missing} inside `,
       el('b', { title: settingsOffer.map(n => `${n.path} in ${n.container}`).join('\n') }, plural(settingsOffer.length, 'nested location')),
       ' when backing up the locations around them.'),
     el('div', { class: 'actions' },
       el('button', { class: 'btn', onclick: () => changeSettings(false) }, 'Apply parent settings fix'),
-      el('button', { class: 'linklike', onclick: () => { settingsOffer = null; renderNotice(); } }, 'Not now')));
+      el('button', { class: 'linklike', onclick: () => { settingsOffer = null; renderNotice(); } }, 'Not now')),
+  ];
 }
 
 // Applying the parent settings fix to locations inside others, or removing it, in the panel at the bottom: an

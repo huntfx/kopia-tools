@@ -8,6 +8,7 @@ import { settingsStatus, settingsWarning } from './schedules.js';
 import { api, notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
 import { beingDeleted, beingPinned, confirmPin, restoreItem, showInExplorer } from './jobs.js';
+import { LAST_GOOD, failingWarning, lastGoodStatus } from './lastgood.js';
 import { compactFolder, diskText, joinRel, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
 import { render } from './render.js';
 import { KEEP_KINDS, PIN_ICON, openHistory, stepChange } from './snapshots.js';
@@ -155,7 +156,8 @@ export function renderMain() {
         here ? el('span', {}, el('b', {}, formatSize(here.size))) : null,
         here ? el('span', {}, plural(here.files, 'file')) : null,
         state.scope ? null : el('span', {}, `${diskText(selected.total)} on disk`),
-        settingsStatus(loc))),
+        settingsStatus(loc),
+        lastGoodStatus(loc))),
     filterControls(selected));
 
   // The snapshot, with the folder as it was in it, to restore: its own modified time is in the listing of the
@@ -177,7 +179,7 @@ export function renderMain() {
   // then, its size across every snapshot, then what changed in it, which can be long, and where the changes
   // happen. The snapshots themselves are on the right.
   // The size chart isn't there with too little to chart, such as a single snapshot
-  main.replaceChildren(...[head, settingsWarning(loc), snapshot, renderSnapshotContents(loc, selected), renderSizeChart(loc),
+  main.replaceChildren(...[head, settingsWarning(loc), failingWarning(loc), snapshot, renderSnapshotContents(loc, selected), renderSizeChart(loc),
     renderChanges(loc, selected), renderChurn(loc)].filter(Boolean));
 }
 
@@ -306,7 +308,10 @@ function snapshotTags(loc, snap) {
     snap.incomplete ? el('span', { class: 'badge' }, isCancelled(snap) ? 'Cancelled' : 'In progress') : null,
     reasons.map(([kind, n]) => el('span', { class: `keep-tag ${kind}`, title: `Kept by kopia's retention policy as ${words[kind]} #${n}` }, `${kind}-${n}`)),
     (snap.pins || []).map(pin => el('button', {
-      class: 'keep-tag pinned', disabled: busy, title: 'Pinned, so kopia\'s retention policy never deletes it - click to remove the pin',
+      class: 'keep-tag pinned', disabled: busy,
+      title: pin === LAST_GOOD
+        ? 'Pinned as the latest good snapshot, so kopia\'s retention policy never deletes it, until the pin moves on to a newer one without missing files - click to remove the pin'
+        : 'Pinned, so kopia\'s retention policy never deletes it - click to remove the pin',
       onclick: () => confirmPin(loc, snap, [pin]),
     }, PIN_ICON(), pin)),
     snap.incomplete ? null : el('button', {

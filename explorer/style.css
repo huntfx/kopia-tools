@@ -521,6 +521,7 @@ th[aria-sort] { color: var(--ink); }
 .notice h2 { margin: 0 0 6px; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--warn-line); }
 .notice p { margin: 0 0 8px; color: var(--ink-2); }
 .notice .actions { display: flex; align-items: center; gap: 12px; }
+.notice > div + div { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--warn-line); }
 /* Backups, restores and deletions, in a panel at the bottom right: each with its progress, then how it went */
 .jobs {
   max-height: 50vh; overflow-y: auto;

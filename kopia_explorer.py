@@ -138,6 +138,7 @@ class Repository:
         self.snapshots = {}   # id -> kopia's snapshot JSON, for diffs and downloads
         self.ignores = {}     # source -> its ignore rules, read once
         self.progress = {}    # How working out storage stats is getting on, for the page to show
+        self.renames = {}     # old id -> new id, for snapshots pinned or unpinned, for the page to follow them
         self.info = self.read_info()
 
     @staticmethod
@@ -165,6 +166,13 @@ class Repository:
             # When they were read, so the page knows which backups and deletes since then it still has to apply
             read = time.time()
             snapshots = list_snapshots(include_incomplete=True)
+            # Last good pins move on to snapshots made since, which saves both again under new IDs
+            if moved := self.move_last_good(snapshots):
+                snapshots = list_snapshots(include_incomplete=True)
+                fresh = {same_snapshot(s): s for s in snapshots}
+                for old in moved:
+                    if (new := fresh.get(same_snapshot(old))) and new['id'] != old['id']:
+                        self.renamed(old['id'], new)
             by_source = {}
             for snap in snapshots:
                 by_source.setdefault(snap['source']['path'], []).append(snap)
@@ -192,7 +200,7 @@ class Repository:
                 stats = self.stats.get(source, {}).get('stats', {})
                 result.append({'path': source, 'host': self.info['host'], 'user': self.info['user'],
                                'snapshots': [snapshot_info(s, stats.get(s['id'])) for s in snaps]})
-            return {'repository': self.info, 'locations': result, 'read': read, 'working': self.working()}
+            return {'repository': self.info, 'locations': result, 'read': read, 'working': self.working(), 'renamed': self.renames}
 
     def working(self):
         return bool(self.stats_thread and self.stats_thread.is_alive())
@@ -239,20 +247,56 @@ class Repository:
                 fresh = snap
             else:
                 kopia('snapshot', 'pin', snapshot_id, *[f'--add={p}' for p in add], *[f'--remove={p}' for p in remove])
-                source = snap['source']['path']
-                fresh = next(s for s in list_snapshots(source) if s['source'] == snap['source']
-                             and s['startTime'] == snap['startTime'] and s['rootEntry']['obj'] == snap['rootEntry']['obj'])
-                del self.snapshots[snapshot_id]
-                self.snapshots[fresh['id']] = fresh
-                known = self.stats.get(source)
-                if known and snapshot_id in known['ids']:
-                    known['ids'] = sorted(fresh['id'] if i == snapshot_id else i for i in known['ids'])
-                    known['stats'][fresh['id']] = known['stats'].pop(snapshot_id, None) or {}
-                    self.save_stats()
-                for cache in (diff_cache, dates_cache):
-                    cache.rename(snapshot_id, fresh['id'])
+                fresh = next(s for s in list_snapshots(snap['source']['path']) if same_snapshot(s) == same_snapshot(snap))
+                self.renamed(snapshot_id, fresh)
             stats = self.stats.get(snap['source']['path'], {}).get('stats', {})
             return snapshot_info(fresh, stats.get(fresh['id']))
+
+    def renamed(self, old_id, fresh):
+        """A snapshot saved again under a new ID, as pinning or unpinning does: its storage stats, diffs and dates go
+        with it, as they haven't changed, rather than being worked out again, and the page is told, to follow it"""
+        self.snapshots.pop(old_id, None)
+        self.snapshots[fresh['id']] = fresh
+        known = self.stats.get(fresh['source']['path'])
+        if known and old_id in known['ids']:
+            known['ids'] = sorted(fresh['id'] if i == old_id else i for i in known['ids'])
+            known['stats'][fresh['id']] = known['stats'].pop(old_id, None) or {}
+            self.save_stats()
+        for cache in (diff_cache, dates_cache):
+            cache.rename(old_id, fresh['id'])
+        # Ones renamed before lead to the newest ID
+        for old, new in self.renames.items():
+            if new == old_id:
+                self.renames[old] = fresh['id']
+        self.renames[old_id] = fresh['id']
+
+    def move_last_good(self, snapshots):
+        """Move each location's last good pin on to its newest good snapshot, when it's newer than the one pinned:
+        pinned there first, so it's never without one, then taken off the others. Returns the snapshots pinned or
+        unpinned, which kopia has saved again under new IDs."""
+        by_source = {}
+        for snap in snapshots:
+            by_source.setdefault(snap['source']['path'], []).append(snap)
+        moved = []
+        for source, snaps in by_source.items():
+            pinned = [s for s in snaps if LAST_GOOD in (s.get('pins') or [])]
+            newest = max((s for s in snaps if is_good(s)), key=lambda s: s['startTime'], default=None)
+            if not pinned or not newest or pinned == [newest] or any(s['startTime'] > newest['startTime'] for s in pinned):
+                continue
+            # Not while the page is pinning or deleting one of them itself
+            if any(being_pinned(s['id']) or being_deleted(s['id']) for s in [newest, *pinned]):
+                continue
+            old = [s for s in pinned if s is not newest]
+            try:
+                if newest not in pinned:
+                    kopia('snapshot', 'pin', newest['id'], f'--add={LAST_GOOD}')
+                    moved.append(newest)
+                kopia('snapshot', 'pin', *[s['id'] for s in old], f'--remove={LAST_GOOD}')
+                moved.extend(old)
+                print(f'Moved the last good pin of {source} on to its snapshot of {newest["startTime"]}', flush=True)
+            except RuntimeError as e:
+                print(f'Couldn\'t move the last good pin of {source}: {kopia_reason(e)}', flush=True)
+        return moved
 
     def ignore(self, source):
         """The ignore rules for a source, from its policy and the .kopiaignore files on disk, read once
@@ -261,6 +305,21 @@ class Repository:
             policy = pool.submit(lambda: json.loads(kopia('policy', 'show', source, '--json')))
             self.ignores.setdefault(source, KopiaIgnore(source, policy))
         return self.ignores[source]
+
+
+# A pin that moves on to each new good snapshot of a location, so its last good one is kept however many
+# backups since have had errors, and only until there's a newer one
+LAST_GOOD = 'last-good'
+
+
+def is_good(snap):
+    """Whether a snapshot is finished, with everything read"""
+    return not snap.get('incomplete') and not snap['rootEntry'].get('summ', {}).get('numFailed', 0)
+
+
+def same_snapshot(snap):
+    """What stays the same when kopia saves a snapshot again under a new ID"""
+    return snap['source']['path'], snap['startTime'], snap['rootEntry']['obj']
 
 
 def source_stats(source):

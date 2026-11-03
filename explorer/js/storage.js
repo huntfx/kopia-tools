@@ -1,11 +1,11 @@
 // The backup locations and their snapshots: reading them, keeping them up to date, and finding things in them
 import { DATA, api, failures, redrawSoon, showProgress } from './data.js';
 import { el, formatFull, listOf, plural } from './format.js';
-import { jobList } from './jobs.js';
+import { jobList, renderNotice } from './jobs.js';
 import { render } from './render.js';
 import { OVERDUE, loadAllSchedules, nextScheduled } from './schedules.js';
 import { buildSidebarTree, forgetExactSize, rescaleTree } from './sidebar.js';
-import { navigate, state, ui } from './state.js';
+import { navigate, state, ui, writeHash } from './state.js';
 
 // Backups and deletes that finished after the snapshots were last read, by the server's clock, applied on
 // top of them: a deleted snapshot taken out, and a new one put in from what kopia said when it made it
@@ -77,11 +77,30 @@ export function snapshotsChanged() {
     if ([...url.matchAll(/[?&](?:from|to)=([0-9a-f]+)/g)].some(m => !known.has(m[1]))) failures.delete(url);
   }
   showProgress();
+  renderNotice();
   const gone = id => id && !known.has(id);
   if (gone(state.snapshot) || gone(state.compare)) {
     return navigate({ snapshot: gone(state.snapshot) ? null : state.snapshot, compare: gone(state.compare) ? null : state.compare }, true);
   }
   render();
+}
+
+// Kopia saves a snapshot again under a new ID when it's pinned or unpinned: what's loaded or picked for it
+// follows it there
+export function followRenamed(snap, id) {
+  const old = snap.id;
+  for (const cache of [DATA.diffs, DATA.dates]) {
+    for (const key of Object.keys(cache).filter(k => k.split('..').includes(old))) {
+      cache[key.split('..').map(part => (part === old ? id : part)).join('..')] = cache[key];
+      delete cache[key];
+    }
+  }
+  snap.id = id;
+  if (state.snapshot === old || state.compare === old) {
+    if (state.snapshot === old) state.snapshot = id;
+    if (state.compare === old) state.compare = id;
+    writeHash(true);
+  }
 }
 
 // Read the snapshots again, quietly, as a backup has made one or one's been deleted. Each location's list is
@@ -106,7 +125,7 @@ export function refreshStorage() {
       try {
         const response = await fetch('/api/storage');
         if (!response.ok) return;
-        const { locations, read, working } = await response.json();
+        const { locations, read, working, renamed } = await response.json();
         let added = false;
         for (const fresh of locations) {
           const loc = storage.find(l => l.path === fresh.path);
@@ -115,6 +134,10 @@ export function refreshStorage() {
             storage.push(fresh);
             added = true;
             continue;
+          }
+          // Ones the server pinned or unpinned, such as moving a last good pin, are followed to their new IDs
+          for (const snap of loc.snapshots) {
+            if (renamed[snap.id]) followRenamed(snap, renamed[snap.id]);
           }
           const known = new Map(loc.snapshots.map(s => [s.id, s]));
           loc.snapshots = fresh.snapshots.map(s => Object.assign(known.get(s.id) || {}, s));
