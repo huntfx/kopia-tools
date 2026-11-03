@@ -1,11 +1,11 @@
 // Restores, backups, deletes and settings changes, which run on the server, and the panel at the bottom that
 // follows them
-import { api, redrawSoon } from './data.js';
+import { DATA, api, redrawSoon } from './data.js';
 import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
 import { render } from './render.js';
 import { schedules } from './schedules.js';
 import { KEEP_KINDS } from './snapshots.js';
-import { navigate, state } from './state.js';
+import { navigate, state, writeHash } from './state.js';
 import { applyJobs, isCancelled, latest, refreshStorage, snapshotsChanged, storage } from './storage.js';
 
 // Restores and backups run on the server, and the panel at the bottom follows them. A restore asks where in
@@ -140,6 +140,48 @@ export function confirmDelete(loc, snap, rel, isFolder) {
   document.body.append(dialog);
   dialog.showModal();
   cancel.focus();
+}
+
+// Pin a snapshot, so kopia's retention policy never deletes it, or unpin it. Kopia saves it again under a new
+// ID, so it's kept as the same object with that ID, and what's loaded or picked for it follows it there.
+// Meanwhile it can't be deleted, which kopia would try by its old ID.
+const pinning = new Set();
+
+export const beingPinned = snap => pinning.has(snap.id);
+
+export async function togglePin(snap) {
+  pinning.add(snap.id);
+  render();
+  let info;
+  try {
+    info = await api.post('/api/snapshot/pin', { id: snap.id, pinned: !snap.pins?.length });
+  } catch (error) {
+    pinning.delete(snap.id);
+    render();
+    const ok = el('button', { class: 'btn', onclick: () => dialog.close() }, 'OK');
+    const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
+      el('h2', { id: 'confirm-title' }, `Couldn't ${snap.pins?.length ? 'unpin' : 'pin'} this snapshot`),
+      el('p', {}, error instanceof TypeError ? 'Can\'t reach the server.' : error.message),
+      el('div', { class: 'actions' }, ok));
+    dialog.addEventListener('close', () => dialog.remove());
+    document.body.append(dialog);
+    dialog.showModal();
+    ok.focus();
+    return;
+  }
+  const old = snap.id;
+  pinning.delete(old);
+  for (const cache of [DATA.diffs, DATA.dates]) {
+    for (const key of Object.keys(cache).filter(k => k.split('..').includes(old))) {
+      cache[key.split('..').map(id => (id === old ? info.id : id)).join('..')] = cache[key];
+      delete cache[key];
+    }
+  }
+  Object.assign(snap, info);
+  if (state.snapshot === old) state.snapshot = info.id;
+  if (state.compare === old) state.compare = info.id;
+  writeHash(true);
+  snapshotsChanged();
 }
 
 // Open something in Windows Explorer, via the server; if that fails, the button says why

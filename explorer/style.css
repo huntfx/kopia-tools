@@ -361,6 +361,20 @@ th[aria-sort] { color: var(--ink); }
 .snaprow .disk ~ .delete { margin-left: 6px; }
 .snaprow:hover .delete, .snaprow .delete:focus-visible { visibility: visible; }
 .snaprow .delete:hover { color: var(--removed); }
+/* Pinning one: a pin before the cross, there only while pointing at the row, unless it's pinned */
+.snaprow .pin {
+  flex: none; display: flex; margin-left: auto; padding: 0 2px; border: 0; background: none; color: var(--muted);
+  cursor: pointer; visibility: hidden;
+}
+.snaprow .pin svg { fill: none; }
+.snaprow .disk ~ .pin { margin-left: 6px; }
+.snaprow .pin ~ .delete { margin-left: 4px; }
+.snaprow:hover .pin, .snaprow .pin:focus-visible, .snaprow .pin.pinned { visibility: visible; }
+.snaprow .pin:hover, .snaprow .pin.pinned { color: var(--accent); }
+.snaprow .pin.pinned svg { fill: currentColor; }
+.snaprow .pin:disabled, .snaprow .delete:disabled { opacity: 0.5; cursor: default; }
+.snaprow .pin:disabled { visibility: visible; }
+.snaprow .delete:disabled:hover { color: var(--muted); }
 
 /* Asking before something that can't be undone */
 .confirm {

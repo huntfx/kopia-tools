@@ -83,6 +83,15 @@ class DiskCache:
             self.locks.pop(key, None)
         return value
 
+    def rename(self, old, new):
+        """For a snapshot saved again under a new ID, such as when it's pinned: what's cached under its old one,
+        which is still true of it, moves to its new one."""
+        for path in self.folder.glob(f'*{old}*.json'):
+            try:
+                path.replace(path.with_name(path.name.replace(old, new)))
+            except OSError:
+                pass
+
     @staticmethod
     def read(path):
         # Windows won't open a file while it's being replaced, so that's given a moment
@@ -104,6 +113,9 @@ class DiskCache:
         # Still in use: it's already there, so this copy isn't needed
         partial.unlink(missing_ok=True)
 
+
+# What a snapshot's pinned as, which KopiaUI pins them as too
+PIN = 'do-not-delete'
 
 diff_cache = DiskCache('diffs')
 listing_cache = DiskCache('listings')
@@ -127,6 +139,7 @@ class Repository:
         self.snapshots = {}   # id -> kopia's snapshot JSON, for diffs and downloads
         self.ignores = {}     # source -> its ignore rules, read once
         self.progress = {}    # How working out storage stats is getting on, for the page to show
+        self.pinning = set()  # Snapshots being pinned or unpinned, by ID, which can't be deleted meanwhile
         self.info = self.read_info()
 
     @staticmethod
@@ -200,17 +213,58 @@ class Repository:
                 except Exception as e:
                     print(f'  {source}: {kopia_reason(e)}', flush=True)
                 self.progress['done'] += 1
-            # Written to a temporary file first, so a full disk can't leave it half written
-            partial = self.stats_path.with_suffix('.tmp')
-            try:
-                partial.write_text(json.dumps(dict(self.stats), separators=(',', ':')), encoding='utf-8')
-                DiskCache.replace(partial, self.stats_path)
-            except OSError as e:
-                partial.unlink(missing_ok=True)
-                print(f'  couldn\'t save them: {e}', flush=True)
+            self.save_stats()
             print(f'  done in {time.time() - started:.0f}s', flush=True)
         finally:
             self.progress = {}
+
+    def save_stats(self):
+        # Written to a temporary file first, so a full disk can't leave it half written
+        partial = self.stats_path.with_suffix('.tmp')
+        try:
+            partial.write_text(json.dumps(dict(self.stats), separators=(',', ':')), encoding='utf-8')
+            DiskCache.replace(partial, self.stats_path)
+        except OSError as e:
+            partial.unlink(missing_ok=True)
+            print(f'  couldn\'t save storage stats: {e}', flush=True)
+
+    def set_pinned(self, snapshot_id, pinned):
+        """Pin a snapshot, so kopia's retention policy never deletes it, as KopiaUI does, or take all its pins
+        off. Kopia saves it again with a new ID, so its storage stats, diffs and dates go with it, as they
+        haven't changed, rather than being worked out again. Returns it as the page wants it."""
+        if being_deleted(snapshot_id):
+            raise BusyError('That snapshot is being deleted')
+        # Marked first, so it can't be deleted meanwhile, which kopia would try by its old ID
+        self.pinning.add(snapshot_id)
+        try:
+            return self.change_pins(snapshot_id, pinned)
+        finally:
+            self.pinning.discard(snapshot_id)
+
+    def change_pins(self, snapshot_id, pinned):
+        with self.lock:
+            snap = self.snapshots[snapshot_id]
+            if snap.get('incomplete'):
+                raise BusyError('Only finished snapshots can be pinned')
+            pins = snap.get('pins') or []
+            if pinned == bool(pins):
+                fresh = snap
+            else:
+                kopia('snapshot', 'pin', snapshot_id, *([f'--add={PIN}'] if pinned else [f'--remove={p}' for p in pins]))
+                source = snap['source']['path']
+                fresh = next(s for s in list_snapshots(source) if s['source'] == snap['source']
+                             and s['startTime'] == snap['startTime'] and s['rootEntry']['obj'] == snap['rootEntry']['obj'])
+                del self.snapshots[snapshot_id]
+                self.snapshots[fresh['id']] = fresh
+                known = self.stats.get(source)
+                if known and snapshot_id in known['ids']:
+                    known['ids'] = sorted(fresh['id'] if i == snapshot_id else i for i in known['ids'])
+                    known['stats'][fresh['id']] = known['stats'].pop(snapshot_id, None) or {}
+                    self.save_stats()
+                for cache in (diff_cache, dates_cache):
+                    cache.rename(snapshot_id, fresh['id'])
+            stats = self.stats.get(snap['source']['path'], {}).get('stats', {})
+            return snapshot_info(fresh, stats.get(fresh['id']))
 
     def ignore(self, source):
         """The ignore rules for a source, from its policy and the .kopiaignore files on disk, read once
@@ -248,6 +302,8 @@ def snapshot_info(snap, stats):
         'total': None if unknown else (stats.get('runningTotal') or {}).get('packedContentBytes', 0),
         # Why kopia's retention policy keeps it, such as latest-1 or daily-3
         'keep': snap.get('retentionReason') or [],
+        # Names it's pinned under, which stop kopia's retention policy deleting it
+        'pins': snap.get('pins') or [],
     }
 
 
@@ -1036,6 +1092,8 @@ def start_delete(snapshot_id):
         raise BusyError('That snapshot is still being made')
     if being_deleted(snapshot_id):
         raise BusyError('That snapshot is already being deleted')
+    if snapshot_id in repository.pinning:
+        raise BusyError('That snapshot is being pinned or unpinned')
     job = {
         'id': next(job_ids), 'kind': 'delete', 'name': snap['source']['path'], 'source': snap['source']['path'],
         'snapshot': snapshot_id, 'snapshotTime': snap['startTime'], 'state': 'deleting', 'error': None,
@@ -1172,6 +1230,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(pick_folder())
             if self.path == '/api/snapshot/delete':
                 return self.send_json(start_delete(body['id']))
+            if self.path == '/api/snapshot/pin':
+                return self.send_json(repository.set_pinned(body['id'], bool(body['pinned'])))
             if self.path == '/api/jobs/clear':
                 for job in [j for j in jobs.values() if j['finished']]:
                     del jobs[job['id']]

@@ -2,8 +2,8 @@
 import { compareTarget, ignoredReason, isGone, kindCount } from './changes.js';
 import { api, pending } from './data.js';
 import { ofType, typeFiles } from './filetypes.js';
-import { el, fillColour, formatFull, formatSize, gradientPositions, gradientRgb, plural, signedSize, timeAgo } from './format.js';
-import { backupButton, beingDeleted, confirmDelete } from './jobs.js';
+import { el, fillColour, formatFull, formatSize, gradientPositions, gradientRgb, listOf, plural, signedSize, timeAgo } from './format.js';
+import { backupButton, beingDeleted, beingPinned, confirmDelete, togglePin } from './jobs.js';
 import { scheduleLine, separateLine } from './schedules.js';
 import { diskText, locationsBelow, sidebarSnapshot, treeNodes } from './sidebar.js';
 import { navigate, state, ui } from './state.js';
@@ -117,7 +117,18 @@ export function isFolderPath(loc, rel) {
 // that keeps it longest decides how long it stays, so that's shown, with all of them on hover.
 export const KEEP_KINDS = [['annual', 'yearly'], ['monthly', 'monthly'], ['weekly', 'weekly'], ['daily', 'daily'], ['hourly', 'hourly'], ['latest', 'as recent']];
 
+// A pushpin for the pin button, drawn in the text's colour, filled in once it's pinned
+const PIN_ICON = () => {
+  const icon = el('span', { 'aria-hidden': 'true' });
+  icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16"><path d="M5.5 1.5h5l-1 4.5 2.5 2.5v1h-8v-1L6.5 6z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M8 9.5v5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+  return icon;
+};
+
 export function keptFor(snap) {
+  // Pinned ones are kept whatever the retention policy says
+  if (snap.pins?.length) {
+    return el('span', { class: 'keep', title: `Pinned as ${listOf(snap.pins)}, so kopia's retention policy never deletes it` }, 'pinned');
+  }
   if (!snap.keep?.length) return null;
   const reasons = snap.keep.map(r => r.split('-'));
   const [kind, word] = KEEP_KINDS.find(([k]) => reasons.some(([r]) => r === k)) || [];
@@ -246,6 +257,7 @@ function snapshotList(loc, target, isFolder) {
   const row = (snap, change, extraClass = '') => {
     const at = complete.indexOf(snap);
     const deleting = beingDeleted(snap);
+    const pinningIt = beingPinned(snap);
     const classes = ['snaprow', extraClass, deleting ? 'deleting' : '',
       snap === selected ? 'viewing' : '', snap === other ? 'compared' : '',
       // Taken after the as-of date
@@ -281,9 +293,18 @@ function snapshotList(loc, target, isFolder) {
           : el('span', { class: 'disk', title: 'Added on disk by this snapshot, for the whole location' },
             snap.onDisk ? el('span', { class: 'swatch', style: `background:${fillColour(gradientRgb(positions.get(snap.onDisk)))}` }) : null,
             `+${formatSize(snap.onDisk)}`),
-        // Not one still being made, which kopia replaces as it goes
+        // Finished ones can be pinned, with a pin that stays there once they are
+        !deleting && !snap.incomplete ? el('button', {
+          class: `pin${snap.pins?.length ? ' pinned' : ''}`, disabled: pinningIt,
+          'aria-label': snap.pins?.length ? 'Unpin this snapshot' : 'Pin this snapshot',
+          title: pinningIt ? `${snap.pins?.length ? 'Unpinning' : 'Pinning'}…` : snap.pins?.length ? 'Unpin this snapshot' : 'Pin this snapshot',
+          onclick: event => { event.stopPropagation(); togglePin(snap); },
+        }, PIN_ICON()) : null,
+        // Not one still being made, which kopia replaces as it goes, nor while it's being pinned, as kopia gives
+        // it a new ID
         !deleting && (!snap.incomplete || isCancelled(snap)) ? el('button', {
-          class: 'delete', 'aria-label': 'Delete this snapshot', title: 'Delete this snapshot…',
+          class: 'delete', disabled: pinningIt, 'aria-label': 'Delete this snapshot',
+          title: pinningIt ? `Wait until it's ${snap.pins?.length ? 'unpinned' : 'pinned'}` : 'Delete this snapshot…',
           onclick: event => { event.stopPropagation(); confirmDelete(loc, snap, rel, isFolder); },
         }, '×') : null),
       el('div', { class: 'what' },
