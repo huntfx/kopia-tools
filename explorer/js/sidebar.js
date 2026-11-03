@@ -1,6 +1,6 @@
 // The sidebar: the tree of backup locations, or them listed by name, size, or when they were last or are next backed up
 import { DATA, repositoryTitle } from './data.js';
-import { el, formatFull, formatSize, gradientPositions, gradientRgb, textColour, timeAgo } from './format.js';
+import { el, formatFull, formatSize, gradientPositions, gradientRgb, textColour, timeAgo, timeFrom } from './format.js';
 import { render } from './render.js';
 import { renderMatches, sidebarFilter } from './search.js';
 import { navigate, state } from './state.js';
@@ -247,11 +247,13 @@ export function nextBackedUp(loc) {
   return nextScheduled(loc);
 }
 
-// Listed by when they were last or will next be backed up, a location shows that in place of its size
+// Listed by when they were last or will next be backed up, a location shows that in place of its size: how
+// long ago, or with an as-of date, how long before or after it, so it can't be taken for now
 function whenCell(loc) {
+  const when = time => (state.asOf ? timeFrom(time, state.asOf) : timeAgo(time));
   if (sidebarOrder === 'last') {
     const snap = lastBackedUp(loc);
-    return snap ? el('span', { class: 'total', title: `${state.asOf ? 'Snapshot' : 'Latest'} ${formatFull(snap.time)}` }, timeAgo(snap.time))
+    return snap ? el('span', { class: 'total', title: `${state.asOf ? 'Snapshot' : 'Latest'} ${formatFull(snap.time)}` }, when(snap.time))
       : el('span', { class: 'total muted' }, state.asOf ? 'None that old' : 'No snapshots');
   }
   const next = nextBackedUp(loc);
@@ -262,7 +264,7 @@ function whenCell(loc) {
       : el('span', { class: 'total muted', title: schedule ? scheduleText(schedule) : 'Couldn\'t read its schedule' }, schedule ? 'Manual' : '?');
   }
   if (state.asOf || next > Date.now()) {
-    return el('span', { class: 'total', title: `Next snapshot ${formatFull(next)}${state.asOf ? '' : ` (${scheduleText(schedule).toLowerCase()})`}` }, timeAgo(next));
+    return el('span', { class: 'total', title: `Next snapshot ${formatFull(next)}${state.asOf ? '' : ` (${scheduleText(schedule).toLowerCase()})`}` }, when(next));
   }
   // Long past due means kopia's scheduler isn't running, such as KopiaUI being closed
   return Date.now() - next >= OVERDUE && !backingUpNow(loc)

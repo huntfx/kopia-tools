@@ -29,6 +29,17 @@ export function timeAgo(iso) {
   return 'just now';
 }
 
+// How long before or after another time something was, like "12 hours before" or "2 days after", in the same
+// units as timeAgo
+export function timeFrom(iso, from) {
+  const seconds = (new Date(iso) - new Date(from)) / 1000;
+  const units = [['year', 31536000], ['month', 2592000], ['week', 604800], ['day', 86400], ['hour', 3600], ['minute', 60]];
+  for (const [unit, size] of units) {
+    if (Math.abs(seconds) >= size) return `${plural(Math.round(Math.abs(seconds) / size), unit)} ${seconds < 0 ? 'before' : 'after'}`;
+  }
+  return 'same time';
+}
+
 export const formatFull = iso => fullFormat.format(new Date(iso));
 
 export const shortId = id => id.slice(0, 8);
