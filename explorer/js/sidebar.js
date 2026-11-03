@@ -357,8 +357,14 @@ export function renderLocations() {
   if (sidebarFilter) return renderMatches();
   // The sizes, and so their colours, are as of the as-of date
   rescaleTree();
-  // The line under the heading is only for filtering; the PC's page says how many locations and how much
-  document.getElementById('sum').hidden = true;
+  // The line under the heading is for filtering, or says the sidebar's as of a date, as its sizes and snapshot
+  // times are; the PC's page says how many locations and how much
+  const sum = document.getElementById('sum');
+  sum.hidden = !state.asOf;
+  if (state.asOf) {
+    sum.replaceChildren('As of ', el('b', {}, formatFull(state.asOf)), ' · ',
+      el('button', { class: 'linklike', onclick: () => navigate({ asOf: null }) }, 'Now'));
+  }
   const rows = [];
   // In the list the direction is for its order, so what's inside a location is always A–Z
   const nameDirection = sidebarView === 'tree' && treeReversed ? -1 : 1;
