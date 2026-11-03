@@ -101,7 +101,8 @@ export function renderSizeChart(loc) {
 }
 
 // The size chart by file type instead: how much of each type was in the folder in scope at each snapshot,
-// counting everything inside it. Narrowed to a type, it's just that one.
+// counting everything inside it. Narrowed to a type, it's just that one. Double-clicking a type's band narrows the
+// page to it, like its row in File types, and narrowed, goes back to every type.
 function renderTypesChart(loc, complete, panel) {
   const objs = complete.map(snap => folderObj(snap, state.scope));
   if (objs.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
@@ -118,7 +119,12 @@ function renderTypesChart(loc, complete, panel) {
     const values = [...tallies.map(tally => tally[extension]?.[countFiles ? 0 : 1] || 0)];
     values.push(values[values.length - 1]);
     const name = typeName(extension);
-    return { name, title: extension ? `${extension} files` : 'Files with no extension', values, lastAt, hint: null };
+    const picked = extension === state.type;
+    return {
+      name, title: extension ? `${extension} files` : 'Files with no extension', values, lastAt,
+      hint: picked ? 'Double-click to show every type of file again' : `Double-click to show only ${typeFiles(extension)} on this page`,
+      open: () => navigate({ type: picked ? null : extension }),
+    };
   });
 
   return stackedChart({
