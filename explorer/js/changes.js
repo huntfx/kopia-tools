@@ -1,7 +1,7 @@
 // What changed between two snapshots, as a tree
 import { api, notLoaded } from './data.js';
 import { appendAll, changeRgb, el, formatFull, formatSize, gradientPositions, plural, shortId, signedSize, textColour, timeAgo } from './format.js';
-import { ofType, typeFiles } from './filetypes.js';
+import { inFilter, matchingFiles, patterns } from './filter.js';
 import { openHistory } from './snapshots.js';
 import { navigate, state } from './state.js';
 import { unfinished } from './storage.js';
@@ -159,7 +159,7 @@ export function compareSelect(complete, selected, other) {
 }
 
 // The snapshot the selected one is compared with: the chosen one, or by default the nearest earlier one
-// with changes in the folder in scope since, to files of the type the page is narrowed to if it is, so there's
+// with changes in the folder in scope since, to files the filter lets through if there is one, so there's
 // something to see. Steps whose changes aren't loaded yet count if the snapshots differ at all. With no changes
 // since the oldest, it's the oldest.
 export function compareTarget(loc, selected) {
@@ -173,7 +173,7 @@ export function compareTarget(loc, selected) {
     const [older, newer] = [complete[i - 1], complete[i]];
     if (older.root === newer.root) continue;
     const list = api.diff(older.id, newer.id);
-    if (!list || list.some(c => c.p.startsWith(prefix) && ofType(c.p))) return older;
+    if (!list || list.some(c => c.p.startsWith(prefix) && inFilter(c.p))) return older;
   }
   return complete.indexOf(selected) > 0 ? complete[0] : undefined;
 }
@@ -206,16 +206,16 @@ export function renderChanges(loc, selected) {
     return panel;
   }
 
-  // Only what's inside the folder in scope, with paths starting inside it, and only files of the type the page
-  // is narrowed to, if it is
+  // Only what's inside the folder in scope, with paths starting inside it, and only files the filter lets
+  // through, if there is one
   const prefix = state.scope ? `${state.scope}/` : '';
   const inScope = (prefix
     ? changes.filter(c => c.p.startsWith(prefix) && c.p.length > prefix.length).map(c => ({ ...c, p: c.p.slice(prefix.length) }))
-    : changes).filter(c => ofType(c.p));
+    : changes).filter(c => inFilter(prefix + c.p));
   // Files whose modified date changed but not their contents, which the server finds, as kopia's diff only
   // counts them; like the other kinds, they're counted whether or not they're shown
   const dates = dateOnlyChanges(older, newer, state.scope, new Set(inScope.map(c => c.p)));
-  const scoped = [...inScope, ...dates.found.filter(c => ofType(c.p))];
+  const scoped = [...inScope, ...dates.found.filter(c => inFilter(prefix + c.p))];
   const tree = buildTree(scoped);
   // Files that only existed between the snapshots compared, which are shown greyed out
   const transient = tree.counts['*'];
@@ -238,15 +238,8 @@ export function renderChanges(loc, selected) {
   el('button', {
     class: 'c-ignored', 'aria-pressed': String(state.filters.i), onclick: () => toggle('i'), title: 'Show ignored',
   }, '⊘'));
-  const text = el('input', {
-    class: 'filter-text', placeholder: 'Filter paths…', value: state.filterText, 'aria-label': 'Filter paths',
-    oninput: event => { state.filterText = event.target.value; treeBox.replaceChildren(...topFolder(filtered())); },
-  });
   const treeBox = el('div', { class: 'tree' });
-  const filtered = () => {
-    const needle = state.filterText.toLowerCase();
-    return buildTree(scoped.filter(c => state.filters[c.k === 'd' ? '~' : c.k] && (!needle || c.p.toLowerCase().includes(needle))));
-  };
+  const filtered = () => buildTree(scoped.filter(c => state.filters[c.k === 'd' ? '~' : c.k]));
   const visible = filtered();
   // Everything sits under the folder being looked at, so collapsing that collapses it all
   const folderName = state.scope ? state.scope.split('/').pop() : loc.path.replace(/\\$/, '').split('\\').pop() || loc.path;
@@ -273,7 +266,7 @@ export function renderChanges(loc, selected) {
   treeBox.append(...topFolder(visible));
   if (!visible.children.size) {
     treeBox.append(el('p', { class: 'note' }, scoped.length ? 'Nothing matches the filters.'
-      : state.type != null ? `No ${typeFiles(state.type)} ${state.scope ? 'in this folder ' : ''}changed in this snapshot.`
+      : patterns().length ? `No ${matchingFiles()} ${state.scope ? 'in this folder ' : ''}changed in this snapshot.`
       : state.scope ? 'Nothing in this folder changed in this snapshot.' : 'No changes in this snapshot.'));
   }
 
@@ -285,7 +278,7 @@ export function renderChanges(loc, selected) {
     : identical ? `${plural(identical, 'identical snapshot')} in between skipped.` : null;
   appendAll(panel,
     title(`${formatFull(older.time)} (${timeAgo(older.time)}) → ${formatFull(newer.time)} (${timeAgo(newer.time)})`),
-    el('div', { class: 'changes-head' }, el('div', { class: 'line' }, select, counts, filters, text)),
+    el('div', { class: 'changes-head' }, el('div', { class: 'line' }, select, counts, filters)),
     combined ? el('p', { class: 'note', style: 'margin:-4px 0 10px' }, combined) : null,
     treeBox);
   return panel;

@@ -1,7 +1,8 @@
 // Charts of size, or files, over time, stacked or overlaid
 import { api, notLoaded } from './data.js';
 import { el, formatFull, formatSize, plural, svgEl } from './format.js';
-import { ofType, typeFiles, typeName } from './filetypes.js';
+import { toggleTypeFilter, typeHint, typeName } from './filetypes.js';
+import { filteredCounts, inFilter, matchingFiles, patterns } from './filter.js';
 import { render } from './render.js';
 import { joinRel, locationsBelow, treeNodes } from './sidebar.js';
 import { openHistory } from './snapshots.js';
@@ -55,9 +56,9 @@ export function renderSizeChart(loc) {
   if (sizeByType) return renderTypesChart(loc, complete, panel);
   const listings = complete.map(snap => snapshotListing(snap, state.scope));
   if (listings.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
-  // Narrowed to a type, only files of it, and how much of it each folder had inside
-  const inside = state.type == null ? null
-    : complete.map((snap, j) => (listings[j] === null ? {} : api.typesInside(folderObj(snap, state.scope))));
+  // With a filter, only files it lets through, and how much of them each folder had inside
+  const inside = !patterns().length ? null
+    : complete.map((snap, j) => (listings[j] === null ? {} : api.typesInside(folderObj(snap, state.scope), patterns(), state.scope)));
   if (inside?.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('file types')));
 
   // Each thing in it at each snapshot, holding until the next, then the same now
@@ -68,15 +69,15 @@ export function renderSizeChart(loc) {
     for (const entry of entries || []) {
       // Counting files, a folder's are every one inside it, and a file is one
       const size = !inside ? (!countFiles ? entry.s || 0 : entry.t === 'd' ? entry.f || 0 : 1)
-        : entry.t === 'd' ? inside[j][entry.n]?.[state.type]?.[countFiles ? 0 : 1] || 0
-          : ofType(entry.n) ? (countFiles ? 1 : entry.s || 0) : 0;
+        : entry.t === 'd' ? filteredCounts(inside[j][entry.n])?.[countFiles ? 0 : 1] || 0
+          : inFilter(joinRel(state.scope, entry.n)) ? (countFiles ? 1 : entry.s || 0) : 0;
       if (inside && !size) continue;
       const key = `${entry.t}:${entry.n}`;
       if (!found.has(key)) found.set(key, { entry, values: times.map(() => 0) });
       found.get(key).values[j] = size;
     }
   });
-  if (!found.size) return inside ? panel(el('p', { class: 'note' }, `No ${typeFiles(state.type)} in here at any snapshot.`)) : null;
+  if (!found.size) return inside ? panel(el('p', { class: 'note' }, `No ${matchingFiles()} in here at any snapshot.`)) : null;
   const lastAt = t => Math.max(0, ...times.slice(0, -1).filter(time => time <= t));
   const items = [...found.values()].map(({ entry, values }) => {
     values[values.length - 1] = values[values.length - 2];
@@ -93,7 +94,7 @@ export function renderSizeChart(loc) {
   });
 
   return stackedChart({
-    key: `size:${loc.path}:${state.scope}:${state.type}:${countFiles}`, heading: sizeHeading(), pieHeading: countFiles ? 'Files' : 'Size',
+    key: `size:${loc.path}:${state.scope}:${patterns()}:${countFiles}`, heading: sizeHeading(), pieHeading: countFiles ? 'Files' : 'Size',
     at: viewedAt(complete, loc), what: ['item', 'items'], items, times, now, views: sizeViews(), ...counting(),
     note: countFiles ? 'How many files each folder in here had at each snapshot, counting everything inside it, with each file in here as one.'
       : 'How big each folder and file in here was at each snapshot. kopia only counts space on disk for a whole location, so this is their size rather than what they take up in the repository.',
@@ -101,34 +102,32 @@ export function renderSizeChart(loc) {
 }
 
 // The size chart by file type instead: how much of each type was in the folder in scope at each snapshot,
-// counting everything inside it. Narrowed to a type, it's just that one. Double-clicking a type's band narrows the
-// page to it, like its row in File types, and narrowed, goes back to every type.
+// counting everything inside it. With a filter, only files it lets through count. Double-clicking a type's band
+// adds its extension to the filter, or takes it out, like its row in the Contents box's File types view.
 function renderTypesChart(loc, complete, panel) {
   const objs = complete.map(snap => folderObj(snap, state.scope));
   if (objs.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
   // Not in a snapshot, it had nothing then
-  const tallies = objs.map(obj => (obj === null ? {} : api.types(obj)));
+  const tallies = objs.map(obj => (obj === null ? {} : api.types(obj, patterns(), state.scope)));
   if (tallies.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('file types')));
 
   const now = Date.now();
   const times = [...complete.map(s => Date.parse(s.time)), now];
   const lastAt = t => Math.max(0, ...times.slice(0, -1).filter(time => time <= t));
-  const extensions = [...new Set(tallies.flatMap(Object.keys))].filter(extension => state.type == null || extension === state.type);
-  if (!extensions.length) return state.type == null ? null : panel(el('p', { class: 'note' }, `No ${typeFiles(state.type)} in here at any snapshot.`));
+  const extensions = [...new Set(tallies.flatMap(Object.keys))];
+  if (!extensions.length) return patterns().length ? panel(el('p', { class: 'note' }, `No ${matchingFiles()} in here at any snapshot.`)) : null;
   const items = extensions.map(extension => {
     const values = [...tallies.map(tally => tally[extension]?.[countFiles ? 0 : 1] || 0)];
     values.push(values[values.length - 1]);
     const name = typeName(extension);
-    const picked = extension === state.type;
     return {
       name, title: extension ? `${extension} files` : 'Files with no extension', values, lastAt,
-      hint: picked ? 'Double-click to show every type of file again' : `Double-click to show only ${typeFiles(extension)} on this page`,
-      open: () => navigate({ type: picked ? null : extension }),
+      hint: typeHint(extension, 'Double-click'), open: () => toggleTypeFilter(extension),
     };
   });
 
   return stackedChart({
-    key: `types:${loc.path}:${state.scope}:${state.type}:${countFiles}`, heading: sizeHeading(), pieHeading: countFiles ? 'Files' : 'Size',
+    key: `types:${loc.path}:${state.scope}:${patterns()}:${countFiles}`, heading: sizeHeading(), pieHeading: countFiles ? 'Files' : 'Size',
     at: viewedAt(complete, loc), what: ['type', 'types'], items, times, now, views: sizeViews(), ...counting(),
     note: countFiles ? 'How many files of each type were in here at each snapshot, counting everything inside it.'
       : 'How much of each file type was in here at each snapshot, counting everything inside it. This is their size rather than what they take up in the repository.',

@@ -40,7 +40,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 from urllib.parse import parse_qs, urlparse
 
-from snapshot_diff import ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, kopia, list_snapshots, log_command
+from snapshot_diff import ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, glob_to_regex, kopia, list_snapshots, log_command
 
 PAGE_DIR = Path(__file__).parent / 'explorer'
 # In the temp folder, as it can be thrown away and can get big
@@ -412,73 +412,208 @@ class FileTypes:
     """How many files of each type a folder has and how big they are, counting everything inside it:
     { extension: [files, bytes] }, by the folder's object ID, with '' for files without one. A folder with the
     same ID never changes, so they're kept for good. kopia lists a whole tree in one go far faster than folder by
-    folder, so each tree listed tallies every folder in it, kept in one SQLite file as there are thousands."""
+    folder, so each tree listed tallies every folder in it, kept in one SQLite file as there are thousands.
+    The same listing keeps what's directly in each folder, its files' names and sizes and the folders in it, so
+    the page's filter, counting only files whose paths match, is worked out from those without asking kopia again."""
 
     def __init__(self):
         self.db = sqlite3.connect(CACHE_DIR / 'types.sqlite', check_same_thread=False)
+        # Tallies from before a name starting with a dot, like .gitignore, was its extension are counted again
+        if self.db.execute('PRAGMA user_version').fetchone()[0] < 1:
+            with self.db:
+                self.db.execute('DROP TABLE IF EXISTS tallies')
+                self.db.execute('PRAGMA user_version = 1')
         self.db.execute('CREATE TABLE IF NOT EXISTS tallies (obj TEXT PRIMARY KEY, tally TEXT NOT NULL)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS folders (obj TEXT PRIMARY KEY, entries TEXT NOT NULL)')
         self.db_lock = threading.Lock()
         self.locks = {}
         self.locks_lock = threading.Lock()
         # A big tree takes kopia a while, so only a couple at once
         self.listing = threading.Semaphore(2)
+        # Filtered tallies by folder and filter, for the filters tried lately, which share the folders that didn't
+        # change between snapshots, and what's in folders, read back to work them out
+        self.filtered = {}
+        self.folders = {}
+        self.memory_lock = threading.Lock()
 
-    def get(self, obj):
-        found = self.read(obj)
-        if found is not None:
-            return found
-        # Worked out once at a time, as several requests can want the same one together
+    def get(self, obj, patterns=(), path='', base=None):
+        """Filtered, path is where the folder is in its location, with / separators, and base is the folder being
+        looked at, which patterns look below, the folder itself if not given."""
+        # The same patterns in any order or case are the same filter
+        key = '\n'.join(sorted({p.lower() for p in patterns}))
+        if key:
+            self.listed(obj, lambda: self.entries(obj) is not None)
+            below = '' if base is None else path[len(base):].strip('/')
+            return self.tally_matching(obj, key, name_matcher(key.split('\n')), below)
+        # Folders listed before tallies were counted again only need counting from what's in them
+        if self.read(obj) is None and self.entries(obj) is not None:
+            self.recount(obj)
+        self.listed(obj, lambda: self.read(obj) is not None)
+        return self.read(obj)
+
+    def inside(self, obj, patterns=(), path=''):
+        """Each folder directly inside a folder's tally, by name. Counting the folder tallies everything in it,
+        so they're all known by then."""
+        self.get(obj, patterns, path)
+        return {e['n']: self.get(e['o'], patterns, f'{path}/{e["n"]}' if path else e['n'], path) for e in listing(obj) if e['t'] == 'd'}
+
+    def listed(self, obj, known):
+        """Lists the tree a folder is the top of with kopia, unless what's wanted is known already. Once at a
+        time, as several requests can want the same one together."""
+        if known():
+            return
         with self.locks_lock:
             lock = self.locks.setdefault(obj, threading.Lock())
         with lock:
-            found = self.read(obj)
-            if found is None:
+            if not known():
                 with self.listing:
-                    found = self.count(obj)
+                    self.count(obj)
         with self.locks_lock:
             self.locks.pop(obj, None)
-        return found
-
-    def inside(self, obj):
-        """Each folder directly inside a folder's tally, by name. Counting the folder tallies everything in it,
-        so they're all known by then."""
-        self.get(obj)
-        return {e['n']: self.get(e['o']) for e in listing(obj) if e['t'] == 'd'}
 
     def read(self, obj):
         with self.db_lock:
             row = self.db.execute('SELECT tally FROM tallies WHERE obj = ?', (obj,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def entries(self, obj):
+        """What's directly in a folder: { 'f': [[name, bytes], ...], 'd': [[name, object ID], ...] }"""
+        with self.memory_lock:
+            found = self.folders.get(obj)
+        if found is None:
+            with self.db_lock:
+                row = self.db.execute('SELECT entries FROM folders WHERE obj = ?', (obj,)).fetchone()
+            if row is None:
+                return None
+            found = json.loads(row[0])
+            with self.memory_lock:
+                # Roughly bounded, by starting again once there are a lot
+                if len(self.folders) > 300_000:
+                    self.folders.clear()
+                self.folders[obj] = found
+        return found
+
+    def tally_matching(self, obj, key, matches, path):
+        """Path is where the folder is below the one being looked at"""
+        remembered = (obj, key, path)
+        with self.memory_lock:
+            found = self.filtered.get(remembered)
+        if found is not None:
+            return found
+        entries = self.entries(obj)
+        if entries is None:
+            self.listed(obj, lambda: self.entries(obj) is not None)
+            entries = self.entries(obj)
+        tally = {}
+        folders = f'/{path}/' if path else '/'
+        for name, size in entries['f']:
+            if matches(folders + name):
+                counts = tally.setdefault(extension_of(name), [0, 0])
+                counts[0] += 1
+                counts[1] += size
+        for name, child in entries['d']:
+            for extension, (files, size) in self.tally_matching(child, key, matches, f'{path}/{name}' if path else name).items():
+                counts = tally.setdefault(extension, [0, 0])
+                counts[0] += files
+                counts[1] += size
+        with self.memory_lock:
+            if len(self.filtered) > 500_000:
+                self.filtered.clear()
+            self.filtered[remembered] = tally
+        return tally
+
+    def recount(self, obj):
+        """Tallies a folder and every folder in it from what's in them, as listing it would"""
+        rows = []
+
+        def tally(obj):
+            counts = {}
+            entries = self.entries(obj)
+            for name, size in entries['f']:
+                found = counts.setdefault(extension_of(name), [0, 0])
+                found[0] += 1
+                found[1] += size
+            for _, child in entries['d']:
+                for extension, (files, size) in tally(child).items():
+                    found = counts.setdefault(extension, [0, 0])
+                    found[0] += files
+                    found[1] += size
+            rows.append((obj, json.dumps(counts, separators=(',', ':'))))
+            return counts
+        tally(obj)
+        with self.db_lock, self.db:
+            self.db.executemany('INSERT OR IGNORE INTO tallies VALUES (?, ?)', rows)
+
     def count(self, obj):
         # Each folder by its path inside the tree, '' for the tree itself
-        tallies, objs = {'': {}}, {'': obj}
+        tallies, objs, entries = {'': {}}, {'': obj}, {}
         # Lines are: mode, size, date, time, time zone, object ID, path, with a / after a folder's
         for line in kopia('ls', '-r', '-l', '-o', obj).splitlines():
             parts = line.split(None, 6)
             if len(parts) < 7:
                 continue
-            mode, size, oid, path = parts[0], parts[1], parts[5], parts[6]
+            mode, size, oid, path = parts[0], parts[1], parts[5], parts[6].rstrip('/')
+            parent, _, name = path.rpartition('/')
             if mode.startswith('d'):
-                objs[path.rstrip('/')] = oid
+                objs[path] = oid
+                entries.setdefault(parent, {'f': [], 'd': []})['d'].append([name, oid])
                 continue
             # Files only, not links
             if not mode.startswith('-'):
                 continue
+            size = int(size) if size.isdigit() else 0
+            entries.setdefault(parent, {'f': [], 'd': []})['f'].append([name, size])
+            extension = extension_of(name)
             names = path.split('/')
-            # A name starting with a dot, like .gitignore, has no extension
-            dot = names[-1].rfind('.')
-            extension = names[-1][dot:].lower() if dot > 0 else ''
             for depth in range(len(names)):
                 counts = tallies.setdefault('/'.join(names[:depth]), {}).setdefault(extension, [0, 0])
                 counts[0] += 1
-                counts[1] += int(size) if size.isdigit() else 0
-        rows = [(objs[path], json.dumps(tally, separators=(',', ':'))) for path, tally in tallies.items() if path in objs]
+                counts[1] += size
         # Empty folders have nothing in them to put them in the tallies
-        rows += [(oid, '{}') for path, oid in objs.items() if path not in tallies]
+        compact = {'separators': (',', ':')}
+        rows = [(oid, json.dumps(tallies.get(path, {}), **compact)) for path, oid in objs.items()]
+        folders = [(oid, json.dumps(entries.get(path, {'f': [], 'd': []}), **compact)) for path, oid in objs.items()]
         with self.db_lock, self.db:
             self.db.executemany('INSERT OR IGNORE INTO tallies VALUES (?, ?)', rows)
-        return tallies['']
+            self.db.executemany('INSERT OR IGNORE INTO folders VALUES (?, ?)', folders)
+
+
+def extension_of(name):
+    # A name starting with a dot, like .gitignore, is all extension
+    dot = name.rfind('.')
+    return name[dot:].lower() if dot >= 0 else ''
+
+
+def name_matcher(patterns):
+    """Whether a file gets through the page's filter, as the page tests it, from its path below the folder being
+    looked at, like /Unreal/Unreal.exe: patterns match anywhere in it, so in the file's name or any folder's,
+    ignoring case, with the wildcards of ignore rules, like Unreal/**/*.exe, and / or \\ between names. Those
+    starting with one match from the folder being looked at, like /Unreal.exe. Starting with file: they only
+    match the file's name, and with a / from its start, and with folder: only the folders it's in. ext: matches
+    its extension exactly, like ext:.png, or ext:png, and by itself, files without one. One starting with !
+    leaves out what matches the rest of it instead, so a file has to match one of the others, if there are any,
+    and none of those."""
+    def regexes(found):
+        """Each kind's patterns as one regex, by what they're tested on"""
+        kinds = {}
+        for pattern in found:
+            kind, _, pattern = pattern.partition(':') if pattern.lower().startswith(('ext:', 'file:', 'folder:')) else ('', '', pattern)
+            pattern = pattern.replace('\\', '/')
+            if kind.lower() == 'ext':
+                regex = f'^{glob_to_regex("." + pattern.lstrip("."))}$' if pattern else '^$'
+            else:
+                regex = ('^' if pattern.startswith('/') else '') + glob_to_regex(pattern)
+            kinds.setdefault(kind.lower(), []).append(regex)
+        return {kind: re.compile('|'.join(found), re.IGNORECASE) for kind, found in kinds.items()}
+    include = regexes([p for p in patterns if not p.startswith('!')])
+    exclude = regexes([p[1:] for p in patterns if p.startswith('!') and len(p) > 1])
+
+    def matches(path):
+        cut = path.rfind('/') + 1
+        tested = {'': path, 'file': f'/{path[cut:]}', 'folder': path[:cut], 'ext': extension_of(path[cut:])}
+        found = lambda kinds: any(regex.search(tested[kind]) for kind, regex in kinds.items())
+        return (not include or found(include)) and not found(exclude)
+    return matches
 
 
 file_types = FileTypes()
@@ -1228,7 +1363,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/listing':
                 return self.send_json(listing(query['obj']))
             if url.path == '/api/types':
-                return self.send_json(file_types.inside(query['obj']) if query.get('inside') else file_types.get(query['obj']))
+                # Any number of patterns to filter by, and where the folder is, for those matching folders
+                match, path = parse_qs(url.query).get('match', []), query.get('in', '')
+                return self.send_json(file_types.inside(query['obj'], match, path) if query.get('inside') else file_types.get(query['obj'], match, path))
             if url.path == '/api/schedule':
                 return self.send_json(schedule_of(query['path']))
             if url.path == '/api/schedules':

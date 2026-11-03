@@ -5,7 +5,7 @@ import { render } from './render.js';
 import { storage } from './storage.js';
 
 // What's been loaded: the repository, and diffs, folder listings and date-only changes by what they're between,
-// and file types by folder, and of the folders inside one
+// and file types by folder, and of the folders inside one, each with the filter's patterns, if any
 export const DATA = { diffs: {}, listings: {}, dates: {}, types: {}, typesInside: {} };
 
 export const requested = new Set();  // Each request is only made once, so a failure isn't retried in a loop
@@ -115,6 +115,9 @@ document.addEventListener('pointerup', pointerReleased, true);
 document.addEventListener('pointercancel', pointerReleased, true);
 window.addEventListener('blur', pointerReleased);
 
+// The filter's patterns for a request's address, and where the folder is, for those matching folders
+const matchQuery = (match, path) => (match.length ? `${match.map(pattern => `&match=${encodeURIComponent(pattern)}`).join('')}&in=${encodeURIComponent(path)}` : '');
+
 export const api = {
   // Everything else is built from this, so the page waits for it, showing how the server's getting on, as
   // working out storage for locations with new snapshots can take a while
@@ -170,15 +173,18 @@ export const api = {
     return entries;
   },
   // How many files of each type a folder has and how big they are, counting everything inside it, by its object
-  // ID: { extension: [files, bytes] }, with '' for files without one
-  types(obj) {
-    if (!DATA.types[obj]) load(`/api/types?obj=${obj}`, 'types', result => { DATA.types[obj] = result; });
-    return DATA.types[obj];
+  // ID: { extension: [files, bytes] }, with '' for files without one. Given the filter's patterns, only files
+  // getting through count, and path is where the folder is in its location, for those matching folders.
+  types(obj, match = [], path = '') {
+    const key = [obj, ...match, match.length ? path : ''].join('\n');
+    if (!DATA.types[key]) load(`/api/types?obj=${obj}${matchQuery(match, path)}`, 'types', result => { DATA.types[key] = result; });
+    return DATA.types[key];
   },
   // The same for each folder directly inside one, by name
-  typesInside(obj) {
-    if (!DATA.typesInside[obj]) load(`/api/types?obj=${obj}&inside=1`, 'types', result => { DATA.typesInside[obj] = result; });
-    return DATA.typesInside[obj];
+  typesInside(obj, match = [], path = '') {
+    const key = [obj, ...match, match.length ? path : ''].join('\n');
+    if (!DATA.typesInside[key]) load(`/api/types?obj=${obj}&inside=1${matchQuery(match, path)}`, 'types', result => { DATA.typesInside[key] = result; });
+    return DATA.typesInside[key];
   },
   // Files whose modified date changed but not their contents, between any two snapshots of a location
   dates(fromId, toId) {

@@ -1,7 +1,7 @@
 // Where the changes happen: activity across every snapshot, by folder and file
 import { KIND_SYMBOL, kindCount } from './changes.js';
 import { api, notLoaded } from './data.js';
-import { ofType } from './filetypes.js';
+import { inFilter, patterns } from './filter.js';
 import { appendAll, el, fillColour, formatFull, formatSize, formatTime, gradientPositions, gradientRgb, plural, timeAgo } from './format.js';
 import { asOfFor } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
@@ -26,10 +26,11 @@ export function addActivity(activity, change, step) {
   tick.bytes += change.s || 0;
 }
 
-// Only files of the type the page is narrowed to count, if it is. Kept for those snapshots and that type.
+// Only files the filter lets through count, if there is one. Kept for those snapshots and that filter, which
+// looks below the folder being looked at.
 export function locationChurn(loc) {
   const complete = loc.snapshots.filter(s => !s.incomplete);
-  const key = JSON.stringify([complete.map(s => s.id), state.type]);
+  const key = JSON.stringify([complete.map(s => s.id), patterns(), patterns().length ? state.scope : '']);
   if (churnCache.has(key)) return churnCache.get(key);
   // own is what happened to files directly in the folder, as opposed to in its subfolders
   const newNode = () => ({ ...newActivity(), own: newActivity(), children: new Map() });
@@ -40,7 +41,7 @@ export function locationChurn(loc) {
   steps.forEach(({ snap }, step) => {
     for (const change of api.diff(complete[step].id, snap.id) || []) {
       // Things ignored from then on weren't changed by anyone, so they aren't activity
-      if (change.p.endsWith('/') || change.k === 'i' || !ofType(change.p)) continue;
+      if (change.p.endsWith('/') || change.k === 'i' || !inFilter(change.p)) continue;
       const parts = change.p.split('/');
       let node = root;
       addActivity(node, change, step);
@@ -55,8 +56,12 @@ export function locationChurn(loc) {
     }
   });
   const result = steps.some(s => s.captured) ? { root, files, steps, first: complete[0], last: complete[complete.length - 1] } : null;
-  // Diffs may still be loading, so it's only kept once they're all in
-  if (steps.every(s => s.captured)) churnCache.set(key, result);
+  // Diffs may still be loading, so it's only kept once they're all in. The filter changes as it's typed, so only
+  // the last few are kept.
+  if (steps.every(s => s.captured)) {
+    if (churnCache.size >= 20) churnCache.delete(churnCache.keys().next().value);
+    churnCache.set(key, result);
+  }
   return result;
 }
 

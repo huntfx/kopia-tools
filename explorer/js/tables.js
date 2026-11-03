@@ -5,8 +5,8 @@ import { currentPath, locationDot } from './storage.js';
 
 // items: { key, label, prefix?, folder, location?, live?, size, files, modified, pick?, open }
 // up: { label, go } or null. rerender returns a fresh copy of the panel, for re-sorting. empty is what to say with
-// no items.
-export function contentsTable(legend, up, items, rerender, empty = 'Empty folder') {
+// no items. controls, if given, go at the right of the heading.
+export function contentsTable(legend, up, items, rerender, empty = 'Empty folder', controls = null) {
   const columns = [
     { key: 'name', label: 'Name', value: i => (i.prefix || '') + i.label },
     { key: 'size', label: 'Size', value: i => i.size, desc: true },
@@ -28,7 +28,8 @@ export function contentsTable(legend, up, items, rerender, empty = 'Empty folder
     el('td', { class: 'num' }, item.folder && item.files != null ? plural(item.files, 'file') : ''),
     el('td', { class: 'num' }, item.modified ? formatFull(item.modified) : ''));
   const panel = el('section', { class: 'panel' },
-    el('div', { class: 'chart-head' }, el('h2', {}, 'Contents'), legend ? el('span', { class: 'legend' }, legend) : null),
+    el('div', { class: 'chart-head' }, el('h2', {}, 'Contents'), legend ? el('span', { class: 'legend' }, legend) : null,
+      controls ? el('span', { class: 'chart-controls' }, controls) : null),
     el('div', { class: 'table-wrap' },
       el('table', {},
         sortableHead(tableSorts.contents, columns, () => panel.replaceWith(rerender())),

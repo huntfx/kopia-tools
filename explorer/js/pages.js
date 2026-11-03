@@ -2,12 +2,14 @@
 import { isGone, renderChanges } from './changes.js';
 import { renderSizeChart, renderStorageChart } from './charts.js';
 import { renderChurn } from './churn.js';
-import { ofType, renderFileTypes, typeFiles, typeFilter } from './filetypes.js';
+import { typesTable } from './filetypes.js';
+import { filterControls, filteredCounts, inFilter, matchingFiles, patterns } from './filter.js';
 import { settingsStatus, settingsWarning } from './schedules.js';
 import { api, notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
 import { beingDeleted, beingPinned, confirmPin, restoreItem, showInExplorer } from './jobs.js';
-import { compactFolder, diskText, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
+import { compactFolder, diskText, joinRel, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
+import { render } from './render.js';
 import { KEEP_KINDS, PIN_ICON, openHistory, stepChange } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
 import { asOfSnapshot, backingUpNow, enclosingLocation, folderObj, hiddenAsOf, isCancelled, latest, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
@@ -145,14 +147,16 @@ export function renderMain() {
   // whole location its space on disk by then. The snapshot itself is named in the contents heading. With
   // nothing as old as the as-of date, that's the oldest, which this is all as of too.
   const here = folderSummary(loc, selected);
-  const head = el('section', { class: 'loc-head' },
-    locationCrumbs(loc),
-    el('div', { class: 'meta' },
-      here ? el('span', {}, el('b', {}, formatSize(here.size))) : null,
-      here ? el('span', {}, plural(here.files, 'file')) : null,
-      state.scope ? null : el('span', {}, `${diskText(selected.total)} on disk`),
-      settingsStatus(loc),
-      typeFilter(selected)));
+  // The filter, for the whole page, is at the right, beside the path
+  const head = el('section', { class: 'loc-head head-line' },
+    el('div', {},
+      locationCrumbs(loc),
+      el('div', { class: 'meta' },
+        here ? el('span', {}, el('b', {}, formatSize(here.size))) : null,
+        here ? el('span', {}, plural(here.files, 'file')) : null,
+        state.scope ? null : el('span', {}, `${diskText(selected.total)} on disk`),
+        settingsStatus(loc))),
+    filterControls(selected));
 
   // The snapshot, with the folder as it was in it, to restore: its own modified time is in the listing of the
   // folder above it, or for the location, the snapshot's
@@ -174,7 +178,7 @@ export function renderMain() {
   // happen. The snapshots themselves are on the right.
   // The size chart isn't there with too little to chart, such as a single snapshot
   main.replaceChildren(...[head, settingsWarning(loc), snapshot, renderSnapshotContents(loc, selected), renderSizeChart(loc),
-    renderFileTypes(loc, selected), renderChanges(loc, selected), renderChurn(loc)].filter(Boolean));
+    renderChanges(loc, selected), renderChurn(loc)].filter(Boolean));
 }
 
 // Size and file count of the folder in scope at a snapshot: the snapshot's own for the location's top,
@@ -326,13 +330,32 @@ function unreadIn(loc, snap, rel) {
       more ? el('li', {}, `and ${more} more`) : null));
 }
 
-// Contents of the folder in scope at the selected snapshot, like an Explorer window
+// The Contents box's rows are the folders and files in the folder in scope, or the types of file in it, counting
+// everything inside it; remembered
+export let contentsByType = false;
+
+try { contentsByType = localStorage.getItem('contentsView') === 'types'; } catch {}
+
+function contentsViews() {
+  const setByType = byType => {
+    contentsByType = byType;
+    try { localStorage.setItem('contentsView', byType ? 'types' : 'contents'); } catch {}
+    render();
+  };
+  return el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What the rows are' },
+    [['Folders & files', false, 'A row for each folder and file in here'], ['File types', true, 'A row for each file type, counting everything in here']]
+      .map(([label, byType, title]) => el('button', { 'aria-pressed': String(contentsByType === byType), title, onclick: () => setByType(byType) }, label)));
+}
+
+// Contents of the folder in scope at the selected snapshot, like an Explorer window, or the types of file in it
 export function renderSnapshotContents(loc, selected) {
   const node = treeNodes.get(loc.path.toLowerCase());
   const panel = el('section', { class: 'panel' });
+  const legend = `At ${formatFull(selected.time)}, ${timeAgo(selected.time)} (${shortId(selected.id)})`;
   const head = el('div', { class: 'chart-head' },
     el('h2', {}, 'Contents'),
-    el('span', { class: 'legend' }, `At ${formatFull(selected.time)}, ${timeAgo(selected.time)} (${shortId(selected.id)})`));
+    el('span', { class: 'legend' }, contentsByType ? `${legend}, counting everything in here` : legend),
+    el('span', { class: 'chart-controls' }, contentsViews()));
   if (selected.incomplete) {
     appendAll(panel, head, el('p', { class: 'note' }, `This snapshot ${unfinished(selected)}, so its contents aren't shown.`));
     return panel;
@@ -358,24 +381,28 @@ export function renderSnapshotContents(loc, selected) {
     ? { label: [loc.path.replace(/\\$/, ''), ...scopeParts.slice(0, -1)].join('\\'), go: () => navigate({ scope: scopeParts.slice(0, -1).join('/') }) }
     : outer ? { label: outer.parentPath, go: () => navigate({ location: outer.loc.path, snapshot: null, scope: outer.scope }) }
     : above ? { label: above.path, go: () => navigate(above.location ? { location: above.location.path, snapshot: null } : { folder: above.path }) } : null;
+  if (contentsByType) {
+    appendAll(panel, head, typesTable(selected, up, () => panel.replaceWith(renderSnapshotContents(loc, selected))));
+    return panel;
+  }
 
-  // Narrowed to a type, only files of it, and folders with some inside, by how much
+  // With a filter, only files it lets through, and folders with some inside, by how much
   let inside = null;
-  if (state.type != null) {
-    inside = api.typesInside(folderObj(selected, state.scope));
+  if (patterns().length) {
+    inside = api.typesInside(folderObj(selected, state.scope), patterns(), state.scope);
     if (!inside) {
       appendAll(panel, head, el('p', { class: 'note' }, notLoaded('file types')));
       return panel;
     }
   }
-  const ofTypeIn = entry => inside?.[entry.n]?.[state.type];
-  const shown = inside ? entries.filter(entry => (entry.t === 'd' ? ofTypeIn(entry) : ofType(entry.n))) : entries;
+  const filteredIn = entry => filteredCounts(inside?.[entry.n]);
+  const shown = inside ? entries.filter(entry => (entry.t === 'd' ? filteredIn(entry) : inFilter(joinRel(state.scope, entry.n)))) : entries;
 
   const base = [loc.path.replace(/\\$/, ''), ...scopeParts].join('\\');
   const items = shown.map(entry => {
     const full = `${base}\\${entry.n}`;
     const nested = entry.t === 'd' ? treeNodes.get(full.toLowerCase())?.location : null;
-    const [files, size] = inside && entry.t === 'd' ? ofTypeIn(entry) : [entry.f, entry.s];
+    const [files, size] = inside && entry.t === 'd' ? filteredIn(entry) : [entry.f, entry.s];
     return {
       key: full, label: entry.n, folder: entry.t === 'd', location: nested,
       size, files: entry.t === 'd' ? files : null, modified: entry.m,
@@ -386,8 +413,8 @@ export function renderSnapshotContents(loc, selected) {
         : () => navigate({ file: entry.n }),
     };
   });
-  return contentsTable(`At ${formatFull(selected.time)}, ${timeAgo(selected.time)} (${shortId(selected.id)})`, up, items,
-    () => renderSnapshotContents(loc, selected), inside ? `No ${typeFiles(state.type)} in here` : 'Empty folder');
+  return contentsTable(legend, up, items, () => renderSnapshotContents(loc, selected),
+    inside ? `No ${matchingFiles()} in here` : 'Empty folder', contentsViews());
 }
 
 // Copying a path from the breadcrumbs gives it on one line, as it's shown: its parts are separate elements,
