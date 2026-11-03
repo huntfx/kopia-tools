@@ -445,6 +445,8 @@ th[aria-sort] { color: var(--ink); }
 /* File types: each one's share of the size, as a bar beside it */
 .file-types .share { display: inline-block; width: 60px; height: 6px; margin-right: 10px; border-radius: 3px; background: var(--axis); overflow: hidden; vertical-align: middle; }
 .file-types .share .fill { display: block; height: 100%; background: var(--accent); }
+/* A chart's switches, together on the right, wrapping as a group under its heading when narrow */
+.chart-controls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-left: auto; }
 .chart-modes { display: inline-flex; border: 1px solid var(--axis); border-radius: 6px; overflow: hidden; flex: none; }
 .chart-modes button { background: none; border: 0; padding: 2px 9px; font-size: 0.75rem; color: var(--ink-2); }
 .chart-modes button + button { border-left: 1px solid var(--axis); }

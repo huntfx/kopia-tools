@@ -1,4 +1,4 @@
-// Charts of size over time, stacked or overlaid
+// Charts of size, or files, over time, stacked or overlaid
 import { api, notLoaded } from './data.js';
 import { el, formatFull, formatSize, plural, svgEl } from './format.js';
 import { ofType, typeFiles, typeName } from './filetypes.js';
@@ -49,9 +49,9 @@ export function renderStorageChart(node) {
 export function renderSizeChart(loc) {
   const complete = loc.snapshots.filter(s => !s.incomplete);
   if (complete.length < 2) return null;
-  // While loading, it can still be switched between folders and files, and file types
+  // While loading, it can still be switched between size and files, and between folders and files, and file types
   const panel = (...body) => el('section', { class: 'panel' },
-    el('div', { class: 'chart-head' }, el('h2', {}, 'Size over time'), sizeViews()), ...body);
+    el('div', { class: 'chart-head' }, el('h2', {}, sizeHeading()), el('span', { class: 'chart-controls' }, sizeViews())), ...body);
   if (sizeByType) return renderTypesChart(loc, complete, panel);
   const listings = complete.map(snap => snapshotListing(snap, state.scope));
   if (listings.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
@@ -66,8 +66,10 @@ export function renderSizeChart(loc) {
   const found = new Map();
   listings.forEach((entries, j) => {
     for (const entry of entries || []) {
-      const size = !inside ? entry.s || 0
-        : entry.t === 'd' ? inside[j][entry.n]?.[state.type]?.[1] || 0 : ofType(entry.n) ? entry.s || 0 : 0;
+      // Counting files, a folder's are every one inside it, and a file is one
+      const size = !inside ? (!countFiles ? entry.s || 0 : entry.t === 'd' ? entry.f || 0 : 1)
+        : entry.t === 'd' ? inside[j][entry.n]?.[state.type]?.[countFiles ? 0 : 1] || 0
+          : ofType(entry.n) ? (countFiles ? 1 : entry.s || 0) : 0;
       if (inside && !size) continue;
       const key = `${entry.t}:${entry.n}`;
       if (!found.has(key)) found.set(key, { entry, values: times.map(() => 0) });
@@ -91,9 +93,10 @@ export function renderSizeChart(loc) {
   });
 
   return stackedChart({
-    key: `size:${loc.path}:${state.scope}:${state.type}`, heading: 'Size over time', pieHeading: 'Size', at: viewedAt(complete, loc),
-    what: ['item', 'items'], items, times, now, views: sizeViews(),
-    note: 'How big each folder and file in here was at each snapshot. kopia only counts space on disk for a whole location, so this is their size rather than what they take up in the repository.',
+    key: `size:${loc.path}:${state.scope}:${state.type}:${countFiles}`, heading: sizeHeading(), pieHeading: countFiles ? 'Files' : 'Size',
+    at: viewedAt(complete, loc), what: ['item', 'items'], items, times, now, views: sizeViews(), ...counting(),
+    note: countFiles ? 'How many files each folder in here had at each snapshot, counting everything inside it, with each file in here as one.'
+      : 'How big each folder and file in here was at each snapshot. kopia only counts space on disk for a whole location, so this is their size rather than what they take up in the repository.',
   });
 }
 
@@ -112,16 +115,17 @@ function renderTypesChart(loc, complete, panel) {
   const extensions = [...new Set(tallies.flatMap(Object.keys))].filter(extension => state.type == null || extension === state.type);
   if (!extensions.length) return state.type == null ? null : panel(el('p', { class: 'note' }, `No ${typeFiles(state.type)} in here at any snapshot.`));
   const items = extensions.map(extension => {
-    const values = [...tallies.map(tally => tally[extension]?.[1] || 0)];
+    const values = [...tallies.map(tally => tally[extension]?.[countFiles ? 0 : 1] || 0)];
     values.push(values[values.length - 1]);
     const name = typeName(extension);
     return { name, title: extension ? `${extension} files` : 'Files with no extension', values, lastAt, hint: null };
   });
 
   return stackedChart({
-    key: `types:${loc.path}:${state.scope}:${state.type}`, heading: 'Size over time', pieHeading: 'Size', at: viewedAt(complete, loc),
-    what: ['type', 'types'], items, times, now, views: sizeViews(),
-    note: 'How much of each file type was in here at each snapshot, counting everything inside it. This is their size rather than what they take up in the repository.',
+    key: `types:${loc.path}:${state.scope}:${state.type}:${countFiles}`, heading: sizeHeading(), pieHeading: countFiles ? 'Files' : 'Size',
+    at: viewedAt(complete, loc), what: ['type', 'types'], items, times, now, views: sizeViews(), ...counting(),
+    note: countFiles ? 'How many files of each type were in here at each snapshot, counting everything inside it.'
+      : 'How much of each file type was in here at each snapshot, counting everything inside it. This is their size rather than what they take up in the repository.',
   });
 }
 
@@ -132,10 +136,21 @@ const viewedAt = (complete, loc) => {
   return at < 0 ? complete.length - 1 : at;
 };
 
-// The size chart's bands are the folders and files in the folder in scope, or file types; remembered
+// The size chart's bands are the folders and files in the folder in scope, or file types, and it shows how big
+// they were, or how many files were in them; both remembered
 export let sizeByType = false;
 
-try { sizeByType = localStorage.getItem('sizeChart') === 'types'; } catch {}
+export let countFiles = false;
+
+try {
+  sizeByType = localStorage.getItem('sizeChart') === 'types';
+  countFiles = localStorage.getItem('sizeMeasure') === 'files';
+} catch {}
+
+const sizeHeading = () => (countFiles ? 'Files over time' : 'Size over time');
+
+// Counted, values are numbers of files, so the scale goes up in whole numbers
+const counting = () => (countFiles ? { format: n => n.toLocaleString('en-GB'), integers: true } : {});
 
 function sizeViews() {
   const setByType = byType => {
@@ -143,9 +158,19 @@ function sizeViews() {
     try { localStorage.setItem('sizeChart', byType ? 'types' : 'contents'); } catch {}
     render();
   };
-  return el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What the bands are' },
-    [['Folders & files', false, 'A band for each folder and file in here'], ['File types', true, 'A band for each file type, counting everything in here']]
-      .map(([label, byType, title]) => el('button', { 'aria-pressed': String(sizeByType === byType), title, onclick: () => setByType(byType) }, label)));
+  const setCounting = counted => {
+    countFiles = counted;
+    try { localStorage.setItem('sizeMeasure', counted ? 'files' : 'size'); } catch {}
+    render();
+  };
+  return [
+    el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What the chart shows' },
+      [['Size', false, 'How big they were'], ['Files', true, 'How many files they had']]
+        .map(([label, counted, title]) => el('button', { 'aria-pressed': String(countFiles === counted), title, onclick: () => setCounting(counted) }, label))),
+    el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What the bands are' },
+      [['Folders & files', false, 'A band for each folder and file in here'], ['File types', true, 'A band for each file type, counting everything in here']]
+        .map(([label, byType, title]) => el('button', { 'aria-pressed': String(sizeByType === byType), title, onclick: () => setByType(byType) }, label))),
+  ];
 }
 
 // Clicking a band hides it, and clicking Others hides all the ones shown, to see what's left in more detail.
@@ -164,11 +189,12 @@ try { chartMode = ['overlaid', 'pie'].includes(localStorage.getItem('chartMode')
 // band do, like its row in Contents), hint (saying so, or null where they do nothing) }. They go biggest first
 // overall, by the area under each one, so something big that's since gone still counts. The first seven shown get
 // their own colours, or up to 14 if Others would be big; any more are added together as Others. views, if given,
-// switches what the bands are, beside switching between stacked, overlaid and pie. The pie, the legend and the total are at the
+// switches what the bands are, beside switching between stacked, overlaid and pie. The pie and the legend are at the
 // time at (an index into times, the last by default); the pie's headed pieHeading. Whichever way it's shown, the
-// legend's the same, and hiding one hides it in all of them.
+// legend's the same, and hiding one hides it in all of them. Values are sizes, unless format says them otherwise,
+// and integers says they're whole numbers, like counts.
 export function stackedChart(options) {
-  const { key, heading, pieHeading, what, items, times, now, note, views } = options;
+  const { key, heading, pieHeading, what, items, times, now, note, views, format = formatSize, integers = false } = options;
   const at = options.at ?? times.length - 1;
   const pie = chartMode === 'pie';
   const chartOverlaid = chartMode === 'overlaid';
@@ -229,8 +255,8 @@ export function stackedChart(options) {
     if (!chart.isConnected || !chart.clientWidth || Math.abs(chart.clientWidth - drawnWidth) <= 1) return;
     drawnWidth = chart.clientWidth;
     highlight = pie
-      ? drawPieChart(chart, drawnWidth, { heading: pieHeading || heading, slices: series, at, total, share, openOthers })
-      : drawStackedChart(chart, drawnWidth, { heading, series, times, tops, max, now, openOthers, overlaid: chartOverlaid });
+      ? drawPieChart(chart, drawnWidth, { heading: pieHeading || heading, slices: series, at, total, share, openOthers, format })
+      : drawStackedChart(chart, drawnWidth, { heading, series, times, tops, max, now, openOthers, overlaid: chartOverlaid, format, integers });
   };
   new ResizeObserver(drawIfResized).observe(chart);
   // Straight away once it's been put on the page, which happens just after this returns
@@ -252,7 +278,7 @@ export function stackedChart(options) {
     onmouseenter: isHidden ? null : () => highlight(i), onmouseleave: isHidden ? null : () => highlight(null),
     onclick: isHidden ? () => showItem(s) : s.others ? openOthers : () => hideItem(s),
   }, el('span', { class: 'swatch', style: isHidden ? null : `background:${s.colour}` }), el('span', { class: 'name' }, s.name),
-    el('span', { class: 'muted' }, isHidden ? formatSize(s.values[at]) : `${formatSize(s.values[at])} (${share(s.values[at])})`))));
+    el('span', { class: 'muted' }, isHidden ? format(s.values[at]) : `${format(s.values[at])} (${share(s.values[at])})`))));
 
   const when = at === times.length - 1 ? 'now' : `at ${formatFull(new Date(times[at]).toISOString())}`;
   const panel = el('section', { class: 'panel' },
@@ -260,8 +286,7 @@ export function stackedChart(options) {
       hidden.size ? el('span', { class: 'legend', title: items.filter(item => hidden.has(item.title)).map(item => item.title).join('\n') },
         `${plural(hidden.size, what[0])} hidden · `,
         el('button', { class: 'linklike', onclick: () => setHidden(new Set()) }, 'Show all')) : null,
-      el('span', { class: 'legend', style: 'margin-left:auto' }, `${formatSize(total)} ${when}`),
-      views, chartModes()),
+      el('span', { class: 'chart-controls' }, views, chartModes())),
     pie && !total ? el('p', { class: 'note' }, `Nothing in here ${when}`) : chart,
     legend,
     el('p', { class: 'note', style: 'margin:8px 0 0' }, note));
@@ -285,7 +310,7 @@ function chartModes() {
 // width, returning how to pick out a slice, for the legend. Each slice is its band's size then, in its colour,
 // going round from the top, biggest first. Hovering a slice says what it is; clicking does what clicking its band
 // does.
-function drawPieChart(chart, width, { heading, slices, at, total, share, openOthers }) {
+function drawPieChart(chart, width, { heading, slices, at, total, share, openOthers, format }) {
   const height = 240;
   const outer = 108, inner = 50, cx = width / 2, cy = height / 2;
   const point = (angle, radius) => `${(cx + radius * Math.cos(angle)).toFixed(1)},${(cy + radius * Math.sin(angle)).toFixed(1)}`;
@@ -305,7 +330,7 @@ function drawPieChart(chart, width, { heading, slices, at, total, share, openOth
   const highlight = i => paths.forEach((path, k) => path.classList.toggle('faded', i != null && k !== i));
   const svg = svgEl('svg', { class: 'pie', viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': heading },
     paths,
-    svgEl('text', { class: 'pie-total', x: cx, y: cy + 2, 'text-anchor': 'middle' }, formatSize(total)),
+    svgEl('text', { class: 'pie-total', x: cx, y: cy + 2, 'text-anchor': 'middle' }, format(total)),
     svgEl('text', { class: 'pie-label', x: cx, y: cy + 18, 'text-anchor': 'middle' }, 'Total'));
 
   const tip = el('div', { class: 'chart-tip', hidden: true });
@@ -314,7 +339,7 @@ function drawPieChart(chart, width, { heading, slices, at, total, share, openOth
     path.addEventListener('pointermove', event => {
       highlight(i);
       tip.replaceChildren(...[
-        el('div', { class: 'row' }, el('span', { class: 'key', style: `background:${s.colour}` }), el('b', {}, formatSize(s.values[at])), el('span', {}, s.name)),
+        el('div', { class: 'row' }, el('span', { class: 'key', style: `background:${s.colour}` }), el('b', {}, format(s.values[at])), el('span', {}, s.name)),
         el('div', { class: 'path' }, s.title),
         el('div', { class: 'hint' }, `${share(s.values[at])} of the total`),
         s.hint === null ? null : el('div', { class: 'hint' }, s.others ? 'Click to hide the bigger ones and show these separately'
@@ -342,13 +367,13 @@ function drawPieChart(chart, width, { heading, slices, at, total, share, openOth
 }
 
 // Draw a stacked chart into its box at a width, returning how to pick out a band, for the legend
-export function drawStackedChart(chart, width, { heading, series, times, tops, max, now, openOthers, overlaid }) {
-  // Scales, with a round number of bytes for each gridline
+export function drawStackedChart(chart, width, { heading, series, times, tops, max, now, openOthers, overlaid, format, integers }) {
+  // Scales, with a round number for each gridline, and a whole one for whole numbers
   const height = 240;
   const pad = { left: 64, right: 12, top: 10, bottom: 26 };
   const raw = max / 4;
   const magnitude = 10 ** Math.floor(Math.log10(raw || 1));
-  const step = [1, 2, 2.5, 5, 10].map(m => m * magnitude).find(s => s >= raw);
+  const step = [1, 2, 2.5, 5, 10].map(m => m * magnitude).find(s => s >= raw && (!integers || Number.isInteger(s))) || 1;
   const top = Math.ceil(max / step) * step || 1;
   // Time runs left to right, but the last snapshot holding until now gets a few pixels at least, as one taken
   // moments ago would otherwise show nothing of what it changed; the rest is squeezed up to make room
@@ -404,7 +429,7 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
   const svg = svgEl('svg', { viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': heading },
     yTicks.map(v => svgEl('g', { class: 'axis' },
       svgEl('line', { class: 'grid', x1: pad.left, x2: width - pad.right, y1: y(v), y2: y(v) }),
-      svgEl('text', { x: pad.left - 8, y: y(v) + 4, 'text-anchor': 'end' }, v ? formatSize(v) : '0'))),
+      svgEl('text', { x: pad.left - 8, y: y(v) + 4, 'text-anchor': 'end' }, v ? format(v) : '0'))),
     xTicks.map((t, i) => svgEl('text', { class: 'axis', x: x(t), y: height - 8, 'text-anchor': i === 0 ? 'start' : i === 4 ? 'end' : 'middle' }, i === 4 ? 'Now' : dateLabel(t))),
     bandGroup, rug, asOfLine, crosshair);
 
@@ -432,7 +457,7 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
   const fromSnapshot = time => el('div', { class: 'hint' },
     time ? `From the snapshot of ${formatFull(new Date(time).toISOString())}` : 'No snapshots yet then');
   const row = (i, j) => el('div', { class: 'row' },
-    el('span', { class: 'key', style: `background:${series[i].colour}` }), el('b', {}, formatSize(series[i].values[j])), el('span', {}, series[i].name));
+    el('span', { class: 'key', style: `background:${series[i].colour}` }), el('b', {}, format(series[i].values[j])), el('span', {}, series[i].name));
   svg.addEventListener('pointermove', event => {
     const { px, t, j, band, isNow } = pointed(event);
     crosshair.setAttribute('x1', px);
@@ -448,7 +473,7 @@ export function drawStackedChart(chart, width, { heading, series, times, tops, m
     ] : [
       when(t, isNow),
       ...[...series.keys()].reverse().map(i => row(i, j)),
-      el('div', { class: 'row total' }, el('span', { class: 'key' }), el('b', {}, formatSize(tops[tops.length - 1][j])), el('span', {}, 'Total')),
+      el('div', { class: 'row total' }, el('span', { class: 'key' }), el('b', {}, format(tops[tops.length - 1][j])), el('span', {}, 'Total')),
       fromSnapshot(times[j]),
       el('div', { class: 'hint' }, 'Click to show files as of then'),
     ]).filter(Boolean));
