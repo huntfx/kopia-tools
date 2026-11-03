@@ -388,6 +388,7 @@ th[aria-sort] { color: var(--ink); }
 .confirm p.error { color: var(--removed); }
 .confirm .field { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; font-size: 0.88rem; }
 .confirm select { background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font-size: 0.85rem; flex: 1; min-width: 0; }
+.confirm .field input[type="text"] { color: var(--ink); background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font-size: 0.85rem; flex: 1; min-width: 0; }
 .confirm .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .btn.danger:not(:disabled) { background: var(--removed); border-color: var(--removed); color: #fff; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }

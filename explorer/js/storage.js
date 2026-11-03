@@ -16,6 +16,8 @@ export function applyJobs() {
     const loc = j.finished > storageRead && storage.find(l => l.path === j.source);
     if (!loc) continue;
     if (j.kind === 'delete' && j.state === 'done') loc.snapshots = loc.snapshots.filter(s => s.id !== j.snapshot);
+    // Pinning or unpinning gives a snapshot a new ID
+    if (j.kind === 'pin' && j.state === 'done') Object.assign(loc.snapshots.find(s => s.id === j.snapshot) || {}, j.info);
     if (j.kind === 'backup' && j.info && !loc.snapshots.some(s => s.id === j.info.id)) {
       loc.snapshots = [...loc.snapshots, { ...j.info }].sort((a, b) => a.time.localeCompare(b.time));
     }

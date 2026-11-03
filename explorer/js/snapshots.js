@@ -2,8 +2,8 @@
 import { compareTarget, ignoredReason, isGone, kindCount } from './changes.js';
 import { api, pending } from './data.js';
 import { ofType, typeFiles } from './filetypes.js';
-import { el, fillColour, formatFull, formatSize, gradientPositions, gradientRgb, listOf, plural, signedSize, timeAgo } from './format.js';
-import { backupButton, beingDeleted, beingPinned, confirmDelete, togglePin } from './jobs.js';
+import { el, fillColour, formatFull, formatSize, gradientPositions, gradientRgb, plural, signedSize, timeAgo } from './format.js';
+import { backupButton, beingDeleted, beingPinned, confirmDelete, confirmPin, pinNames } from './jobs.js';
 import { scheduleLine, separateLine } from './schedules.js';
 import { diskText, locationsBelow, sidebarSnapshot, treeNodes } from './sidebar.js';
 import { navigate, state, ui } from './state.js';
@@ -127,7 +127,7 @@ const PIN_ICON = () => {
 export function keptFor(snap) {
   // Pinned ones are kept whatever the retention policy says
   if (snap.pins?.length) {
-    return el('span', { class: 'keep', title: `Pinned as ${listOf(snap.pins)}, so kopia's retention policy never deletes it` }, 'pinned');
+    return el('span', { class: 'keep', title: `Pinned as ${pinNames(snap.pins)}, so kopia's retention policy never deletes it` }, 'pinned');
   }
   if (!snap.keep?.length) return null;
   const reasons = snap.keep.map(r => r.split('-'));
@@ -298,7 +298,7 @@ function snapshotList(loc, target, isFolder) {
           class: `pin${snap.pins?.length ? ' pinned' : ''}`, disabled: pinningIt,
           'aria-label': snap.pins?.length ? 'Unpin this snapshot' : 'Pin this snapshot',
           title: pinningIt ? `${snap.pins?.length ? 'Unpinning' : 'Pinning'}…` : snap.pins?.length ? 'Unpin this snapshot' : 'Pin this snapshot',
-          onclick: event => { event.stopPropagation(); togglePin(snap); },
+          onclick: event => { event.stopPropagation(); confirmPin(loc, snap); },
         }, PIN_ICON()) : null,
         // Not one still being made, which kopia replaces as it goes, nor while it's being pinned, as kopia gives
         // it a new ID

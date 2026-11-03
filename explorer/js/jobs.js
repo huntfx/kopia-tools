@@ -142,35 +142,60 @@ export function confirmDelete(loc, snap, rel, isFolder) {
   cancel.focus();
 }
 
-// Pin a snapshot, so kopia's retention policy never deletes it, or unpin it. Kopia saves it again under a new
-// ID, so it's kept as the same object with that ID, and what's loaded or picked for it follows it there.
-// Meanwhile it can't be deleted, which kopia would try by its old ID.
-const pinning = new Set();
+// Being pinned or unpinned, which it can't be deleted meanwhile, as kopia gives it a new ID
+export const beingPinned = snap => jobList.some(j => j.kind === 'pin' && j.snapshot === snap.id && jobActive(j));
 
-export const beingPinned = snap => pinning.has(snap.id);
+// Pin a snapshot under names, so kopia's retention policy never deletes it, or take pins off it, in the
+// background, followed in the panel at the bottom, which offers to undo it
+export function changePins(loc, snap, add, remove) {
+  jobsShown = true;
+  startJob('/api/snapshot/pin', { id: snap.id, add, remove },
+    { kind: 'pin', name: loc.path, source: loc.path, snapshot: snap.id, snapshotTime: snap.time, add, remove }).then(render);
+}
 
-export async function togglePin(snap) {
-  pinning.add(snap.id);
-  render();
-  let info;
-  try {
-    info = await api.post('/api/snapshot/pin', { id: snap.id, pinned: !snap.pins?.length });
-  } catch (error) {
-    pinning.delete(snap.id);
-    render();
-    const ok = el('button', { class: 'btn', onclick: () => dialog.close() }, 'OK');
-    const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
-      el('h2', { id: 'confirm-title' }, `Couldn't ${snap.pins?.length ? 'unpin' : 'pin'} this snapshot`),
-      el('p', {}, error instanceof TypeError ? 'Can\'t reach the server.' : error.message),
-      el('div', { class: 'actions' }, ok));
-    dialog.addEventListener('close', () => dialog.remove());
-    document.body.append(dialog);
-    dialog.showModal();
-    ok.focus();
-    return;
-  }
+// Pinning asks what to call the pin, as KopiaUI does, starting with the name KopiaUI suggests; unpinning takes
+// all its pins off. Either way it's asked first, so it's never done by an accidental click.
+export function confirmPin(loc, snap) {
+  const unpin = !!snap.pins?.length;
+  const name = el('input', { type: 'text', value: 'do-not-delete', autocomplete: 'off' });
+  const error = el('p', { class: 'error', hidden: true });
+  const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
+  const go = el('button', {
+    class: 'btn primary',
+    onclick: () => {
+      const pin = name.value.trim();
+      if (!unpin && !pin) {
+        error.textContent = 'The pin needs a name';
+        error.hidden = false;
+        return name.focus();
+      }
+      dialog.close();
+      changePins(loc, snap, unpin ? [] : [pin], unpin ? snap.pins : []);
+    },
+  }, unpin ? 'Unpin' : 'Pin');
+  name.addEventListener('keydown', event => { if (event.key === 'Enter') go.click(); });
+  const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
+    // Headings are in capitals, so the pin's name, which they'd change, goes under it
+    el('h2', { id: 'confirm-title' }, unpin ? `Remove the ${snap.pins.length === 1 ? 'pin' : 'pins'}?` : 'Pin this snapshot?'),
+    el('p', { class: 'what' }, el('b', {}, loc.path), `, ${formatFull(snap.time)} (${shortId(snap.id)})`,
+      unpin ? `, pinned as ${pinNames(snap.pins)}` : ''),
+    unpin ? null : [el('label', { class: 'field' }, 'Name of the pin', name),
+      el('p', {}, 'Kopia\'s retention policy never deletes a pinned snapshot.')],
+    error,
+    el('div', { class: 'actions' }, cancel, go));
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  if (unpin) cancel.focus();
+  else name.select();
+}
+
+export const pinNames = pins => listOf(pins.map(p => `“${p}”`));
+
+// Kopia saves a snapshot again under a new ID when it's pinned or unpinned, so once it's done, it's kept as the
+// same object with that ID, and what's loaded or picked for it follows it there
+function pinned(snap, info) {
   const old = snap.id;
-  pinning.delete(old);
   for (const cache of [DATA.diffs, DATA.dates]) {
     for (const key of Object.keys(cache).filter(k => k.split('..').includes(old))) {
       cache[key.split('..').map(id => (id === old ? info.id : id)).join('..')] = cache[key];
@@ -180,8 +205,6 @@ export async function togglePin(snap) {
   Object.assign(snap, info);
   if (state.snapshot === old) state.snapshot = info.id;
   if (state.compare === old) state.compare = info.id;
-  writeHash(true);
-  snapshotsChanged();
 }
 
 // Open something in Windows Explorer, via the server; if that fails, the button says why
@@ -212,7 +235,17 @@ export function followJobs() {
     // A backup that's just ended has made a snapshot, even if cancelled, and a delete has removed one
     const snapshotsEnded = ended('backup') || ended('delete');
     const settingsEnded = ended('settings');
+    const pinsEnded = ended('pin');
+    const pinsDone = list.filter(j => j.kind === 'pin' && j.state === 'done' && jobList.some(o => o.id === j.id && jobActive(o)));
     jobList = list;
+    // A snapshot pinned or unpinned is followed to its new ID
+    for (const j of pinsDone) {
+      const snap = storage.find(l => l.path === j.source)?.snapshots.find(s => s.id === j.snapshot);
+      if (snap) pinned(snap, j.info);
+    }
+    if (pinsDone.length) writeHash(true);
+    // Shown either way, as its buttons are back
+    if (pinsEnded && !snapshotsEnded) snapshotsChanged();
     // Shown straight away, then read again for what isn't known yet. The panel links to a backup's snapshot
     // once it's among them, which may only be after this stops asking, so it's shown again then.
     if (snapshotsEnded) {
@@ -242,6 +275,7 @@ export function renderJobs() {
   const item = r => {
     if (r.kind === 'backup') return backupItem(r);
     if (r.kind === 'delete') return deleteItem(r);
+    if (r.kind === 'pin') return pinItem(r);
     if (r.kind === 'settings') return settingsItems(r);
     const percent = r.totalBytes ? 100 * r.bytes / r.totalBytes : 0;
     const status = {
@@ -270,8 +304,9 @@ export function renderJobs() {
   // What's going, of each kind, or if nothing is, what's listed
   const of = kind => jobList.filter(j => j.kind === kind);
   const going = kind => of(kind).filter(jobActive).length;
+  const pinsGoing = pinning => of('pin').filter(j => jobActive(j) && !!j.add.length === pinning).length;
   const active = jobList.filter(jobActive).length;
-  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['delete', 'deletions'], ['settings', 'parent settings fixes']]
+  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['delete', 'deletions'], ['pin', 'pins'], ['settings', 'parent settings fixes']]
     .filter(([kind]) => of(kind).length).map(([, name]) => name);
   const listed = listOf(kinds);
   const settingsJob = of('settings').find(jobActive);
@@ -279,6 +314,8 @@ export function renderJobs() {
     going('backup') && `Backing up ${plural(going('backup'), 'location')}`,
     going('restore') && `Restoring ${going('restore')} of ${of('restore').length}`,
     going('delete') && `Deleting ${plural(going('delete'), 'snapshot')}`,
+    pinsGoing(true) && `Pinning ${plural(pinsGoing(true), 'snapshot')}`,
+    pinsGoing(false) && `Unpinning ${plural(pinsGoing(false), 'snapshot')}`,
     settingsJob && `${settingsJob.undo ? 'Removing parent settings fix' : 'Applying parent settings fix'}${settingsJob.items.length
       ? ` (${settingsJob.items.filter(i => ['done', 'failed'].includes(i.state)).length} of ${settingsJob.items.length})` : ''}`,
   ].filter(Boolean).join(' · ') || `${listed[0].toUpperCase()}${listed.slice(1)} (${jobList.length})`;
@@ -351,6 +388,26 @@ export function deleteItem(j) {
     deleting: () => el('div', { class: 'status muted' }, 'Deleting…'),
     done: () => el('div', { class: 'status', title: 'Space on disk is freed once kopia\'s maintenance runs' },
       el('span', { class: 'c-added' }, '✓ Deleted')),
+    failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
+  }[j.state]();
+  return el('li', { class: `${j.state}${jobActive(j) ? ' active' : ''}` },
+    el('div', { class: 'what' }, el('span', { class: 'muted' }, 'Snapshot of '), el('b', {}, j.source),
+      el('span', { class: 'muted' }, `, ${formatFull(j.snapshotTime)}`)),
+    status);
+}
+
+// A snapshot being pinned or unpinned, in the panel at the bottom, with undoing it, unless its pins have been
+// changed again since, or it's gone
+export function pinItem(j) {
+  const pinning = !!j.add.length;
+  const loc = storage.find(l => l.path === j.source);
+  const now = j.info && loc?.snapshots.find(s => s.id === j.info.id);
+  const later = jobList.some(o => o.kind === 'pin' && o.id > j.id && o.snapshot === j.info?.id);
+  const status = {
+    running: () => el('div', { class: 'status muted' }, pinning ? 'Pinning…' : 'Unpinning…'),
+    done: () => el('div', { class: 'status' },
+      el('span', { class: 'c-added' }, pinning ? `✓ Pinned as ${pinNames(j.add)}` : '✓ Unpinned'),
+      now && !later ? el('button', { class: 'linklike', onclick: () => changePins(loc, now, j.remove, j.add) }, 'Undo') : null),
     failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
   }[j.state]();
   return el('li', { class: `${j.state}${jobActive(j) ? ' active' : ''}` },

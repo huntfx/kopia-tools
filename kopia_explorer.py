@@ -114,9 +114,6 @@ class DiskCache:
         partial.unlink(missing_ok=True)
 
 
-# What a snapshot's pinned as, which KopiaUI pins them as too
-PIN = 'do-not-delete'
-
 diff_cache = DiskCache('diffs')
 listing_cache = DiskCache('listings')
 dates_cache = DiskCache('dates')
@@ -139,7 +136,6 @@ class Repository:
         self.snapshots = {}   # id -> kopia's snapshot JSON, for diffs and downloads
         self.ignores = {}     # source -> its ignore rules, read once
         self.progress = {}    # How working out storage stats is getting on, for the page to show
-        self.pinning = set()  # Snapshots being pinned or unpinned, by ID, which can't be deleted meanwhile
         self.info = self.read_info()
 
     @staticmethod
@@ -228,29 +224,19 @@ class Repository:
             partial.unlink(missing_ok=True)
             print(f'  couldn\'t save storage stats: {e}', flush=True)
 
-    def set_pinned(self, snapshot_id, pinned):
-        """Pin a snapshot, so kopia's retention policy never deletes it, as KopiaUI does, or take all its pins
-        off. Kopia saves it again with a new ID, so its storage stats, diffs and dates go with it, as they
+    def change_pins(self, snapshot_id, add=(), remove=()):
+        """Pin a snapshot under names, so kopia's retention policy never deletes it, as KopiaUI does, or take pins
+        off it. Kopia saves it again with a new ID, so its storage stats, diffs and dates go with it, as they
         haven't changed, rather than being worked out again. Returns it as the page wants it."""
-        if being_deleted(snapshot_id):
-            raise BusyError('That snapshot is being deleted')
-        # Marked first, so it can't be deleted meanwhile, which kopia would try by its old ID
-        self.pinning.add(snapshot_id)
-        try:
-            return self.change_pins(snapshot_id, pinned)
-        finally:
-            self.pinning.discard(snapshot_id)
-
-    def change_pins(self, snapshot_id, pinned):
         with self.lock:
             snap = self.snapshots[snapshot_id]
-            if snap.get('incomplete'):
-                raise BusyError('Only finished snapshots can be pinned')
             pins = snap.get('pins') or []
-            if pinned == bool(pins):
+            add = [p for p in add if p not in pins]
+            remove = [p for p in remove if p in pins]
+            if not add and not remove:
                 fresh = snap
             else:
-                kopia('snapshot', 'pin', snapshot_id, *([f'--add={PIN}'] if pinned else [f'--remove={p}' for p in pins]))
+                kopia('snapshot', 'pin', snapshot_id, *[f'--add={p}' for p in add], *[f'--remove={p}' for p in remove])
                 source = snap['source']['path']
                 fresh = next(s for s in list_snapshots(source) if s['source'] == snap['source']
                              and s['startTime'] == snap['startTime'] and s['rootEntry']['obj'] == snap['rootEntry']['obj'])
@@ -1092,7 +1078,7 @@ def start_delete(snapshot_id):
         raise BusyError('That snapshot is still being made')
     if being_deleted(snapshot_id):
         raise BusyError('That snapshot is already being deleted')
-    if snapshot_id in repository.pinning:
+    if being_pinned(snapshot_id):
         raise BusyError('That snapshot is being pinned or unpinned')
     job = {
         'id': next(job_ids), 'kind': 'delete', 'name': snap['source']['path'], 'source': snap['source']['path'],
@@ -1108,6 +1094,44 @@ def run_delete(job):
     try:
         kopia('snapshot', 'delete', job['snapshot'], '--delete')
         repository.snapshots.pop(job['snapshot'], None)
+        job['state'] = 'done'
+    except Exception as e:
+        job.update(state='failed', error=kopia_reason(e))
+    finally:
+        job['finished'] = time.time()
+
+
+def being_pinned(snapshot_id):
+    return any(j['kind'] == 'pin' and j['snapshot'] == snapshot_id and not j['finished'] for j in jobs.values())
+
+
+def start_pin(snapshot_id, add, remove):
+    """Pin a finished snapshot under names, or take pins off it, in the background, returning its progress record.
+    Meanwhile it can't be deleted, as kopia gives it a new ID, and the delete would be by its old one. Once done,
+    the record has the snapshot as it is now, for the page to follow it to its new ID."""
+    snap = repository.snapshots[snapshot_id]
+    if snap.get('incomplete'):
+        raise BusyError('Only finished snapshots can be pinned')
+    if being_deleted(snapshot_id):
+        raise BusyError('That snapshot is being deleted')
+    if being_pinned(snapshot_id):
+        raise BusyError('That snapshot is already being pinned or unpinned')
+    add, remove = [p.strip() for p in add if p.strip()], [p.strip() for p in remove if p.strip()]
+    if not add and not remove:
+        raise ValueError('No pins to add or remove')
+    job = {
+        'id': next(job_ids), 'kind': 'pin', 'name': snap['source']['path'], 'source': snap['source']['path'],
+        'snapshot': snapshot_id, 'snapshotTime': snap['startTime'], 'add': add, 'remove': remove, 'info': None,
+        'state': 'running', 'error': None, 'started': time.time(), 'finished': None,
+    }
+    jobs[job['id']] = job
+    threading.Thread(target=run_pin, args=(job,), daemon=True).start()
+    return job
+
+
+def run_pin(job):
+    try:
+        job['info'] = repository.change_pins(job['snapshot'], job['add'], job['remove'])
         job['state'] = 'done'
     except Exception as e:
         job.update(state='failed', error=kopia_reason(e))
@@ -1231,7 +1255,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/snapshot/delete':
                 return self.send_json(start_delete(body['id']))
             if self.path == '/api/snapshot/pin':
-                return self.send_json(repository.set_pinned(body['id'], bool(body['pinned'])))
+                return self.send_json(start_pin(body['id'], body.get('add') or [], body.get('remove') or []))
             if self.path == '/api/jobs/clear':
                 for job in [j for j in jobs.values() if j['finished']]:
                     del jobs[job['id']]
