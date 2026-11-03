@@ -5,9 +5,8 @@ import { currentPath, locationDot } from './storage.js';
 
 // items: { key, label, prefix?, folder, location?, live?, size, files, modified, pick?, open }
 // up: { label, go } or null. rerender returns a fresh copy of the panel, for re-sorting. empty is what to say with
-// no items. controls, if given, go at the right of the heading. Only the first few are listed, and the one picked,
-// with the rest a click away, kept while moving around the page.
-let showAllContents = false;
+// no items. controls, if given, go at the right of the heading. They're listed a page at a time, or all at once.
+const contentsPaging = newPaging();
 
 export function contentsTable(legend, up, items, rerender, empty = 'Empty folder', controls = null) {
   const columns = [
@@ -30,6 +29,8 @@ export function contentsTable(legend, up, items, rerender, empty = 'Empty folder
     el('td', { class: 'num', style: item.size ? `color:${textColour(gradientRgb(positions.get(item.size)))}` : null }, formatSize(item.size)),
     el('td', { class: 'num' }, item.folder && item.files != null ? plural(item.files, 'file') : ''),
     el('td', { class: 'num' }, item.modified ? formatFull(item.modified) : ''));
+  const page = pageOf(contentsPaging, sorted, `${currentPath()}\n${JSON.stringify(tableSorts.contents)}`,
+    item => item.key === ui.pickedRow, () => panel.replaceWith(rerender()), 4);
   const panel = el('section', { class: 'panel' },
     el('div', { class: 'chart-head' }, el('h2', {}, 'Contents'), legend ? el('span', { class: 'legend' }, legend) : null,
       controls ? el('span', { class: 'chart-controls' }, controls) : null),
@@ -38,22 +39,65 @@ export function contentsTable(legend, up, items, rerender, empty = 'Empty folder
         sortableHead(tableSorts.contents, columns, () => panel.replaceWith(rerender())),
         el('tbody', {},
           up ? upTableRow(up.label, up.go, 3) : null,
-          (showAllContents ? sorted : sorted.filter((item, i) => i < SHOWN || item.key === ui.pickedRow)).map(row),
+          page.rows.map(row),
           sorted.length ? null : el('tr', {}, el('td', { class: 'muted', colspan: 4 }, empty)),
-          showAllRow(sorted.length, showAllContents, () => {
-            showAllContents = !showAllContents;
-            panel.replaceWith(rerender());
-          }, 4)))));
+          page.footer))));
   return panel;
 }
 
-// Long tables list only their first few rows
+// Long tables list a page of rows at a time
 export const SHOWN = 16;
 
-// The rest of them a click away, as a table's last row, if there are more
-export function showAllRow(count, showingAll, toggle, span) {
-  return count > SHOWN ? el('tr', {}, el('td', { colspan: span },
-    el('button', { class: 'linklike', onclick: toggle }, showingAll ? 'Show fewer' : `Show all ${count.toLocaleString('en-GB')}`))) : null;
+// Where a table's paging is: the page it's on, which rows that's of, and whether it's showing them all instead,
+// which carries over while moving around the page
+export function newPaging() {
+  return { page: 0, of: null, all: false };
+}
+
+// The rows on a table's page, and the row going between pages to go last. of says which rows they are, such as the
+// folder and how they're sorted; for other rows, it starts again at the page with the one picked, if any, or the
+// first.
+export function pageOf(paging, sorted, of, isPicked, rerender, span) {
+  const pages = Math.ceil(sorted.length / SHOWN);
+  // The same rows filtered differently are other rows too
+  of = `${of}\n${sorted.length}`;
+  if (paging.of !== of) {
+    const picked = sorted.findIndex(isPicked);
+    Object.assign(paging, { of, page: picked < 0 ? 0 : Math.floor(picked / SHOWN) });
+  }
+  const start = paging.page * SHOWN;
+  return {
+    rows: paging.all ? sorted : sorted.slice(start, start + SHOWN),
+    footer: pages > 1 ? pagerRow(paging, sorted.length, pages, rerender, span) : null,
+  };
+}
+
+// Which rows are shown, and going to another page: the one before or after, the first or last, or one near this
+// one, with … for those between, or showing them all
+function pagerRow(paging, count, pages, rerender, span) {
+  const go = changes => () => {
+    Object.assign(paging, changes);
+    rerender();
+  };
+  const rows = page => `${(page * SHOWN + 1).toLocaleString('en-GB')}–${Math.min((page + 1) * SHOWN, count).toLocaleString('en-GB')}`;
+  const number = page => (page === paging.page
+    ? el('span', { class: 'current', 'aria-current': 'page' }, page + 1)
+    : el('button', { class: 'linklike', title: `Rows ${rows(page)}`, onclick: go({ page }) }, page + 1));
+  // One missing between two is shown rather than …, which would take as much room
+  const near = [0, paging.page - 1, paging.page, paging.page + 1, pages - 1].filter((page, i, all) => page >= 0 && page < pages && all.indexOf(page) === i).sort((a, b) => a - b);
+  const numbers = near.flatMap((page, i) => {
+    const gap = i ? page - near[i - 1] : 1;
+    return [gap === 2 ? number(page - 1) : gap > 2 ? el('span', { class: 'muted' }, '…') : null, number(page)];
+  });
+  const step = (page, symbol, label) => el('button', {
+    class: 'linklike', 'aria-label': label, title: page < 0 || page >= pages ? null : `Rows ${rows(page)}`,
+    disabled: page < 0 || page >= pages, onclick: go({ page }),
+  }, symbol);
+  return el('tr', { class: 'pager-row' }, el('td', { colspan: span }, el('div', { class: 'pager' },
+    el('span', { class: 'muted' }, paging.all ? `All ${count.toLocaleString('en-GB')}` : `${rows(paging.page)} of ${count.toLocaleString('en-GB')}`),
+    el('span', { class: 'pages' },
+      paging.all ? null : [step(paging.page - 1, '‹', 'Previous page'), numbers, step(paging.page + 1, '›', 'Next page')],
+      el('button', { class: 'linklike show-all', onclick: go({ all: !paging.all }) }, paging.all ? 'Show pages' : 'Show all')))));
 }
 
 // How each table is sorted, kept while moving between folders

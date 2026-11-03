@@ -4,8 +4,8 @@ import { api, notLoaded } from './data.js';
 import { hasPattern, matchingFiles, patterns, togglePattern } from './filter.js';
 import { el, formatSize, plural } from './format.js';
 import { state } from './state.js';
-import { folderObj } from './storage.js';
-import { SHOWN, showAllRow, sortRows, sortableHead, tableSorts, upTableRow } from './tables.js';
+import { currentPath, folderObj } from './storage.js';
+import { newPaging, pageOf, sortRows, sortableHead, tableSorts, upTableRow } from './tables.js';
 
 // A type's name: its extension, or for files without one, saying so
 export const typeName = extension => extension || 'No extension';
@@ -25,9 +25,9 @@ export const toggleTypeFilter = extension => togglePattern(typePattern(extension
 // The folder in scope's file types at the snapshot being viewed, as the Contents box's other view: each one's size,
 // with its share of the whole, and files, counting everything in here, below the same row going up a folder.
 // With a filter, only the files it lets through count. Double-clicking one adds its extension to the filter, or
-// takes it out, like its band in the size chart, and ones in it are picked out. Only the first few are listed, as
-// in the other view, with the rest a click away, kept while moving around the page.
-let showAll = false;
+// takes it out, like its band in the size chart, and ones in it are picked out. They're listed a page at a time,
+// or all at once, as in the other view.
+const typesPaging = newPaging();
 
 export function typesTable(selected, up, rerender) {
   const obj = folderObj(selected, state.scope);
@@ -44,14 +44,15 @@ export function typesTable(selected, up, rerender) {
     { key: 'files', label: 'Files', value: t => t.files, desc: true },
   ];
   const sorted = sortRows(types, tableSorts.types, columns, () => false, t => t.name);
-  // Ones in the filter always show here
-  const listed = showAll ? sorted : sorted.filter((t, i) => i < SHOWN || hasPattern(typePattern(t.extension)));
+  // Starting at the first in the filter, if any
+  const page = pageOf(typesPaging, sorted, `${currentPath()}\n${JSON.stringify(tableSorts.types)}`,
+    t => hasPattern(typePattern(t.extension)), rerender, 3);
   return el('div', { class: 'table-wrap' },
     el('table', { class: 'file-types' },
       sortableHead(tableSorts.types, columns, rerender),
       el('tbody', {},
         up ? upTableRow(up.label, up.go, 2) : null,
-        listed.map(t => el('tr', {
+        page.rows.map(t => el('tr', {
           class: `type-row${hasPattern(typePattern(t.extension)) ? ' picked' : ''}`,
           title: typeHint(t.extension, 'Double-click'),
           ondblclick: () => toggleTypeFilter(t.extension),
@@ -62,5 +63,5 @@ export function typesTable(selected, up, rerender) {
           formatSize(t.size)),
         el('td', { class: 'num' }, plural(t.files, 'file')))),
         sorted.length ? null : el('tr', {}, el('td', { class: 'muted', colspan: 3 }, patterns().length ? `No ${matchingFiles()} in here` : 'No files in here')),
-        showAllRow(sorted.length, showAll, () => { showAll = !showAll; rerender(); }, 3))));
+        page.footer)));
 }

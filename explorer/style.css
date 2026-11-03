@@ -256,6 +256,14 @@ tbody tr { cursor: pointer; }
 tbody tr:hover { background: var(--surface-2); }
 tbody tr.picked { background: var(--accent-bg); }
 tbody tr.picked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+/* Going between a long table's pages, as its last row: which rows are shown, then the pages, with this one picked out */
+tbody tr.pager-row:hover { background: none; }
+.pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 0.85rem; }
+.pager .pages { display: flex; align-items: center; gap: 2px; }
+.pager .pages > * { min-width: 1.9em; padding: 2px 6px; border-radius: 4px; text-align: center; }
+.pager .linklike:hover:not(:disabled) { background: var(--surface-2); text-decoration: none; }
+.pager .current { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+.pager .show-all { margin-left: 10px; }
 th[aria-sort] { color: var(--ink); }
 .sort-head {
   background: none; border: 0; padding: 0; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit;
