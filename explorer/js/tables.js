@@ -5,7 +5,10 @@ import { currentPath, locationDot } from './storage.js';
 
 // items: { key, label, prefix?, folder, location?, live?, size, files, modified, pick?, open }
 // up: { label, go } or null. rerender returns a fresh copy of the panel, for re-sorting. empty is what to say with
-// no items. controls, if given, go at the right of the heading.
+// no items. controls, if given, go at the right of the heading. Only the first few are listed, and the one picked,
+// with the rest a click away, kept while moving around the page.
+let showAllContents = false;
+
 export function contentsTable(legend, up, items, rerender, empty = 'Empty folder', controls = null) {
   const columns = [
     { key: 'name', label: 'Name', value: i => (i.prefix || '') + i.label },
@@ -35,9 +38,22 @@ export function contentsTable(legend, up, items, rerender, empty = 'Empty folder
         sortableHead(tableSorts.contents, columns, () => panel.replaceWith(rerender())),
         el('tbody', {},
           up ? upTableRow(up.label, up.go, 3) : null,
-          sorted.map(row),
-          sorted.length ? null : el('tr', {}, el('td', { class: 'muted', colspan: 4 }, empty))))));
+          (showAllContents ? sorted : sorted.filter((item, i) => i < SHOWN || item.key === ui.pickedRow)).map(row),
+          sorted.length ? null : el('tr', {}, el('td', { class: 'muted', colspan: 4 }, empty)),
+          showAllRow(sorted.length, showAllContents, () => {
+            showAllContents = !showAllContents;
+            panel.replaceWith(rerender());
+          }, 4)))));
   return panel;
+}
+
+// Long tables list only their first few rows
+export const SHOWN = 16;
+
+// The rest of them a click away, as a table's last row, if there are more
+export function showAllRow(count, showingAll, toggle, span) {
+  return count > SHOWN ? el('tr', {}, el('td', { colspan: span },
+    el('button', { class: 'linklike', onclick: toggle }, showingAll ? 'Show fewer' : `Show all ${count.toLocaleString('en-GB')}`))) : null;
 }
 
 // How each table is sorted, kept while moving between folders

@@ -5,7 +5,7 @@ import { hasPattern, matchingFiles, patterns, togglePattern } from './filter.js'
 import { el, formatSize, plural } from './format.js';
 import { state } from './state.js';
 import { folderObj } from './storage.js';
-import { sortRows, sortableHead, tableSorts, upTableRow } from './tables.js';
+import { SHOWN, showAllRow, sortRows, sortableHead, tableSorts, upTableRow } from './tables.js';
 
 // A type's name: its extension, or for files without one, saying so
 export const typeName = extension => extension || 'No extension';
@@ -25,9 +25,8 @@ export const toggleTypeFilter = extension => togglePattern(typePattern(extension
 // The folder in scope's file types at the snapshot being viewed, as the Contents box's other view: each one's size,
 // with its share of the whole, and files, counting everything in here, below the same row going up a folder.
 // With a filter, only the files it lets through count. Double-clicking one adds its extension to the filter, or
-// takes it out, like its band in the size chart, and ones in it are picked out. Only the first few are listed,
-// with the rest a click away, kept while moving around the page.
-const SHOWN = 12;
+// takes it out, like its band in the size chart, and ones in it are picked out. Only the first few are listed, as
+// in the other view, with the rest a click away, kept while moving around the page.
 let showAll = false;
 
 export function typesTable(selected, up, rerender) {
@@ -63,8 +62,5 @@ export function typesTable(selected, up, rerender) {
           formatSize(t.size)),
         el('td', { class: 'num' }, plural(t.files, 'file')))),
         sorted.length ? null : el('tr', {}, el('td', { class: 'muted', colspan: 3 }, patterns().length ? `No ${matchingFiles()} in here` : 'No files in here')),
-        // The rest a click away, as the table's last row
-        sorted.length > SHOWN ? el('tr', {}, el('td', { colspan: 3 }, el('button', {
-          class: 'linklike', onclick: () => { showAll = !showAll; rerender(); },
-        }, showAll ? 'Show fewer' : `Show all ${sorted.length}`))) : null)));
+        showAllRow(sorted.length, showAll, () => { showAll = !showAll; rerender(); }, 3))));
 }
