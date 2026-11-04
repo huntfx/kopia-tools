@@ -3,6 +3,7 @@ import { api, redrawSoon } from './data.js';
 import { el, listOf, plural } from './format.js';
 import { backUp, changeSettings, offerSettings } from './jobs.js';
 import { kopiaUIStarted } from './kopiaui.js';
+import { retentionSection } from './retention.js';
 import { navigate } from './state.js';
 import { enclosingLocation, latest, refreshStorage, storage } from './storage.js';
 
@@ -192,10 +193,10 @@ export function separateLine(target, isFolder) {
     el('button', { class: 'linklike', disabled: !scheduleOf(target), onclick: () => scheduleDialog(target, 'separate') }, 'Back up on its own…'));
 }
 
-// Set how often a folder is backed up: a location's schedule (change), a folder inside one backed up on its
-// own (separate), or any other folder on the PC backed up (new). A folder with a schedule of its own is a
-// location, though it has nothing in it until it's backed up, so the last two do that straight away unless
-// unticked, then show it.
+// Set how often a folder is backed up, and how many of its snapshots are kept: a location's (change), a folder
+// inside one backed up on its own (separate), or any other folder on the PC backed up (new). A folder with a
+// schedule of its own is a location, though it has nothing in it until it's backed up, so the last two do that
+// straight away unless unticked, then show it.
 export let scheduleDialogOpen = false;
 
 export async function scheduleDialog(path, mode) {
@@ -229,6 +230,15 @@ export async function scheduleDialog(path, mode) {
   };
   select.addEventListener('change', once);
   once();
+  // What's kept, previewed on the schedule picked: its own interval, or the one it would inherit, with its times
+  // of day, and manual snapshots only if it's picked or set above, where it decides it
+  const scheduleNow = () => ({
+    interval: select.value && select.value !== 'manual' ? Number(select.value) : inherited.interval ?? null,
+    times: current.times, cron: current.cron, manual: select.value === 'manual' || (current.manual && !current.ownManual),
+  });
+  const snapshots = storage.find(l => l.path.toLowerCase() === path.toLowerCase())?.snapshots ?? [];
+  const retention = retentionSection(current.keep, snapshots, scheduleNow, ok => { save.disabled = !ok; });
+  select.addEventListener('change', retention.refresh);
   // A new policy inside another location doesn't pass on the settings above it to that location's backups,
   // unless they're copied in by the parent settings fix, as the page offers for existing ones
   const outer = separate && !current.own ? enclosingLocation({ path })?.loc : null;
@@ -244,11 +254,13 @@ export async function scheduleDialog(path, mode) {
         const manual = select.value === 'manual';
         saved = await api.post('/api/schedule', {
           path, interval: select.value && !manual ? Number(select.value) : null, manual, copySettings: !!outer && copySettings.checked,
+          keep: retention.values(),
         });
       } catch (e) {
         error.textContent = `Couldn't ${separate ? 'back it up' : 'change it'}: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
         error.hidden = false;
-        save.disabled = cancel.disabled = false;
+        save.disabled = !retention.valid();
+        cancel.disabled = false;
         return;
       }
       schedules.clear();
@@ -262,20 +274,26 @@ export async function scheduleDialog(path, mode) {
   }, { change: 'Save', separate: 'Back up on its own', new: 'Back up' }[mode]);
   // Its own name with a backslash, like Code\, or a drive's, like D:\
   const name = `${(path.replace(/\\$/, '').split('\\').pop())}\\`;
-  const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'schedule-title' },
-    el('h2', { id: 'schedule-title' }, { change: 'How often to back up?', separate: `Back up ${name} on its own?`, new: `Back up ${name}?` }[mode]),
+  const dialog = el('dialog', { class: 'confirm retention', 'aria-labelledby': 'schedule-title' },
+    el('h2', { id: 'schedule-title' }, { change: 'How often to back up, and what to keep?', separate: `Back up ${name} on its own?`, new: `Back up ${name}?` }[mode]),
     el('p', { class: 'what' }, el('b', {}, path)),
-    el('label', { class: 'field' }, 'How often', select),
-    separate ? el('label', { class: 'field' }, now, 'Back up now') : null,
-    outer ? el('label', { class: 'field', title: `So backups of ${outer.path} use your settings in here` }, copySettings, 'Apply parent settings fix') : null,
+    el('div', { class: 'retention-body' },
+      el('div', {},
+        el('label', { class: 'field' }, 'How often', select),
+        separate ? el('label', { class: 'field' }, now, 'Back up now') : null,
+        outer ? el('label', { class: 'field', title: `So backups of ${outer.path} use your settings in here` }, copySettings, 'Apply parent settings fix') : null,
+        retention.fields),
+      retention.preview),
     el('p', {}, 'KopiaUI picks up the change when it next refreshes, within 4 hours.'),
     error,
     el('div', { class: 'actions' }, cancel, save));
   dialog.addEventListener('close', () => {
+    retention.stop();
     dialog.remove();
     scheduleDialogOpen = false;
   });
   document.body.append(dialog);
+  retention.refresh();
   dialog.showModal();
   select.focus();
 }

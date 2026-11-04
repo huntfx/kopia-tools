@@ -449,14 +449,15 @@ th[aria-sort] { color: var(--ink); }
   width: 80px; padding: 3px 6px; border: 1px solid var(--axis); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 0.82rem;
 }
 .location-actions textarea:focus, .location-actions input:focus { border-color: var(--accent); outline: none; }
-/* Changing how many snapshots a location keeps: each kind with what it means, and its number beside it, with a
-   preview of what that keeps beside them, or under them when there isn't room */
+/* Changing how often a location's backed up, and how many of its snapshots it keeps: each kind with what it means,
+   and its number beside it, with a preview of what that keeps beside them, or under them when there isn't room */
 .confirm.retention { width: min(1020px, calc(100vw - 32px)); }
 .retention .retention-body { display: grid; grid-template-columns: minmax(0, 400px) minmax(0, 1fr); gap: 24px; align-items: start; }
 @media (max-width: 820px) { .retention .retention-body { grid-template-columns: minmax(0, 1fr); } }
 .retention-preview { min-width: 0; }
 .retention-preview .chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
-.retention-preview h3 { margin: 0; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.retention .retention-section h3 { margin: 18px 0 10px; }
+.retention h3 { margin: 0; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 .retention-preview .note { color: var(--muted); font-size: 0.78rem; margin: 4px 0 0; }
 .retention-chart { position: relative; }
 .retention-chart svg { display: block; width: 100%; height: auto; overflow: visible; }

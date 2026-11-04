@@ -1,9 +1,9 @@
-// Kopia's retention policy: how many of a location's snapshots of each kind it keeps, shown under its schedule and
-// changed from there, as KopiaUI's policy editor does, with a preview of what that keeps: in the long run, on the
-// location's schedule, as retention-preview.html does, or of the snapshots it has now, with which would be deleted.
-import { api, redrawSoon } from './data.js';
+// Kopia's retention policy: how many of a location's snapshots of each kind it keeps, changed along with its
+// schedule, in the schedule dialog, as KopiaUI's policy editor does, with a preview of what that keeps: in the long
+// run, on the schedule picked, as retention-preview.html does, or of the snapshots it has now, with which would be
+// deleted.
 import { el, formatFull, listOf, plural, svgEl, timeAgo } from './format.js';
-import { GO_EPOCH, loadSchedule, scheduleOf, scheduleText, schedules } from './schedules.js';
+import { GO_EPOCH, scheduleText } from './schedules.js';
 
 // Each kind as KopiaUI names and explains it, in the order it lists them, with its name in the preview
 export const RETENTION = [
@@ -14,9 +14,6 @@ export const RETENTION = [
   ['monthly', 'Monthly', 'The latest snapshot from each calendar month is kept', 'Monthly'],
   ['annual', 'Annual', 'The latest snapshot from each calendar year is kept', 'Annual'],
 ];
-
-// How many of each kind are kept: its own setting, or what it inherits, with none set anywhere being none
-const counts = keep => Object.fromEntries(RETENTION.map(([kind]) => [kind, keep[kind].own ?? keep[kind].inherited ?? 0]));
 
 // ---- A port of kopia's snapshot/policy/retention_policy.go, as in retention-preview.html ----
 // Like kopia, hour, day, month and year are taken in UTC, but the ISO week in local time. The periods share one
@@ -128,27 +125,6 @@ function longRunTimes(schedule, keep, now) {
   return times;
 }
 
-// ---- Under the schedule ----
-
-// In words, like "10 latest, 48 hourly, 7 daily", leaving out kinds none are kept of
-function retentionText(keep) {
-  const kept = RETENTION.map(([kind]) => [kind, counts(keep)[kind]]).filter(([, n]) => n);
-  return kept.length ? `Keeps ${kept.map(([kind, n]) => `${n} ${kind}`).join(', ')}` : 'Keeps every snapshot';
-}
-
-// Where each setting comes from, for its tooltip
-function retentionSources(keep) {
-  return RETENTION.map(([kind, name]) => `${name}: ${keep[kind].own != null ? 'set for this folder' : keep[kind].from ? `set by ${keep[kind].from}` : 'not set'}`).join('\n');
-}
-
-// Under the actions of the location being looked at: how many of its snapshots are kept, with changing that
-export function retentionLine(loc) {
-  const keep = scheduleOf(loc.path)?.keep;
-  return el('div', { class: 'schedule' },
-    keep ? el('span', { title: retentionSources(keep) }, retentionText(keep)) : el('span', { class: 'muted' }, '…'),
-    el('button', { class: 'linklike', disabled: !keep, onclick: () => retentionDialog(loc) }, 'Change…'));
-}
-
 // ---- The preview ----
 
 // Kopia's name clash, in words: weeks the weekly kind lost to January to December, as kopia gives week 1 the same
@@ -252,32 +228,37 @@ function drawTimeline(box, points) {
   box.append(svg, tip);
 }
 
-// In the long run on its schedule, if that can be worked out, or the snapshots it has now. Drawn again as the
-// numbers change.
-function retentionPreview(loc, schedule) {
-  let mode = simulable(schedule) ? 'long' : 'now';
+// In the long run on the schedule being picked, if that can be worked out, or the snapshots it has now. Drawn
+// again as the numbers or the schedule change.
+function retentionPreview(snapshots, scheduleNow) {
+  let mode = simulable(scheduleNow()) ? 'long' : 'now';
   let shown = null;
   const summary = el('p', {});
   const chart = el('div', { class: 'retention-chart' });
   const clash = el('p', { class: 'warn', hidden: true });
-  const buttons = [['In the long run', 'long', simulable(schedule)
-    ? `What kopia would be keeping once it's been backing up ${scheduleText(schedule).toLowerCase()} for long enough`
-    : 'Its schedule is manual or custom, so can\'t be worked out'],
-  ['Its snapshots now', 'now', 'Which of the snapshots it has now would be kept, and which deleted']].map(([label, value, title]) =>
-    el('button', { 'aria-pressed': String(mode === value), title, disabled: value === 'long' && !simulable(schedule),
-      onclick: () => { mode = value; buttons.forEach(b => b.setAttribute('aria-pressed', String(b === buttons[value === 'long' ? 0 : 1]))); draw(shown); } }, label));
+  const [long, now] = [['In the long run', 'long'], ['Its snapshots now', 'now']].map(([label, value]) =>
+    el('button', { onclick: () => { mode = value; draw(shown); } }, label));
+  now.title = 'Which of the snapshots it has now would be kept, and which deleted';
   const draw = keep => {
     shown = keep;
+    const schedule = scheduleNow();
+    // The long run's only there for a schedule that can be worked out, so it's left when one's picked that can't
+    if (!simulable(schedule)) mode = 'now';
+    long.disabled = !simulable(schedule);
+    long.title = simulable(schedule)
+      ? `What kopia would be keeping once it's been backing up ${scheduleText(schedule).toLowerCase()} for long enough`
+      : 'Manual or custom schedules can\'t be worked out';
+    long.setAttribute('aria-pressed', String(mode === 'long'));
+    now.setAttribute('aria-pressed', String(mode === 'now'));
     if (!keep) {
       summary.textContent = '';
       chart.replaceChildren();
       clash.hidden = true;
       return;
     }
-    const now = Date.now();
     let points, collisions;
     if (mode === 'long') {
-      const times = longRunTimes(schedule, keep, now);
+      const times = longRunTimes(schedule, keep, Date.now());
       const ranked = rank(times, keep);
       collisions = ranked.collisions;
       points = times.map((time, i) => ({ time, reasons: ranked.reasons[i] })).filter(p => p.reasons.length);
@@ -286,7 +267,7 @@ function retentionPreview(loc, schedule) {
         ? `Backing up ${scheduleText(schedule).toLowerCase()}, kopia keeps ${plural(points.length, 'snapshot')} once it's been going long enough, the oldest from ${timeAgo(new Date(oldest.time).toISOString())}.`
         : 'Kopia would keep none of its snapshots.';
     } else {
-      const complete = loc.snapshots.filter(s => !s.incomplete).sort((a, b) => b.time.localeCompare(a.time));
+      const complete = snapshots.filter(s => !s.incomplete).sort((a, b) => b.time.localeCompare(a.time));
       const ranked = rank(complete.map(s => Date.parse(s.time)), keep);
       collisions = ranked.collisions;
       points = complete.map((s, i) => {
@@ -305,7 +286,7 @@ function retentionPreview(loc, schedule) {
   };
   return {
     element: el('section', { class: 'retention-preview' },
-      el('div', { class: 'chart-head' }, el('h3', {}, 'Preview'), el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What to preview' }, buttons)),
+      el('div', { class: 'chart-head' }, el('h3', {}, 'Preview'), el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What to preview' }, long, now)),
       summary, chart,
       el('p', { class: 'note' }, 'How much older each is than the newest, on a log scale. Hover over one to see what keeps it.'),
       clash),
@@ -313,22 +294,21 @@ function retentionPreview(loc, schedule) {
   };
 }
 
-// ---- Changing it ----
+// ---- Changing it, in the schedule dialog ----
 
 // What saving would delete, as far as can be told from the snapshots there are now: ones no rule keeps, unless
 // they're pinned, which kopia never deletes. Kopia tidies up after the next snapshot, so the oldest that's now
 // only kept as one of the latest may go then too.
-function wouldDelete(loc, keep) {
-  const reasons = retentionReasons(loc.snapshots, keep);
-  return loc.snapshots.filter(s => !s.incomplete && !s.pins?.length && reasons.get(s.id)?.length === 0);
+function wouldDelete(snapshots, keep) {
+  const reasons = retentionReasons(snapshots, keep);
+  return snapshots.filter(s => !s.incomplete && !s.pins?.length && reasons.get(s.id)?.length === 0);
 }
 
-export function retentionDialog(loc) {
-  if (document.querySelector('dialog.retention')) return;
-  const path = loc.path;
-  const schedule = scheduleOf(path);
-  const keep = schedule?.keep;
-  if (!keep) return;
+// How many of a folder's snapshots to keep, for the schedule dialog: a field for each kind, what saving would
+// delete of the snapshots it has, and the preview, on the schedule the dialog has picked, from scheduleNow. Its
+// values are what to save, null for each to inherit; whether they're all whole numbers or empty is passed to
+// changed whenever they change. Refresh draws it again, as after the schedule's changed.
+export function retentionSection(keep, snapshots, scheduleNow, changed) {
   const fields = RETENTION.map(([kind, name, about]) => {
     const { own, inherited, from } = keep[kind];
     // Left empty, it's inherited, which the placeholder says, as KopiaUI shows it
@@ -341,32 +321,12 @@ export function retentionDialog(loc) {
   const values = () => Object.fromEntries(fields.map(f => [f.kind, f.input.value === '' ? null : Number(f.input.value)]));
   const valid = () => fields.every(f => f.input.value === '' || (Number.isInteger(Number(f.input.value)) && Number(f.input.value) >= 0));
   const effective = () => Object.fromEntries(Object.entries(values()).map(([kind, n]) => [kind, n ?? keep[kind].inherited ?? 0]));
-  const preview = retentionPreview(loc, schedule);
+  const preview = retentionPreview(snapshots, scheduleNow);
   const consequence = el('p', {});
-  const error = el('p', { class: 'error', hidden: true });
-  const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
-  const save = el('button', {
-    class: 'btn primary',
-    onclick: async () => {
-      save.disabled = cancel.disabled = true;
-      try {
-        await api.post('/api/retention', { path, keep: values() });
-      } catch (e) {
-        error.textContent = `Couldn't change it: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
-        error.hidden = false;
-        save.disabled = cancel.disabled = false;
-        return;
-      }
-      schedules.clear();
-      dialog.close();
-      await loadSchedule(path);
-      redrawSoon();
-    },
-  }, 'Save');
-  // What it would delete, and the preview, kept up to date as it's changed, the preview once typing pauses
+  // What it would delete straight away, and the preview once typing pauses
   let previewSoon;
-  const update = () => {
-    save.disabled = !valid();
+  const refresh = () => {
+    changed(valid());
     clearTimeout(previewSoon);
     if (!valid()) {
       consequence.className = 'error';
@@ -374,33 +334,23 @@ export function retentionDialog(loc) {
       preview.draw(null);
       return;
     }
-    const going = wouldDelete(loc, effective());
-    const total = loc.snapshots.filter(s => !s.incomplete).length;
+    const going = wouldDelete(snapshots, effective());
+    const total = snapshots.filter(s => !s.incomplete).length;
     consequence.className = going.length ? 'warn' : '';
     consequence.textContent = going.length
       ? `After its next snapshot, kopia would delete ${going.length} of the ${plural(total, 'snapshot')} it has now, the oldest from ${formatFull(going[0].time)}. Pinned ones are always kept.`
-      : `All ${plural(total, 'snapshot')} it has now would be kept.`;
+      : total ? `All ${plural(total, 'snapshot')} it has now would be kept.` : '';
     previewSoon = setTimeout(() => preview.draw(effective()), 120);
   };
-  for (const f of fields) f.input.addEventListener('input', update);
-  const dialog = el('dialog', { class: 'confirm retention', 'aria-labelledby': 'retention-title' },
-    el('h2', { id: 'retention-title' }, 'How many snapshots to keep?'),
-    el('p', { class: 'what' }, el('b', {}, path)),
-    el('div', { class: 'retention-body' },
-      el('div', {},
-        el('div', { class: 'retention-fields' }, fields.map(f => f.element)),
-        el('p', {}, 'Left empty, each is inherited. Snapshots kept by any of them stay; kopia deletes the rest after the next snapshot.'),
-        consequence),
-      preview.element),
-    el('p', {}, 'KopiaUI picks up the change when it next refreshes, within 4 hours.'),
-    error,
-    el('div', { class: 'actions' }, cancel, save));
-  dialog.addEventListener('close', () => {
-    clearTimeout(previewSoon);
-    dialog.remove();
-  });
-  document.body.append(dialog);
-  update();
-  dialog.showModal();
-  fields[0].input.focus();
+  for (const f of fields) f.input.addEventListener('input', refresh);
+  return {
+    fields: el('div', { class: 'retention-section' },
+      el('h3', {}, 'Snapshots to keep'),
+      el('div', { class: 'retention-fields' }, fields.map(f => f.element)),
+      el('p', {}, 'Left empty, each is inherited. Snapshots kept by any of them stay; kopia deletes the rest after the next snapshot.'),
+      consequence),
+    preview: preview.element,
+    values, valid, refresh,
+    stop: () => clearTimeout(previewSoon),
+  };
 }

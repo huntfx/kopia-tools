@@ -1267,29 +1267,18 @@ def retention_of(chain, policies):
     return keep
 
 
-def set_retention(path, keep):
-    """Set how many of a location's snapshots of each kind its own policy keeps, as KopiaUI's policy editor does:
-    a whole number, or None to inherit it, taken out of the policy. Kopia applies it after the location's next
-    snapshot. It's exported, changed and imported back, as kopia's policy set can't put one back to inherited."""
-    if path not in repository.sources:
-        raise PermissionError(f'{path} isn\'t a backup location')
+def set_retention(policy, keep):
+    """Set how many snapshots of each kind a policy keeps, as KopiaUI's policy editor does: a whole number, or None
+    to inherit it, taken out of the policy. Kopia applies it after the location's next snapshot."""
     for kind, count in keep.items():
         if kind not in RETENTION or (count is not None and (not isinstance(count, int) or isinstance(count, bool) or count < 0)):
             raise KeyError(kind)
-    key = policy_key(path)
-    existing = json.loads(kopia('policy', 'export')).get(key)
-    # Without a policy of its own, one's only made for settings to go in
-    if existing is None and all(count is None for count in keep.values()):
-        return schedule_of(path)
-    policy = existing or {}
     retention = policy.setdefault('retention', {})
     for kind, count in keep.items():
         if count is None:
             retention.pop(RETENTION[kind], None)
         else:
             retention[RETENTION[kind]] = count
-    import_policy(key, policy)
-    return schedule_of(path)
 
 
 def all_schedules():
@@ -1299,10 +1288,11 @@ def all_schedules():
     return {path: schedule_of(path, policies, nested=False) for path in sorted(repository.sources)}
 
 
-def set_schedule(path, interval, manual=False, copy_settings=False):
+def set_schedule(path, interval, manual=False, copy_settings=False, keep=None):
     """Back a folder up every so often on its own, or with manual snapshots only, or with neither, as the policy
-    above it says. Only its own policy's schedule changes: it's exported, changed and imported back, as kopia's
-    policy set can't put an interval back to inherited. Any folder on the PC can have one, which makes it a
+    above it says, keeping as many of its snapshots of each kind as given, if they are. Only its own policy's
+    schedule and retention change: it's exported, changed and imported back, as kopia's policy set can't put an
+    interval back to inherited. Any folder on the PC can have one, which makes it a
     backup location: kopia's scheduler backs up folders with a policy of their own, unless manual snapshots
     only. A new one inside another location can have the settings it would inherit copied in too."""
     # Tidied, so the same folder typed differently is the same location
@@ -1327,6 +1317,8 @@ def set_schedule(path, interval, manual=False, copy_settings=False):
         # Backed up on a schedule, so not manual snapshots only
         scheduling.update(intervalSeconds=interval)
         scheduling.pop('manual', None)
+    if keep is not None:
+        set_retention(policy, keep)
     import_policy(key, policy)
     # Without the settings it would inherit, the location it's in stops using them in here when backed up
     if copy_settings and existing is None and containing_location(path):
@@ -1950,9 +1942,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(unmount(body['id']))
             if self.path == '/api/schedule':
                 return self.send_json(set_schedule(body['path'], body['interval'], bool(body.get('manual')),
-                                                   bool(body.get('copySettings'))))
-            if self.path == '/api/retention':
-                return self.send_json(set_retention(body['path'], body['keep']))
+                                                   bool(body.get('copySettings')), body.get('keep')))
             if self.path == '/api/copied-settings':
                 return self.send_json(start_settings(bool(body.get('undo')), body.get('paths')))
             if self.path == '/api/pick-folder':
