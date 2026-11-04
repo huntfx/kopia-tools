@@ -2,6 +2,7 @@
 import { api, redrawSoon } from './data.js';
 import { el, listOf, plural } from './format.js';
 import { backUp, changeSettings, offerSettings } from './jobs.js';
+import { kopiaUIStarted } from './kopiaui.js';
 import { navigate } from './state.js';
 import { enclosingLocation, latest, refreshStorage, storage } from './storage.js';
 
@@ -95,6 +96,10 @@ export function nextSnapshotTime(schedule, last, now = Date.now()) {
 // How long after a snapshot's due it's taken as overdue, rather than KopiaUI still getting round to it, as it
 // backs locations up one after another when several are due together
 export const OVERDUE = 60 * 60 * 1000;
+
+// When KopiaUI could first start on a snapshot that's due: when it fell due, or when KopiaUI started, if that's
+// since, as it then backs up whatever fell due while it wasn't running
+export const dueFrom = next => Math.max(next, kopiaUIStarted() ?? 0);
 
 // When kopia's scheduler next backs a location up, after its last complete snapshot, as of a time, which may
 // have passed: undefined while its schedule's loading, and null with none to come

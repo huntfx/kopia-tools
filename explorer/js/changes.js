@@ -181,7 +181,7 @@ export function compareTarget(loc, selected) {
 export function renderChanges(loc, selected) {
   const panel = el('section', { class: 'panel' });
   if (selected.incomplete) {
-    panel.append(el('h2', {}, 'Changes'), el('p', { class: 'note' }, `This snapshot ${unfinished(selected)}, so its changes aren't shown.`));
+    panel.append(el('h2', {}, 'Changes'), el('p', { class: 'note' }, `This snapshot ${unfinished(selected).is}, so its changes aren't shown.`));
     return panel;
   }
   const complete = loc.snapshots.filter(s => !s.incomplete);

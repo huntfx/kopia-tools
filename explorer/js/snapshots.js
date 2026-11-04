@@ -8,7 +8,7 @@ import { backupButton, beingDeleted, beingPinned, confirmDelete, confirmPin } fr
 import { scheduleLine, separateLine } from './schedules.js';
 import { diskText, locationsBelow, sidebarSnapshot, treeNodes } from './sidebar.js';
 import { navigate, state, ui } from './state.js';
-import { asOfSnapshot, backingUpNow, currentPath, hiddenAsOf, isCancelled, latest, locationDot, locationOf, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf, unfinished, unreadLines } from './storage.js';
+import { asOfSnapshot, backingUpNow, currentPath, hiddenAsOf, isLive, latest, locationDot, locationOf, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf, unfinished, unreadLines } from './storage.js';
 
 // Viewing a snapshot sets "files as of" to its time, so every location follows; the newest goes back to now
 export const asOfFor = (loc, snap) => (snap === latest(loc) ? null : snap.time);
@@ -261,7 +261,7 @@ function snapshotList(loc, target, isFolder) {
         : navigate({ location: loc.path, asOf: asOfFor(loc, snap), scope: rel, file: null, history: null });
     return el('li', {
       class: classes.filter(Boolean).join(' '),
-      title: deleting ? 'This snapshot is being deleted' : snap.incomplete ? `This snapshot ${unfinished(snap)}`
+      title: deleting ? 'This snapshot is being deleted' : snap.incomplete ? `This snapshot ${unfinished(snap).is}`
         : here ? 'Click to view - Shift-click to compare with it' : 'Click to open at this snapshot',
       onclick: snap.incomplete || deleting ? null : event => (here && event.shiftKey ? pickSnapshot(snap, selected, true) : open()),
     },
@@ -270,7 +270,7 @@ function snapshotList(loc, target, isFolder) {
         el('span', { class: 'when' }, formatFull(snap.time)),
         snap === latest(loc) ? el('span', { class: 'tag' }, 'latest') : null,
         snap === other ? el('span', { class: 'tag' }, 'compared') : null,
-        snap.incomplete ? el('span', { class: 'badge' }, isCancelled(snap) ? 'Cancelled' : 'In progress') : null,
+        snap.incomplete ? el('span', { class: 'badge' }, unfinished(snap).badge) : null,
         deleting ? el('span', { class: 'badge' }, 'Deleting…') : null,
         // Left out what it couldn't read
         !snap.incomplete && snap.failed ? el('span', { class: 'badge error', title: `Couldn't read, so not in this snapshot:\n${unreadLines(snap)}` }, plural(snap.failed, 'error')) : null,
@@ -292,7 +292,7 @@ function snapshotList(loc, target, isFolder) {
         }, PIN_ICON()) : null,
         // Not one still being made, which kopia replaces as it goes, nor while it's being pinned, as kopia gives
         // it a new ID
-        !deleting && (!snap.incomplete || isCancelled(snap)) ? el('button', {
+        !deleting && !isLive(snap) ? el('button', {
           class: 'delete', disabled: pinningIt, 'aria-label': 'Delete this snapshot',
           title: pinningIt ? `Wait until it's ${snap.pins?.length ? 'unpinned' : 'pinned'}` : 'Delete this snapshot…',
           onclick: event => { event.stopPropagation(); confirmDelete(loc, snap, rel, isFolder); },

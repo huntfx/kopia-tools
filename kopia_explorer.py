@@ -143,6 +143,7 @@ class Repository:
         self.ignores = {}     # source -> its ignore rules, read once
         self.progress = {}    # How working out storage stats is getting on, for the page to show
         self.renames = {}     # old id -> new id, for snapshots pinned or unpinned, for the page to follow them
+        self.live = set()     # IDs of checkpoints of backups still going, as of when the snapshots were last read
         self.info = self.read_info()
 
     @staticmethod
@@ -201,11 +202,15 @@ class Repository:
                 self.stats_thread.start()
 
             result = []
+            kopias = kopia_started()
+            self.live = set()
             for source, snaps in sorted(by_source.items(), key=lambda item: item[0].casefold()):
                 snaps.sort(key=lambda s: s['startTime'])
+                if snaps and still_going(snaps[-1], kopias, read):
+                    self.live.add(snaps[-1]['id'])
                 stats = self.stats.get(source, {}).get('stats', {})
                 result.append({'path': source, 'host': self.info['host'], 'user': self.info['user'],
-                               'snapshots': [snapshot_info(s, stats.get(s['id'])) for s in snaps]})
+                               'snapshots': [snapshot_info(s, stats.get(s['id']), s['id'] in self.live) for s in snaps]})
             return {'repository': self.info, 'locations': result, 'read': read, 'working': self.working(), 'renamed': self.renames}
 
     def working(self):
@@ -334,9 +339,43 @@ def source_stats(source):
     return {s['id']: s.get('storageStats') or {} for s in snapshots if s['source']['path'] == source}
 
 
-def snapshot_info(snap, stats):
+# Kopia saves a checkpoint of a backup as it goes, as an incomplete snapshot replacing the one before, at most
+# 45 minutes apart. One left behind by a backup that stopped without finishing, as when KopiaUI was closed or
+# the computer shut down part way, stays as it is, until a backup finishes and kopia's retention policy tidies it.
+CHECKPOINT_EVERY = 45 * 60
+# Allowing for one that's taking a while to be saved
+CHECKPOINT_SLACK = 15 * 60
+
+
+def unix_time(timestamp):
+    # Kopia uses up to 9 fractional digits; seconds are near enough
+    return datetime.fromisoformat(timestamp[:19] + '+00:00').timestamp()
+
+
+def kopia_started():
+    """When each kopia process running started, as Unix times: KopiaUI's server, which makes the scheduled
+    snapshots, and any making one at the command line or from here. None if that can't be found out."""
+    try:
+        return [t for pid, _, name in processes() if name.lower() == 'kopia.exe' and (t := started(pid)) is not None]
+    except OSError:
+        return None
+
+
+def still_going(snap, kopias, now):
+    """Whether a location's newest snapshot is a checkpoint of a backup still going, rather than one left behind:
+    saved recently enough for another to be on its way, by a kopia that's still running, as one started since
+    can't be carrying on with it. A location's backups run one at a time, so older checkpoints are all left behind."""
+    if snap.get('incomplete') != 'checkpoint':
+        return False
+    if now - unix_time(snap.get('endTime') or snap['startTime']) > CHECKPOINT_EVERY + CHECKPOINT_SLACK:
+        return False
+    return kopias is None or any(t <= unix_time(snap['startTime']) for t in kopias)
+
+
+def snapshot_info(snap, stats, live=False):
     """What the page wants to know about a snapshot. Without storage stats, as they're still being worked out,
-    what it added on disk and the running total are None."""
+    what it added on disk and the running total are None. Live says whether it's a checkpoint of a backup still
+    going."""
     new = (stats or {}).get('newData') or {}
     complete = not snap.get('incomplete')
     unknown = stats is None
@@ -345,8 +384,9 @@ def snapshot_info(snap, stats):
         'root': snap['rootEntry']['obj'],
         'mtime': snap['rootEntry'].get('mtime'),
         'time': snap['startTime'],
-        # Why it's incomplete, such as canceled, or a checkpoint of one still going
+        # Why it's incomplete, such as canceled, or a checkpoint, of one still going (live) or left behind
         'incomplete': snap.get('incomplete') or False,
+        'live': live,
         'size': snap['rootEntry'].get('summ', {}).get('size', 0) if complete else None,
         'files': snap['rootEntry'].get('summ', {}).get('files', 0) if complete else None,
         # Folders inside it, as kopia counts the folder itself too
@@ -1488,10 +1528,10 @@ def being_deleted(snapshot_id):
 
 def start_delete(snapshot_id):
     """Delete a snapshot from the repository for good, in the background, returning its progress record. Not one
-    still being made, which kopia replaces as it goes; a cancelled one is fine. Only the snapshot's record goes, so
+    still being made, which kopia replaces as it goes; a cancelled one, or one left behind, is fine. Only the snapshot's record goes, so
     a restore already running from it carries on: its data stays until kopia's maintenance finds nothing uses it."""
     snap = repository.snapshots[snapshot_id]
-    if snap.get('incomplete') and snap['incomplete'] != 'canceled':
+    if snapshot_id in repository.live:
         raise BusyError('That snapshot is still being made')
     if being_deleted(snapshot_id):
         raise BusyError('That snapshot is already being deleted')
@@ -1576,12 +1616,22 @@ KOPIA_UI_PATHS = [Path(os.environ.get(var, '')) / folder / KOPIA_UI for var, fol
 
 def kopia_ui():
     """Whether KopiaUI is running, as only its server makes the scheduled snapshots, and whether it can be
-    started from here. Running is None if it couldn't be told."""
+    started from here. Running is None if it couldn't be told. Since is when its server started, as a Unix time,
+    as it backs up whatever fell due while it wasn't running then, or None if it isn't running or that can't
+    be found out."""
     try:
-        running = any(name.lower() == KOPIA_UI.lower() for _, _, name in processes())
+        running = processes()
     except OSError:
-        running = None
-    return {'running': running, 'startable': any(p.is_file() for p in KOPIA_UI_PATHS)}
+        return {'running': None, 'since': None, 'startable': any(p.is_file() for p in KOPIA_UI_PATHS)}
+    server = kopia_ui_server(running)
+    return {'running': any(name.lower() == KOPIA_UI.lower() for _, _, name in running), 'since': server and started(server),
+            'startable': any(p.is_file() for p in KOPIA_UI_PATHS)}
+
+
+def kopia_ui_server(running):
+    """KopiaUI's server's process ID, among the processes running, as it's the kopia KopiaUI runs itself, or None"""
+    kopia_ui_ids = {pid for pid, _, name in running if name.lower() == KOPIA_UI.lower()}
+    return next((pid for pid, parent, name in running if parent in kopia_ui_ids and name.lower() == 'kopia.exe'), None)
 
 
 def start_kopia_ui():
@@ -1716,9 +1766,7 @@ def snapshot_actions():
         running = processes()
     except OSError:
         running = []
-    # KopiaUI's server is the kopia it runs itself
-    kopia_ui_ids = {pid for pid, _, name in running if name.lower() == KOPIA_UI.lower()}
-    server = next((pid for pid, parent, name in running if parent in kopia_ui_ids and name.lower() == 'kopia.exe'), None)
+    server = kopia_ui_server(running)
     since = server and started(server)
     return {'enabled': enabled, 'policies': repository.actions, 'config': str(config),
             'kopiaUIBehind': bool(since and changed and since < changed)}

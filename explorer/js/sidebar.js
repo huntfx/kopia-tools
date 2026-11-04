@@ -4,7 +4,7 @@ import { el, formatFull, formatSize, gradientPositions, gradientRgb, textColour,
 import { render } from './render.js';
 import { renderMatches, sidebarFilter } from './search.js';
 import { navigate, state } from './state.js';
-import { OVERDUE, loadAllSchedules, nextScheduled, scheduleText, schedules } from './schedules.js';
+import { OVERDUE, dueFrom, loadAllSchedules, nextScheduled, scheduleText, schedules } from './schedules.js';
 import { asOfSnapshot, backingUpNow, currentFolder, hiddenAsOf, locationDot, locationOf, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf } from './storage.js';
 
 // Build a folder tree from the backup locations: the PC at the top, named after the computer the
@@ -267,9 +267,10 @@ function whenCell(loc) {
     return el('span', { class: 'total', title: `Next snapshot ${formatFull(next)}${state.asOf ? '' : ` (${scheduleText(schedule).toLowerCase()})`}` }, when(next));
   }
   // Long past due means kopia's scheduler isn't running, such as KopiaUI being closed
-  return Date.now() - next >= OVERDUE && !backingUpNow(loc)
+  // Kopia only says it's being backed up once it's saved its first checkpoint, up to 45 minutes in
+  return Date.now() - dueFrom(next) >= OVERDUE && !backingUpNow(loc)
     ? el('span', { class: 'total due', title: `Due since ${formatFull(next)} - it's backed up as soon as KopiaUI is running` }, 'overdue')
-    : el('span', { class: 'total', title: `Due at ${formatFull(next)} - KopiaUI backs it up as soon as it gets to it` }, 'due now');
+    : el('span', { class: 'total', title: `Due at ${formatFull(next)} - KopiaUI backs it up as soon as it gets to it, which shows here once kopia's saved what it's got through so far, up to 45 minutes in` }, 'due now');
 }
 
 // The snapshot a location's folders are read from: the one selected if it's open, otherwise its latest

@@ -4,7 +4,7 @@ import { renderFixes } from './fixes.js';
 import { el, formatFull, listOf, plural } from './format.js';
 import { jobList, renderNotice } from './jobs.js';
 import { render } from './render.js';
-import { OVERDUE, loadAllSchedules, nextScheduled } from './schedules.js';
+import { OVERDUE, dueFrom, loadAllSchedules, nextScheduled } from './schedules.js';
 import { buildSidebarTree, forgetExactSize, rescaleTree } from './sidebar.js';
 import { navigate, state, ui, writeHash } from './state.js';
 
@@ -189,18 +189,29 @@ setInterval(() => {
   loadAllSchedules();
   const now = Date.now(), read = storageRead * 1000;
   const due = storage.map(loc => nextScheduled(loc, now)).filter(next => next != null && next + GRACE <= now);
-  const catchingUp = due.some(next => now - next < OVERDUE) || storage.some(backingUpNow);
+  const catchingUp = due.some(next => now - dueFrom(next) < OVERDUE) || storage.some(backingUpNow);
   if (due.some(next => next > read) || now - read >= (catchingUp ? CATCHING_UP : RECHECK)) refreshStorage();
   else redrawSoon();
 }, TICK);
 
-// kopia keeps a backup stopped part way as an incomplete snapshot, saying why: cancelled, or a checkpoint
-// of one still going
-export const isCancelled = snap => snap.incomplete === 'canceled';
+// kopia keeps a backup stopped part way as an incomplete snapshot, saying why: cancelled, or a checkpoint, which
+// it saves as it goes. The server says whether a checkpoint's of a backup still going (live), or was left behind
+// by one that stopped without finishing, such as KopiaUI being closed or the computer shutting down part way.
+const isCancelled = snap => snap.incomplete === 'canceled';
 
-export const unfinished = snap => (isCancelled(snap) ? 'was cancelled before it finished' : 'is still in progress');
+export const isLive = snap => !!snap.incomplete && !!snap.live;
 
-export const backingUpNow = loc => loc.snapshots.some(s => s.incomplete && !isCancelled(s));
+// An unfinished snapshot in words: its badge, as KopiaUI calls one left behind, its status, and what it is
+const UNFINISHED = {
+  cancelled: { badge: 'Cancelled', status: 'Cancelled before it finished', is: 'was cancelled before it finished' },
+  live: { badge: 'In progress', status: 'Still in progress', is: 'is still in progress' },
+  stopped: { badge: 'Incomplete', status: 'Stopped before it finished',
+    is: 'stopped before it finished, as kopia was closed part way, such as by KopiaUI closing or the computer shutting down' },
+};
+
+export const unfinished = snap => UNFINISHED[isCancelled(snap) ? 'cancelled' : isLive(snap) ? 'live' : 'stopped'];
+
+export const backingUpNow = loc => loc.snapshots.some(isLive);
 
 // What the blue dot beside a backup location means, wherever one's listed
 export const LOCATION_DOT = 'Backup location, with its own policy';

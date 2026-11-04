@@ -7,8 +7,12 @@ import { renderNotice } from './jobs.js';
 
 const TICK = 30 * 1000;
 
-// From the server: whether it's running (null if it couldn't tell), and whether it can be started from here
+// From the server: whether it's running (null if it couldn't tell), when its server started, and whether it can
+// be started from here
 let kopiaUI = null;
+
+// When KopiaUI's server started, in milliseconds, or null if it isn't running or that isn't known
+export const kopiaUIStarted = () => (kopiaUI?.running && kopiaUI.since ? kopiaUI.since * 1000 : null);
 
 // Put off until it's next running, so it's only said again once it's closed again
 let putOff = false;

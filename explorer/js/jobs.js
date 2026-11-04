@@ -11,7 +11,7 @@ import { render } from './render.js';
 import { schedules } from './schedules.js';
 import { KEEP_KINDS } from './snapshots.js';
 import { navigate, writeHash } from './state.js';
-import { applyJobs, followRenamed, isCancelled, latest, refreshStorage, snapshotsChanged, storage } from './storage.js';
+import { applyJobs, followRenamed, latest, refreshStorage, snapshotsChanged, storage, unfinished } from './storage.js';
 
 // Restores and backups run on the server, and the panel at the bottom follows them. A restore asks where in
 // a folder picker, then has kopia write it there, so it keeps its modified times; a backup takes a snapshot
@@ -223,7 +223,7 @@ export function confirmDelete(loc, snap, rel, isFolder) {
   const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
     el('h2', { id: 'confirm-title' }, 'Delete this snapshot?'),
     el('p', { class: 'what' }, el('b', {}, loc.path), `, ${formatFull(snap.time)} (${shortId(snap.id)})`,
-      snap.size != null ? `, ${formatSize(snap.size)}` : '', isCancelled(snap) ? ', cancelled before it finished' : ''),
+      snap.size != null ? `, ${formatSize(snap.size)}` : '', snap.incomplete ? `, ${unfinished(snap).status.toLowerCase()}` : ''),
     el('p', {}, inside ? `This deletes the whole snapshot of ${loc.path}, not just ${inside}. ` : '', 'It can\'t be undone.'),
     kept && kept[0] !== 'latest' ? el('p', {}, `It's kept ${kept[1]} by kopia's retention policy at the moment, so another snapshot may take its place.`) : null,
     el('p', {}, 'Space on disk is only freed once kopia\'s maintenance runs, and only for data no other snapshot uses.'),

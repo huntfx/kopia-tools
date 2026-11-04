@@ -13,7 +13,7 @@ import { compactFolder, diskText, joinRel, locationTree, locationsBelow, reposit
 import { render } from './render.js';
 import { KEEP_KINDS, PIN_ICON, openHistory, stepChange } from './snapshots.js';
 import { navigate, state, ui } from './state.js';
-import { asOfSnapshot, backingUpNow, enclosingLocation, folderObj, hiddenAsOf, isCancelled, latest, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
+import { asOfSnapshot, backingUpNow, enclosingLocation, folderObj, hiddenAsOf, latest, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, unfinished } from './storage.js';
 import { contentsTable } from './tables.js';
 
 // What's directly inside a folder: merged folder chains and backup locations, like the sidebar
@@ -167,7 +167,7 @@ export function renderMain() {
     : snapshotListing(selected, parts.slice(0, -1).join('/'))?.find(e => e.n === parts[parts.length - 1] && e.t === 'd')?.m;
   const snapshot = snapshotPanel({
     selected, rel: state.scope, present: !!here, size: here?.size, what: 'folder', wide: true,
-    facts: selected.incomplete ? [['Status', isCancelled(selected) ? 'Cancelled before it finished' : 'Still in progress']] : [
+    facts: selected.incomplete ? [['Status', unfinished(selected).status]] : [
       ['Size', here ? formatSize(here.size) : notKnown()],
       ['Files', here ? plural(here.files, 'file') : notKnown()],
       ['Folders', here?.folders != null ? plural(here.folders, 'folder') : notKnown()],
@@ -307,7 +307,7 @@ function snapshotTags(loc, snap) {
   const busy = beingDeleted(snap) || beingPinned(snap);
   return el('div', { class: 'snap-tags' },
     snap === latest(loc) ? el('span', { class: 'tag' }, 'latest') : null,
-    snap.incomplete ? el('span', { class: 'badge' }, isCancelled(snap) ? 'Cancelled' : 'In progress') : null,
+    snap.incomplete ? el('span', { class: 'badge' }, unfinished(snap).badge) : null,
     reasons.map(([kind, n]) => el('span', { class: `keep-tag ${kind}`, title: `Kept by kopia's retention policy as ${words[kind]} #${n}` }, `${kind}-${n}`)),
     (snap.pins || []).map(pin => el('button', {
       class: 'keep-tag pinned', disabled: busy,
@@ -364,7 +364,7 @@ export function renderSnapshotContents(loc, selected) {
     el('span', { class: 'legend' }, contentsByType ? `${legend}, counting everything in here` : legend),
     el('span', { class: 'chart-controls' }, contentsViews()));
   if (selected.incomplete) {
-    appendAll(panel, head, el('p', { class: 'note' }, `This snapshot ${unfinished(selected)}, so its contents aren't shown.`));
+    appendAll(panel, head, el('p', { class: 'note' }, `This snapshot ${unfinished(selected).is}, so its contents aren't shown.`));
     return panel;
   }
   const entries = snapshotListing(selected, state.scope);
