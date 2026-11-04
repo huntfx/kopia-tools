@@ -447,6 +447,15 @@ th[aria-sort] { color: var(--ink); }
   width: 80px; padding: 3px 6px; border: 1px solid var(--axis); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 0.82rem;
 }
 .location-actions textarea:focus, .location-actions input:focus { border-color: var(--accent); outline: none; }
+/* Changing how many snapshots a location keeps: each kind with what it means, and its number beside it */
+.confirm.retention { width: min(520px, calc(100vw - 32px)); }
+.retention .retention-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; font-size: 0.88rem; }
+.retention .retention-field > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.retention .retention-field small { font-size: 0.78rem; color: var(--ink-2); }
+.retention input[type="number"] {
+  flex: none; width: 110px; padding: 3px 6px; border: 1px solid var(--axis); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 0.82rem;
+}
+.retention input:focus { border-color: var(--accent); outline: none; }
 .confirm p.warn, #history .schedule .warn { color: var(--warn-line); }
 /* The Fixes and Mounts windows: a row for each location or mount, with what it is on the left, and what can be done on the right */
 .confirm.listing { width: min(680px, calc(100vw - 32px)); }

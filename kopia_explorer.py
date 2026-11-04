@@ -1203,18 +1203,26 @@ def policy_key(path):
     return f'{repository.info["user"]}@{repository.info["host"]}:{path}'
 
 
+def policy_chain(path):
+    """The policies a folder's settings come from, in the order kopia looks: its own, the folders above it, then
+    the user's, the computer's and the global policy, each as its key and its name in words"""
+    user, host = repository.info['user'], repository.info['host']
+    folder = Path(path)
+    chain = [(policy_key(p), str(p)) for p in [folder, *folder.parents]]
+    return chain + [(f'{user}@{host}', f'{user}@{host}'), (f'@{host}', host), ('(global)', 'the global policy')]
+
+
 def schedule_of(path, policies=None, nested=True):
     """How often a folder is backed up on its own, as kopia works it out: from its own policy, or the nearest
     folder above with one, or the user's, the computer's or the global policy, each setting from the first
     that has it. Says where its schedule came from, whether the folder has its own (an interval, or manual
-    snapshots only), and what the interval would be without it. The policies are read unless given. Whether
-    it's missing settings from a location it's inside is left out unless nested, as that asks kopia again."""
+    snapshots only), and what the interval would be without it, and how many of its snapshots are kept. The
+    policies are read unless given. Whether it's missing settings from a location it's inside is left out
+    unless nested, as that asks kopia again."""
     if policies is None:
         policies = json.loads(kopia('policy', 'export'))
-    user, host = repository.info['user'], repository.info['host']
     folder = Path(path)
-    chain = [(policy_key(p), str(p)) for p in [folder, *folder.parents]]
-    chain += [(f'{user}@{host}', f'{user}@{host}'), (f'@{host}', host), ('(global)', 'the global policy')]
+    chain = policy_chain(path)
 
     def settings(chain):
         found = {}
@@ -1237,8 +1245,51 @@ def schedule_of(path, policies=None, nested=True):
         'cron': found.get('cron', ([], None))[0], 'manual': found.get('manual', (False, None))[0],
         'own': 'intervalSeconds' in own or bool(own.get('manual')), 'ownManual': bool(own.get('manual')),
         'inherited': dict(zip(('interval', 'from'), above.get('intervalSeconds', (None, None)))),
+        'keep': retention_of(chain, policies),
         **({'nested': nested_status(path, policies)} if nested else {}),
     }
+
+
+# How many snapshots of each kind kopia's retention policy keeps, by kopia's names for them in policies
+RETENTION = {'latest': 'keepLatest', 'hourly': 'keepHourly', 'daily': 'keepDaily', 'weekly': 'keepWeekly',
+             'monthly': 'keepMonthly', 'annual': 'keepAnnual'}
+
+
+def retention_of(chain, policies):
+    """How many of a folder's snapshots of each kind are kept, from the policies it gets its settings from: what
+    its own policy says, if anything, and what it would inherit without it, and from where. One set nowhere is
+    None, which kopia takes as none."""
+    retention = [((policies.get(key) or {}).get('retention') or {}, name) for key, name in chain]
+    keep = {}
+    for kind, setting in RETENTION.items():
+        inherited, source = next(((r[setting], name) for r, name in retention[1:] if setting in r), (None, None))
+        keep[kind] = {'own': retention[0][0].get(setting), 'inherited': inherited, 'from': source}
+    return keep
+
+
+def set_retention(path, keep):
+    """Set how many of a location's snapshots of each kind its own policy keeps, as KopiaUI's policy editor does:
+    a whole number, or None to inherit it, taken out of the policy. Kopia applies it after the location's next
+    snapshot. It's exported, changed and imported back, as kopia's policy set can't put one back to inherited."""
+    if path not in repository.sources:
+        raise PermissionError(f'{path} isn\'t a backup location')
+    for kind, count in keep.items():
+        if kind not in RETENTION or (count is not None and (not isinstance(count, int) or isinstance(count, bool) or count < 0)):
+            raise KeyError(kind)
+    key = policy_key(path)
+    existing = json.loads(kopia('policy', 'export')).get(key)
+    # Without a policy of its own, one's only made for settings to go in
+    if existing is None and all(count is None for count in keep.values()):
+        return schedule_of(path)
+    policy = existing or {}
+    retention = policy.setdefault('retention', {})
+    for kind, count in keep.items():
+        if count is None:
+            retention.pop(RETENTION[kind], None)
+        else:
+            retention[RETENTION[kind]] = count
+    import_policy(key, policy)
+    return schedule_of(path)
 
 
 def all_schedules():
@@ -1900,6 +1951,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/schedule':
                 return self.send_json(set_schedule(body['path'], body['interval'], bool(body.get('manual')),
                                                    bool(body.get('copySettings'))))
+            if self.path == '/api/retention':
+                return self.send_json(set_retention(body['path'], body['keep']))
             if self.path == '/api/copied-settings':
                 return self.send_json(start_settings(bool(body.get('undo')), body.get('paths')))
             if self.path == '/api/pick-folder':
