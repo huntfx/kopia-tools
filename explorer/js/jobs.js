@@ -225,6 +225,8 @@ export function confirmDelete(loc, snap, rel, isFolder) {
     el('p', { class: 'what' }, el('b', {}, loc.path), `, ${formatFull(snap.time)} (${shortId(snap.id)})`,
       snap.size != null ? `, ${formatSize(snap.size)}` : '', snap.incomplete ? `, ${unfinished(snap).status.toLowerCase()}` : ''),
     el('p', {}, inside ? `This deletes the whole snapshot of ${loc.path}, not just ${inside}. ` : '', 'It can\'t be undone.'),
+    // Earlier checkpoints of the same backup are shown as it, so they go too
+    snap.checkpoints ? el('p', {}, `The ${plural(snap.checkpoints, 'earlier checkpoint')} kopia saved of the same backup ${snap.checkpoints === 1 ? 'goes' : 'go'} too.`) : null,
     kept && kept[0] !== 'latest' ? el('p', {}, `It's kept ${kept[1]} by kopia's retention policy at the moment, so another snapshot may take its place.`) : null,
     el('p', {}, 'Space on disk is only freed once kopia\'s maintenance runs, and only for data no other snapshot uses.'),
     el('div', { class: 'actions' }, cancel, remove));

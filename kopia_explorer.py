@@ -144,6 +144,7 @@ class Repository:
         self.progress = {}    # How working out storage stats is getting on, for the page to show
         self.renames = {}     # old id -> new id, for snapshots pinned or unpinned, for the page to follow them
         self.live = set()     # IDs of checkpoints of backups still going, as of when the snapshots were last read
+        self.folded = {}      # id -> IDs of the earlier checkpoints of the same backup shown as it, deleted with it
         self.info = self.read_info()
 
     @staticmethod
@@ -204,13 +205,18 @@ class Repository:
             result = []
             kopias = kopia_started()
             self.live = set()
+            self.folded = {}
             for source, snaps in sorted(by_source.items(), key=lambda item: item[0].casefold()):
-                snaps.sort(key=lambda s: s['startTime'])
-                if snaps and still_going(snaps[-1], kopias, read):
-                    self.live.add(snaps[-1]['id'])
+                # Checkpoints of the same backup share its start, so they're in the order they were saved
+                snaps.sort(key=lambda s: (s['startTime'], s.get('endTime') or ''))
+                shown, folded = fold_checkpoints(snaps)
+                self.folded.update(folded)
+                if shown and still_going(shown[-1], kopias, read):
+                    self.live.add(shown[-1]['id'])
                 stats = self.stats.get(source, {}).get('stats', {})
                 result.append({'path': source, 'host': self.info['host'], 'user': self.info['user'],
-                               'snapshots': [snapshot_info(s, stats.get(s['id']), s['id'] in self.live) for s in snaps]})
+                               'snapshots': [snapshot_info(s, folded_stats(s['id'], folded, stats), s['id'] in self.live, len(folded.get(s['id'], [])))
+                                             for s in shown]})
             return {'repository': self.info, 'locations': result, 'read': read, 'working': self.working(), 'renamed': self.renames}
 
     def working(self):
@@ -372,10 +378,42 @@ def still_going(snap, kopias, now):
     return kopias is None or any(t <= unix_time(snap['startTime']) for t in kopias)
 
 
-def snapshot_info(snap, stats, live=False):
+def fold_checkpoints(snaps):
+    """A source's snapshots, oldest first, with the checkpoints kopia saved of each backup as it went, which share
+    its start, shown as one: its finished snapshot, if it has one, or else the last it saved, which says how far it
+    got. Returns the ones to show, in order, and the IDs of those folded into each, by its ID."""
+    by_start = {}
+    for snap in snaps:
+        by_start.setdefault(snap['startTime'], []).append(snap)
+    shown, folded = [], {}
+    for group in by_start.values():
+        complete = [snap for snap in group if not snap.get('incomplete')]
+        kept = complete[-1] if complete else group[-1]
+        # Only checkpoints are folded; finished snapshots are each shown, as they never share a start anyway
+        earlier = [snap['id'] for snap in group if snap is not kept and snap.get('incomplete')]
+        shown += [snap for snap in group if snap is kept or not snap.get('incomplete')]
+        if earlier:
+            folded[kept['id']] = earlier
+    return shown, folded
+
+
+def folded_stats(snapshot_id, folded, stats):
+    """A snapshot's storage stats, with what the checkpoints folded into it added too, so it's what the whole backup
+    added, and its running total as at the last; None until they're all known."""
+    ids = [*folded.get(snapshot_id, []), snapshot_id]
+    if any(stats.get(i) is None for i in ids):
+        return None
+    if len(ids) == 1:
+        return stats[snapshot_id]
+    added = {key: sum((stats[i].get('newData') or {}).get(key, 0) for i in ids)
+             for key in ('fileObjects', 'originalContentBytes', 'packedContentBytes')}
+    return {**stats[snapshot_id], 'newData': added}
+
+
+def snapshot_info(snap, stats, live=False, checkpoints=0):
     """What the page wants to know about a snapshot. Without storage stats, as they're still being worked out,
     what it added on disk and the running total are None. Live says whether it's a checkpoint of a backup still
-    going."""
+    going, and checkpoints how many earlier ones of the same backup it stands for."""
     new = (stats or {}).get('newData') or {}
     complete = not snap.get('incomplete')
     unknown = stats is None
@@ -387,6 +425,7 @@ def snapshot_info(snap, stats, live=False):
         # Why it's incomplete, such as canceled, or a checkpoint, of one still going (live) or left behind
         'incomplete': snap.get('incomplete') or False,
         'live': live,
+        'checkpoints': checkpoints,
         'size': snap['rootEntry'].get('summ', {}).get('size', 0) if complete else None,
         'files': snap['rootEntry'].get('summ', {}).get('files', 0) if complete else None,
         # Folders inside it, as kopia counts the folder itself too
@@ -1615,7 +1654,8 @@ def being_deleted(snapshot_id):
 
 def start_delete(snapshot_id):
     """Delete a snapshot from the repository for good, in the background, returning its progress record. Not one
-    still being made, which kopia replaces as it goes; a cancelled one, or one left behind, is fine. Only the snapshot's record goes, so
+    still being made, which kopia replaces as it goes; a cancelled one, or one left behind, is fine, along with the
+    earlier checkpoints of the same backup shown as it. Only the snapshot's record goes, so
     a restore already running from it carries on: its data stays until kopia's maintenance finds nothing uses it."""
     snap = repository.snapshots[snapshot_id]
     if snapshot_id in repository.live:
@@ -1626,7 +1666,7 @@ def start_delete(snapshot_id):
         raise BusyError('That snapshot is being pinned or unpinned')
     job = {
         'id': next(job_ids), 'kind': 'delete', 'name': snap['source']['path'], 'source': snap['source']['path'],
-        'snapshot': snapshot_id, 'snapshotTime': snap['startTime'], 'state': 'deleting', 'error': None,
+        'snapshot': snapshot_id, 'also': repository.folded.get(snapshot_id, []), 'snapshotTime': snap['startTime'], 'state': 'deleting', 'error': None,
         'started': time.time(), 'finished': None,
     }
     jobs[job['id']] = job
@@ -1636,8 +1676,10 @@ def start_delete(snapshot_id):
 
 def run_delete(job):
     try:
-        kopia('snapshot', 'delete', job['snapshot'], '--delete')
-        repository.snapshots.pop(job['snapshot'], None)
+        ids = [job['snapshot'], *job['also']]
+        kopia('snapshot', 'delete', *ids, '--delete')
+        for snapshot_id in ids:
+            repository.snapshots.pop(snapshot_id, None)
         job['state'] = 'done'
     except Exception as e:
         job.update(state='failed', error=kopia_reason(e))
