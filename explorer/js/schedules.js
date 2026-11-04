@@ -70,7 +70,7 @@ export function loadAllSchedules(again = false) {
 }
 
 // Seconds from 1 Jan 0001, which kopia rounds intervals down from, to 1970
-const GO_EPOCH = 62135596800;
+export const GO_EPOCH = 62135596800;
 
 // When kopia's scheduler next backs a location up, as kopia works it out: the interval after its last complete
 // snapshot rounded down to a whole number of intervals, or the next of its times of day if that's sooner. That
