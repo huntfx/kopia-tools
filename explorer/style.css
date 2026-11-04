@@ -433,6 +433,21 @@ th[aria-sort] { color: var(--ink); }
 .confirm select { background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font-size: 0.85rem; flex: 1; min-width: 0; }
 .confirm .field input[type="text"] { color: var(--ink); background: var(--bg); border: 1px solid var(--axis); border-radius: 6px; padding: 3px 6px; font-size: 0.85rem; flex: 1; min-width: 0; }
 .confirm .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* Changing a location's snapshot actions: a script for each, with its timeout and mode under it */
+.confirm.location-actions { width: min(600px, calc(100vw - 32px)); }
+.location-actions .action-field { margin: 0 0 14px; font-size: 0.88rem; }
+.location-actions .action-field > label { display: flex; flex-direction: column; gap: 4px; }
+.location-actions textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; padding: 5px 7px; border: 1px solid var(--axis); border-radius: 6px;
+  background: var(--bg); color: var(--ink); font: 0.82rem var(--font-data);
+}
+.location-actions .action-options { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 6px; font-size: 0.82rem; color: var(--ink-2); }
+.location-actions .action-options label { display: flex; align-items: center; gap: 6px; }
+.location-actions input[type="number"] {
+  width: 80px; padding: 3px 6px; border: 1px solid var(--axis); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 0.82rem;
+}
+.location-actions textarea:focus, .location-actions input:focus { border-color: var(--accent); outline: none; }
+.confirm p.warn, #history .schedule .warn { color: var(--warn-line); }
 /* The Fixes and Mounts windows: a row for each location or mount, with what it is on the left, and what can be done on the right */
 .confirm.listing { width: min(680px, calc(100vw - 32px)); }
 .listing .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 16px 0 4px; }

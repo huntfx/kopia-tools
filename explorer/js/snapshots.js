@@ -1,4 +1,5 @@
 // The snapshots panel on the right: the history of the folder or file being looked at
+import { actionsLine } from './actions.js';
 import { compareTarget, ignoredReason, isGone, kindCount } from './changes.js';
 import { api, pending } from './data.js';
 import { inFilter, matchingFiles, patterns } from './filter.js';
@@ -190,7 +191,8 @@ export function renderSide() {
             : el('button', { class: 'twisty', 'aria-expanded': String(open), 'aria-label': `${open ? 'Collapse' : 'Expand'} ${loc.path}`, onclick: toggle }, open ? '▾' : '▸'),
           empty ? el('span', { class: 'name' }, ...name) : el('button', { class: 'name', onclick: toggle }, ...name),
           backupButton(loc)),
-        open ? scheduleLine(loc, loc.path.toLowerCase() === target.toLowerCase()) : null),
+        open ? scheduleLine(loc, loc.path.toLowerCase() === target.toLowerCase()) : null,
+        open && loc.path.toLowerCase() === target.toLowerCase() ? actionsLine(loc) : null),
       open ? snapshotList(loc, target, isFolder) : null,
     ].filter(Boolean);
   };

@@ -1649,8 +1649,9 @@ ACTION_KINDS = {'beforeSnapshotRoot': 'Before snapshot', 'beforeFolder': 'Before
 
 def with_actions(policies):
     """The policies that apply here with snapshot actions, from kopia policy export: what each is for, a folder's
-    path or all the locations of the user, the computer or everyone, the folder if it's one, and what each of its
-    actions runs. Other computers' policies don't run here."""
+    path or all the locations of the user, the computer or everyone, the folder if it's one, and each of its
+    actions: when it runs, what it runs, as a script, how long it can take in seconds and what happens if it
+    fails, as kopia has them, empty if not set. Other computers' policies don't run here."""
     user, host = repository.info['user'], repository.info['host']
     names = {'(global)': 'all locations', f'@{host}': 'all locations on this PC', f'{user}@{host}': f'all of {user}\'s locations'}
     prefix = policy_key('')
@@ -1659,10 +1660,43 @@ def with_actions(policies):
         actions = {kind: action for kind, action in (policy.get('actions') or {}).items() if action}
         if actions and (key in names or key.startswith(prefix)):
             path = None if key in names else key[len(prefix):]
-            found.append({'name': names.get(key, path), 'path': path, 'actions': [
-                {'when': when, 'command': actions[kind].get('script') or ' '.join([actions[kind].get('path', ''), *actions[kind].get('args', [])])}
-                for kind, when in ACTION_KINDS.items() if kind in actions]})
+            found.append({'name': names.get(key, path), 'path': path, 'actions': [{
+                'kind': kind, 'when': when, 'timeout': actions[kind].get('timeout'), 'mode': actions[kind].get('mode', ''),
+                # A command set at the command line, as a script that runs it, as KopiaUI shows it
+                'script': actions[kind].get('script') or subprocess.list2cmdline([actions[kind].get('path', ''), *actions[kind].get('args', [])]),
+            } for kind, when in ACTION_KINDS.items() if kind in actions]})
     return sorted(found, key=lambda p: p['name'].casefold())
+
+
+ACTION_MODES = ('essential', 'optional', 'async')
+
+
+def set_location_actions(path, before, after):
+    """Set what a location's own policy runs before and after its snapshots, as KopiaUI's policy editor does: each
+    as a script, with how long it can take in seconds and what happens if it fails, or none, taken out of the
+    policy, where kopia's defaults apply. Any folder actions are kept. It's exported, changed and imported back."""
+    if path not in repository.sources:
+        raise PermissionError(f'{path} isn\'t a backup location')
+    key = policy_key(path)
+    existing = json.loads(kopia('policy', 'export')).get(key)
+    # Without a policy of its own, one's only made for actions to go in
+    if existing is None and not any(a and a.get('script', '').strip() for a in (before, after)):
+        return snapshot_actions()
+    policy = existing or {}
+    actions = policy.setdefault('actions', {})
+    for kind, action in (('beforeSnapshotRoot', before), ('afterSnapshotRoot', after)):
+        if not action or not action.get('script', '').strip():
+            actions.pop(kind, None)
+            continue
+        timeout, mode = action.get('timeout'), action.get('mode') or None
+        if timeout is not None and (not isinstance(timeout, int) or timeout < 1):
+            raise KeyError(timeout)
+        if mode is not None and mode not in ACTION_MODES:
+            raise KeyError(mode)
+        actions[kind] = {'script': action['script'], **({'timeout': timeout} if timeout else {}), **({'mode': mode} if mode else {})}
+    import_policy(key, policy)
+    repository.actions = None
+    return snapshot_actions()
 
 
 def snapshot_actions():
@@ -1836,6 +1870,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(start_kopia_ui())
             if self.path == '/api/actions':
                 return self.send_json(set_actions(bool(body['enabled'])))
+            if self.path == '/api/location-actions':
+                return self.send_json(set_location_actions(body['path'], body.get('before'), body.get('after')))
             if self.path == '/api/forget':
                 repository.forget()
                 return self.send_json({})

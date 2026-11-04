@@ -1,7 +1,8 @@
 // The Settings window, from the header's gear button. So far that's snapshot actions, with every policy that has
 // any, what each runs, and whether it will, which is asked about again when the window opens.
-import { actions, changeError, changing, checkActions, policyName, setActions } from './actions.js';
+import { actions, actionsDialog, changeError, changing, checkActions, policyName, setActions } from './actions.js';
 import { el } from './format.js';
+import { storage } from './storage.js';
 
 let dialog = null;
 
@@ -59,7 +60,9 @@ function actionRows() {
   return actions.policies.map(policy => el('li', {},
     el('div', { class: 'what' },
       policyName(policy, () => dialog.close(), true),
-      policy.actions.map(a => el('div', { class: 'detail' }, `${a.when}: ${a.command}`))),
+      policy.actions.map(a => el('div', { class: 'detail' }, `${a.when}: ${a.script}`))),
     el('div', { class: 'status' },
-      actions.enabled ? el('span', { class: 'c-added' }, '✓ Will run') : el('span', { class: 'warn' }, 'Will not run'))));
+      actions.enabled ? el('span', { class: 'c-added' }, '✓ Will run') : el('span', { class: 'warn' }, 'Will not run'),
+      storage.some(l => l.path === policy.path)
+        ? el('button', { class: 'linklike', 'data-key': `change:${policy.path}`, onclick: () => actionsDialog(policy.path) }, 'Change…') : null)));
 }
