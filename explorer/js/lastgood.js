@@ -3,7 +3,7 @@
 // there's a newer one. It's an ordinary pin by a name of its own, so kopia keeps it, and KopiaUI shows it. Several
 // backups in a row with missing files are warned about, offering to pin the latest good snapshot, unless there's
 // never been one; the notice when the page opens is only while it isn't pinned.
-import { el, formatFull, plural, timeAgo } from './format.js';
+import { el, formatFull, joined, plural, timeAgo } from './format.js';
 import { beingPinned, changePins, confirmPin, renderNotice } from './jobs.js';
 import { navigate } from './state.js';
 import { storage } from './storage.js';
@@ -93,6 +93,3 @@ export function failingNotice() {
       el('button', { class: 'linklike', onclick: close }, 'Not now')),
   ];
 }
-
-// Elements in a list, like listOf does for text: "a, b and c"
-const joined = items => items.flatMap((item, i) => [i === 0 ? '' : i === items.length - 1 ? ' and ' : ', ', item]);

@@ -1,5 +1,6 @@
 // Restores, backups, deletes and settings changes, which run on the server, and the panel at the bottom that
 // follows them
+import { actionsNotice } from './actions.js';
 import { api, redrawSoon } from './data.js';
 import { loadFixes, renderFixes } from './fixes.js';
 import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
@@ -433,7 +434,7 @@ export function renderJobs() {
 // so it isn't announced again.
 export function renderNotice() {
   const notice = document.getElementById('notice');
-  const parts = [kopiaUINotice(), settingsNotice(), failingNotice()].filter(Boolean).map(part => el('div', {}, part));
+  const parts = [kopiaUINotice(), actionsNotice(), settingsNotice(), failingNotice()].filter(Boolean).map(part => el('div', {}, part));
   const fresh = el('section', {}, parts);
   notice.hidden = !parts.length;
   if (fresh.innerHTML !== notice.innerHTML) notice.replaceChildren(...parts);

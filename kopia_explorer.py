@@ -36,6 +36,7 @@ import tkinter
 import traceback
 import webbrowser
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
+from ctypes import wintypes
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -137,6 +138,7 @@ class Repository:
             self.stats = {}
         self.stats_thread = None
         self.sources = set()  # Every backup location's path
+        self.actions = None   # What the policies here with snapshot actions are for, or None until they're read
         self.snapshots = {}   # id -> kopia's snapshot JSON, for diffs and downloads
         self.ignores = {}     # source -> its ignore rules, read once
         self.progress = {}    # How working out storage stats is getting on, for the page to show
@@ -182,10 +184,12 @@ class Repository:
             # Folders with a policy of their own are backup locations too, as kopia's scheduler backs them up,
             # even before their first snapshot, which they don't have yet
             prefix = policy_key('')
-            for key in json.loads(kopia('policy', 'export')):
+            policies = json.loads(kopia('policy', 'export'))
+            for key in policies:
                 if key.startswith(prefix):
                     by_source.setdefault(key[len(prefix):], [])
             self.sources = set(by_source)
+            self.actions = with_actions(policies)
             for source in [s for s in self.stats if s not in by_source]:
                 del self.stats[source]
 
@@ -1574,10 +1578,8 @@ def kopia_ui():
     """Whether KopiaUI is running, as only its server makes the scheduled snapshots, and whether it can be
     started from here. Running is None if it couldn't be told."""
     try:
-        found = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {KOPIA_UI}', '/FO', 'CSV', '/NH'],
-                               capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-        running = f'"{KOPIA_UI.lower()}"' in found.stdout.lower()
-    except (OSError, subprocess.SubprocessError):
+        running = any(name.lower() == KOPIA_UI.lower() for _, _, name in processes())
+    except OSError:
         running = None
     return {'running': running, 'startable': any(p.is_file() for p in KOPIA_UI_PATHS)}
 
@@ -1590,6 +1592,114 @@ def start_kopia_ui():
     subprocess.Popen([str(path)], cwd=path.parent, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
     return {}
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD), ('th32ProcessID', wintypes.DWORD),
+                ('th32DefaultHeapID', ctypes.c_size_t), ('th32ModuleID', wintypes.DWORD), ('cntThreads', wintypes.DWORD),
+                ('th32ParentProcessID', wintypes.DWORD), ('pcPriClassBase', wintypes.LONG), ('dwFlags', wintypes.DWORD),
+                ('szExeFile', wintypes.WCHAR * wintypes.MAX_PATH)]
+
+
+def processes():
+    """Every process running: its ID, its parent's, and its program's file name."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if snapshot in (None, wintypes.HANDLE(-1).value):
+        raise ctypes.WinError()
+    entry = PROCESSENTRY32W(dwSize=ctypes.sizeof(PROCESSENTRY32W))
+    found = []
+    try:
+        more = kernel32.Process32FirstW(wintypes.HANDLE(snapshot), ctypes.byref(entry))
+        while more:
+            found.append((entry.th32ProcessID, entry.th32ParentProcessID, entry.szExeFile))
+            more = kernel32.Process32NextW(wintypes.HANDLE(snapshot), ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(wintypes.HANDLE(snapshot))
+    return found
+
+
+def started(pid):
+    """When a process started, as a Unix time, or None if that can't be found out."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    times = [wintypes.FILETIME() for _ in range(4)]
+    try:
+        if not kernel32.GetProcessTimes(wintypes.HANDLE(handle), *map(ctypes.byref, times)):
+            return None
+    finally:
+        kernel32.CloseHandle(wintypes.HANDLE(handle))
+    # In 100ns steps since 1601
+    return (times[0].dwHighDateTime << 32 | times[0].dwLowDateTime) / 10_000_000 - 11_644_473_600
+
+
+def kopia_config():
+    """Kopia's config for the repository, which the explorer and KopiaUI both use."""
+    return Path(os.environ.get('KOPIA_CONFIG_PATH') or Path(os.environ.get('APPDATA', '')) / 'kopia' / 'repository.config')
+
+
+# Kopia's snapshot actions, by their names in policies, in the order they run
+ACTION_KINDS = {'beforeSnapshotRoot': 'Before snapshot', 'beforeFolder': 'Before folder',
+                'afterFolder': 'After folder', 'afterSnapshotRoot': 'After snapshot'}
+
+
+def with_actions(policies):
+    """The policies that apply here with snapshot actions, from kopia policy export: what each is for, a folder's
+    path or all the locations of the user, the computer or everyone, the folder if it's one, and what each of its
+    actions runs. Other computers' policies don't run here."""
+    user, host = repository.info['user'], repository.info['host']
+    names = {'(global)': 'all locations', f'@{host}': 'all locations on this PC', f'{user}@{host}': f'all of {user}\'s locations'}
+    prefix = policy_key('')
+    found = []
+    for key, policy in policies.items():
+        actions = {kind: action for kind, action in (policy.get('actions') or {}).items() if action}
+        if actions and (key in names or key.startswith(prefix)):
+            path = None if key in names else key[len(prefix):]
+            found.append({'name': names.get(key, path), 'path': path, 'actions': [
+                {'when': when, 'command': actions[kind].get('script') or ' '.join([actions[kind].get('path', ''), *actions[kind].get('args', [])])}
+                for kind, when in ACTION_KINDS.items() if kind in actions]})
+    return sorted(found, key=lambda p: p['name'].casefold())
+
+
+def snapshot_actions():
+    """Whether kopia runs the snapshot actions in policies here, which it only does once they're turned on in its
+    config, which policies have any, and whether KopiaUI's server was started before the config last changed, so
+    it may still be going by what it said before, as it only reads it when it starts. Enabled is None if the
+    config can't be read."""
+    config = kopia_config()
+    try:
+        enabled = bool(json.loads(config.read_text(encoding='utf-8')).get('enableActions'))
+        changed = config.stat().st_mtime
+    except (OSError, ValueError):
+        enabled = changed = None
+    if repository.actions is None:
+        repository.actions = with_actions(json.loads(kopia('policy', 'export')))
+    try:
+        running = processes()
+    except OSError:
+        running = []
+    # KopiaUI's server is the kopia it runs itself
+    kopia_ui_ids = {pid for pid, _, name in running if name.lower() == KOPIA_UI.lower()}
+    server = next((pid for pid, parent, name in running if parent in kopia_ui_ids and name.lower() == 'kopia.exe'), None)
+    since = server and started(server)
+    return {'enabled': enabled, 'policies': repository.actions, 'config': str(config),
+            'kopiaUIBehind': bool(since and changed and since < changed)}
+
+
+def set_actions(enabled):
+    """Turn snapshot actions on or off in kopia's config, as KopiaUI has no setting for it. Written to a temporary
+    file first, so it can't be left half written."""
+    config = kopia_config()
+    settings = json.loads(config.read_text(encoding='utf-8'))
+    settings['enableActions'] = enabled
+    partial = config.with_name(config.name + '.tmp')
+    partial.write_text(json.dumps(settings, indent=2) + '\n', encoding='utf-8')
+    os.replace(partial, config)
+    return snapshot_actions()
 
 
 def pick_folder():
@@ -1671,6 +1781,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
             if url.path == '/api/kopiaui':
                 return self.send_json(kopia_ui())
+            if url.path == '/api/actions':
+                return self.send_json(snapshot_actions())
             if url.path == '/api/free-drives':
                 return self.send_json(free_drives())
             if url.path == '/api/other-mounts':
@@ -1722,6 +1834,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(reveal(body['path']))
             if self.path == '/api/kopiaui/start':
                 return self.send_json(start_kopia_ui())
+            if self.path == '/api/actions':
+                return self.send_json(set_actions(bool(body['enabled'])))
             if self.path == '/api/forget':
                 repository.forget()
                 return self.send_json({})

@@ -49,6 +49,9 @@ export const plural = (n, word) => `${n.toLocaleString('en-GB')} ${word}${n === 
 // Things in words, like "ignore files, cache folders and compression", or "or compression" after a "not"
 export const listOf = (items, last = 'and') => (items.length > 1 ? `${items.slice(0, -1).join(', ')} ${last} ${items.at(-1)}` : items[0]);
 
+// Elements in a list, like listOf does for text: "a, b and c"
+export const joined = items => items.flatMap((item, i) => [i === 0 ? '' : i === items.length - 1 ? ' and ' : ', ', item]);
+
 // Append children, skipping empty optional ones (append() would print null as text)
 export const appendAll = (parent, ...children) => parent.append(...children.flat(Infinity).filter(c => c != null && c !== false));
 

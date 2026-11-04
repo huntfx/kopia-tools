@@ -1,6 +1,7 @@
 // The page's start: the snapshots are read first, as everything is built from them, then the page is drawn
 import { loadStorage, followStorage, currentFolder } from './storage.js';
 import { pickUpJobs, renderNotice } from './jobs.js';
+import { checkActions } from './actions.js';
 import { checkKopiaUI } from './kopiaui.js';
 import { buildSidebarTree, reveal, renderSort } from './sidebar.js';
 import { repositoryTitle } from './data.js';
@@ -25,3 +26,4 @@ writeHash(true);
 renderNotice();
 offerToCopySettings();
 checkKopiaUI();
+checkActions();
