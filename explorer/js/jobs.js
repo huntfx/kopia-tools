@@ -297,12 +297,17 @@ function pinned(snap, info) {
   Object.assign(snap, info);
 }
 
+// What's being opened in Explorer, so clicking again while it's on its way doesn't open it twice
+const revealing = new Set();
+
 // Open something in Windows Explorer, via the server; if that fails, the button says why
 export function showInExplorer(path, button) {
+  if (revealing.has(path)) return;
+  revealing.add(path);
   api.post('/api/reveal', { path }).catch(error => {
     if (!button) return;
     button.textContent = `Couldn't open Explorer: ${error instanceof TypeError ? 'can\'t reach the server' : error.message}`;
-  });
+  }).finally(() => revealing.delete(path));
 }
 
 // While a restore or backup is going, ask the server how it's getting on every second

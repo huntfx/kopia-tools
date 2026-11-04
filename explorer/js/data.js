@@ -20,6 +20,13 @@ export const progress = { changes: { done: 0, total: 0 }, folders: { done: 0, to
 // Each kind in words, for the progress bar: what it is, and what it's counted in
 const KINDS = { changes: ['changes for ', 'snapshot'], folders: ['', 'folder'], types: ['file types for ', 'snapshot'] };
 
+// The browser only has 6 connections to the server at once, and each diff can take a while, so loading in the
+// background uses at most this many, in the order asked for. The rest are kept for what's clicked, such as Show in
+// Explorer, and for following jobs, which would otherwise wait behind every diff still to load.
+const MAX_LOADING = 4;
+const queued = [];
+let loading = 0;
+
 // Fetch something not loaded yet, and redraw once it arrives. Until then the page says it's loading.
 export function load(url, kind, store) {
   if (requested.has(url)) return;
@@ -27,7 +34,22 @@ export function load(url, kind, store) {
   pending.add(url);
   progress[kind].total++;
   showProgress();
-  fetch(url)
+  queued.push(() => fetchNow(url, kind, store));
+  loadNext();
+}
+
+function loadNext() {
+  while (loading < MAX_LOADING && queued.length) {
+    loading++;
+    queued.shift()().finally(() => {
+      loading--;
+      loadNext();
+    });
+  }
+}
+
+function fetchNow(url, kind, store) {
+  return fetch(url)
     // The server puts the reason, such as kopia's error, in the status text
     .then(response => (response.ok ? response.json() : Promise.reject(new Error(response.statusText || `Error ${response.status}`))))
     .then(store)
