@@ -225,7 +225,8 @@ function snapshotList(loc, target, isFolder) {
   // this list is for that folder, not for an item picked in it or a file's own page
   const other = viewing && !state.history && !state.file ? compareTarget(loc, selected) : null;
   const complete = loc.snapshots.filter(s => !s.incomplete);
-  const inProgress = loc.snapshots.filter(s => s.incomplete);
+  // Newest first, like the rest
+  const inProgress = loc.snapshots.filter(s => s.incomplete).reverse();
   const [low, high] = other ? [complete.indexOf(other), complete.indexOf(selected)].sort((a, b) => a - b) : [-1, -1];
   const positions = gradientPositions(loc.snapshots.map(s => s.onDisk).filter(Boolean));
   const parentRel = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
