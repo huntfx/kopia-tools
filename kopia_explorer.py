@@ -1282,10 +1282,12 @@ def set_retention(policy, keep):
 
 
 def all_schedules():
-    """Every backup location's schedule by its path, for the sidebar's next snapshots. The policies are read
-    once and nothing else asks kopia, so it's quick, and doesn't wait behind the pool's work."""
+    """Every backup location's schedule by its path, for the sidebar's next snapshots, and the global policy's,
+    as (global). The policies are read once and nothing else asks kopia, so it's quick, and doesn't wait behind
+    the pool's work."""
     policies = json.loads(kopia('policy', 'export'))
-    return {path: schedule_of(path, policies, nested=False) for path in sorted(repository.sources)}
+    return {**{path: schedule_of(path, policies, nested=False) for path in sorted(repository.sources)},
+            GLOBAL: global_schedule(policies)}
 
 
 def set_schedule(path, interval, manual=False, copy_settings=False, keep=None):
@@ -1299,9 +1301,8 @@ def set_schedule(path, interval, manual=False, copy_settings=False, keep=None):
     path = os.path.abspath(path)
     if not os.path.isdir(path):
         raise ValueError(f'There\'s no folder {path}')
-    # Whole minutes, and no more often than KopiaUI offers
-    if interval is not None and (not isinstance(interval, int) or interval < 600 or interval % 60):
-        raise KeyError(interval)
+    if interval is not None:
+        check_interval(interval)
     key = policy_key(path)
     existing = json.loads(kopia('policy', 'export')).get(key)
     policy = existing or {}
@@ -1324,6 +1325,49 @@ def set_schedule(path, interval, manual=False, copy_settings=False, keep=None):
     if copy_settings and existing is None and containing_location(path):
         copy_settings_in(path)
     return schedule_of(path)
+
+
+def check_interval(interval):
+    # Whole minutes, and no more often than KopiaUI offers
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 600 or interval % 60:
+        raise KeyError(interval)
+
+
+# The global policy, which every location gets its settings from unless something nearer sets them, as KopiaUI's
+# policy list shows it, for every user and computer, and as kopia names it in policy export and import
+GLOBAL = '(global)'
+
+
+def global_schedule(policies=None):
+    """How often the global policy says to back up, and how many snapshots of each kind it keeps, as schedule_of
+    gives a folder's, with nothing above it to inherit from. The policies are read unless given."""
+    if policies is None:
+        policies = json.loads(kopia('policy', 'export'))
+    policy = policies.get(GLOBAL) or {}
+    scheduling, retention = policy.get('scheduling') or {}, policy.get('retention') or {}
+    return {
+        'path': None, 'interval': scheduling.get('intervalSeconds'), 'from': None,
+        'times': [f'{t["hour"]:02}:{t["min"]:02}' for t in scheduling.get('timeOfDay') or []],
+        'cron': scheduling.get('cron') or [], 'manual': bool(scheduling.get('manual')),
+        'own': True, 'ownManual': bool(scheduling.get('manual')), 'inherited': {'interval': None, 'from': None},
+        'keep': {kind: {'own': retention.get(setting), 'inherited': None, 'from': None} for kind, setting in RETENTION.items()},
+    }
+
+
+def set_global_schedule(interval, keep):
+    """Set how often the global policy says to back up, which isn't manual snapshots only then, and how many
+    snapshots of each kind it keeps, all of which it must say, as there's nothing above it to inherit them from.
+    Every location that doesn't set them nearer to it goes by these."""
+    check_interval(interval)
+    if set(keep) != set(RETENTION) or any(count is None for count in keep.values()):
+        raise ValueError('The global policy needs a number for each kind of snapshot to keep')
+    policy = json.loads(kopia('policy', 'export')).get(GLOBAL) or {}
+    scheduling = policy.setdefault('scheduling', {})
+    scheduling['intervalSeconds'] = interval
+    scheduling.pop('manual', None)
+    set_retention(policy, keep)
+    import_policy(GLOBAL, policy)
+    return global_schedule()
 
 
 def import_policy(key, policy):
@@ -1943,6 +1987,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/schedule':
                 return self.send_json(set_schedule(body['path'], body['interval'], bool(body.get('manual')),
                                                    bool(body.get('copySettings')), body.get('keep')))
+            if self.path == '/api/global-schedule':
+                return self.send_json(set_global_schedule(body['interval'], body['keep']))
             if self.path == '/api/copied-settings':
                 return self.send_json(start_settings(bool(body.get('undo')), body.get('paths')))
             if self.path == '/api/pick-folder':

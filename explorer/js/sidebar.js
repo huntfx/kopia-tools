@@ -373,8 +373,9 @@ export function renderLocations() {
   const nameDirection = sidebarView === 'tree' && treeReversed ? -1 : 1;
   const sorted = items => items.sort((a, b) => nameDirection * a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
 
-  // A row for an item, with label parts given: the path leading to it dimmed, then its own name
-  const row = (item, depth, prefix, label, children) => {
+  // A row for an item, with label parts given: the path leading to it dimmed, then its own name, with a marker in
+  // place of a location's dot, and a tooltip, if not the usual
+  const row = (item, depth, prefix, label, children, { marker = null, title = null } = {}) => {
     const loc = item.tree?.location;
     const expandable = children.length > 0 || children.unknown;
     const open = expandable && isOpen(item);
@@ -392,7 +393,7 @@ export function renderLocations() {
       // A click opens it in the middle; a double click expands or collapses it. The first click redraws
       // the sidebar, so the second is recognised by its click count rather than a dblclick event.
       el('button', {
-        class: 'label', title: `${loc ? `${loc.path} (backup location)` : item.tree?.root ? repositoryTitle() : item.path}${expandable ? ' - double-click to expand or collapse' : ''}`,
+        class: 'label', title: title ?? `${loc ? `${loc.path} (backup location)` : item.tree?.root ? repositoryTitle() : item.path}${expandable ? ' - double-click to expand or collapse' : ''}`,
         onclick: event => {
           if (event.detail < 2) navigate(itemTarget(item));
           // Collapsing this way closes everything inside it too, so it opens again one level at a time
@@ -401,6 +402,7 @@ export function renderLocations() {
         },
       },
         loc ? el('span', { class: 'dot', style: `background:${locationDot(loc).colour}`, title: locationDot(loc).title }) : null,
+        marker ? el('span', { class: 'marker', 'aria-hidden': 'true' }, marker) : null,
         prefix ? el('span', { class: 'prefix' }, prefix) : null,
         // Folders end in a backslash, like drives and the contents tables; the PC isn't a folder
         el('span', { class: 'text' }, item.tree?.root || label.endsWith('\\') ? label : `${label}\\`),
@@ -442,6 +444,11 @@ export function renderLocations() {
       // Ones due at the same time, or with none to come, by name
       next: (a, b) => direction * ((nextAt(a) - nextAt(b)) || 0) || byName(a, b),
     }[sidebarOrder]);
+    // First, the PC, as at the top of the tree, opening the same page, with every location, and the global policy
+    // they go by unless they set their own, which is changed there: marked *, as KopiaUI lists the global policy
+    row(treeItem(locationTree), 0, '', locationTree.name, [], {
+      marker: '*', title: `${locationTree.name} - every location, and the global policy they go by unless they set their own`,
+    });
     for (const loc of locations) {
       const item = treeItem(treeNodes.get(loc.path.toLowerCase()));
       const cut = loc.path.replace(/\\$/, '').lastIndexOf('\\') + 1;

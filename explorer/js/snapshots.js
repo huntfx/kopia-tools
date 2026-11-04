@@ -5,7 +5,7 @@ import { api, pending } from './data.js';
 import { inFilter, matchingFiles, patterns } from './filter.js';
 import { el, fillColour, formatFull, formatSize, gradientPositions, gradientRgb, plural, signedSize, timeAgo } from './format.js';
 import { backupButton, beingDeleted, beingPinned, confirmDelete, confirmPin } from './jobs.js';
-import { scheduleLine, separateLine } from './schedules.js';
+import { globalLine, scheduleLine, separateLine } from './schedules.js';
 import { diskText, locationsBelow, sidebarSnapshot, treeNodes } from './sidebar.js';
 import { navigate, state, ui } from './state.js';
 import { asOfSnapshot, backingUpNow, currentPath, hiddenAsOf, isLive, latest, locationDot, locationOf, pathInScope, relativeTo, selectedSnapshot, snapshotListing, storage, tooOld, totalAsOf, unfinished, unreadLines } from './storage.js';
@@ -132,7 +132,9 @@ export function renderFolderSide(aside) {
   const locations = node ? locationsBelow(node).filter(l => !hiddenAsOf(l)).sort((a, b) => a.path.localeCompare(b.path, 'en', { sensitivity: 'base' })) : [];
   aside.replaceChildren(
     el('div', { class: 'history-head' },
-      el('div', {}, el('h2', {}, `Backup locations (${locations.length})`), el('div', { class: 'target' }, state.folder))),
+      el('div', {}, el('h2', {}, `Backup locations (${locations.length})`), el('div', { class: 'target' }, state.folder),
+        // The PC's is the global policy's, which every location goes by unless it sets its own
+        node?.root ? globalLine() : null)),
     el('ul', { class: 'snaps' }, locations.map(loc => {
       // The snapshot for the as-of date, or with none set, the latest; and what was on disk by then
       const newest = state.asOf ? (tooOld(loc) ? null : asOfSnapshot(loc)) : latest(loc);

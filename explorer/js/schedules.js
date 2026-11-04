@@ -3,7 +3,7 @@ import { api, redrawSoon } from './data.js';
 import { el, listOf, plural } from './format.js';
 import { backUp, changeSettings, offerSettings } from './jobs.js';
 import { kopiaUIStarted } from './kopiaui.js';
-import { retentionSection } from './retention.js';
+import { keepUnderGlobal, retentionSection } from './retention.js';
 import { navigate } from './state.js';
 import { enclosingLocation, latest, refreshStorage, storage } from './storage.js';
 
@@ -44,14 +44,17 @@ export function loadSchedule(path) {
   return loading.get(key);
 }
 
-// Every location's schedule at once, for the sidebar's next snapshots, rather than one request each. Asked
-// for again once any are missing, as they are after one's changed or a location's added; any it can't
-// find are null, like one that can't be loaded. On a refresh they're all read again, as they may have been
-// changed in KopiaUI, with the ones known kept until the new ones come, or if they can't be read.
+// The global policy's schedule and what it keeps, which comes with every location's, under the name kopia gives it
+export const GLOBAL = '(global)';
+
+// Every location's schedule at once, for the sidebar's next snapshots, rather than one request each, and the
+// global policy's. Asked for again once any are missing, as they are after one's changed or a location's added;
+// any it can't find are null, like one that can't be loaded. On a refresh they're all read again, as they may
+// have been changed in KopiaUI, with the ones known kept until the new ones come, or if they can't be read.
 export function loadAllSchedules(again = false) {
   const wanted = storage.map(l => l.path.toLowerCase()).filter(key => again || (schedules.get(key) === undefined && !loading.has(key)));
   if (loadingAll) loadAllAgain ||= again;
-  if (loadingAll || !wanted.length) return;
+  if (loadingAll || (!wanted.length && schedules.has(GLOBAL))) return;
   loadingAll = true;
   fetch('/api/schedules')
     .then(response => (response.ok ? response.json() : null)).catch(() => null)
@@ -62,6 +65,7 @@ export function loadAllSchedules(again = false) {
       for (const key of wanted) {
         if (again ? found : schedules.get(key) === undefined) schedules.set(key, byKey.get(key) || null);
       }
+      if (byKey.has(GLOBAL)) schedules.set(GLOBAL, byKey.get(GLOBAL));
       redrawSoon();
       if (loadAllAgain) {
         loadAllAgain = false;
@@ -237,7 +241,9 @@ export async function scheduleDialog(path, mode) {
     times: current.times, cron: current.cron, manual: select.value === 'manual' || (current.manual && !current.ownManual),
   });
   const snapshots = storage.find(l => l.path.toLowerCase() === path.toLowerCase())?.snapshots ?? [];
-  const retention = retentionSection(current.keep, snapshots, scheduleNow, ok => { save.disabled = !ok; });
+  const retention = retentionSection({
+    keep: current.keep, targets: [{ path, snapshots, keepFor: keep => keep }], scheduleNow, changed: ok => { save.disabled = !ok; },
+  });
   select.addEventListener('change', retention.refresh);
   // A new policy inside another location doesn't pass on the settings above it to that location's backups,
   // unless they're copied in by the parent settings fix, as the page offers for existing ones
@@ -282,6 +288,83 @@ export async function scheduleDialog(path, mode) {
         el('label', { class: 'field' }, 'How often', select),
         separate ? el('label', { class: 'field' }, now, 'Back up now') : null,
         outer ? el('label', { class: 'field', title: `So backups of ${outer.path} use your settings in here` }, copySettings, 'Apply parent settings fix') : null,
+        retention.fields),
+      retention.preview),
+    el('p', {}, 'KopiaUI picks up the change when it next refreshes, within 4 hours.'),
+    error,
+    el('div', { class: 'actions' }, cancel, save));
+  dialog.addEventListener('close', () => {
+    retention.stop();
+    dialog.remove();
+    scheduleDialogOpen = false;
+  });
+  document.body.append(dialog);
+  retention.refresh();
+  dialog.showModal();
+  select.focus();
+}
+
+// Under the PC's name in the snapshots panel: how often the global policy says to back up, which every location
+// goes by unless it, or a folder above it, sets its own, with changing that and what it keeps
+export function globalLine() {
+  const schedule = schedules.get(GLOBAL);
+  if (!schedule) loadAllSchedules();
+  const using = schedule && storage.filter(l => schedules.get(l.path.toLowerCase())?.from === 'the global policy').length;
+  return el('div', { class: 'schedule' },
+    schedule ? el('span', { title: `Set by the global policy, which ${plural(using, 'location')} ${using === 1 ? 'goes' : 'go'} by for this` }, scheduleText(schedule))
+      : el('span', { class: 'muted' }, '…'),
+    el('span', { class: 'muted' }, 'global policy'),
+    el('button', { class: 'linklike', disabled: !schedule, onclick: globalScheduleDialog }, 'Change…'));
+}
+
+// Change how often the global policy says to back up, and how many snapshots of each kind it keeps, which every
+// location goes by unless it, or something nearer it, sets its own. It needs an interval and every number, as
+// there's nothing above it to inherit them from, so manual snapshots only isn't offered; one set in KopiaUI stays
+// until an interval's picked. Its preview of snapshots now is of every location, each with what it sets itself.
+export function globalScheduleDialog() {
+  const current = schedules.get(GLOBAL);
+  if (scheduleDialogOpen || !current) return;
+  scheduleDialogOpen = true;
+  const intervals = current.interval && !INTERVALS.includes(current.interval)
+    ? [...INTERVALS, current.interval].sort((a, b) => a - b) : INTERVALS;
+  const select = el('select', { 'aria-label': 'How often' },
+    current.interval ? null : el('option', { value: '' }, current.manual ? 'Manual snapshots only' : 'Not set'),
+    intervals.map(seconds => el('option', { value: seconds }, capitalised(every(seconds)))));
+  select.value = current.interval ? String(current.interval) : '';
+  const scheduleNow = () => ({ interval: Number(select.value) || null, times: current.times, cron: current.cron, manual: !select.value && current.manual });
+  const targets = storage.map(loc => ({ loc, keep: schedules.get(loc.path.toLowerCase())?.keep })).filter(t => t.keep)
+    .map(({ loc, keep }) => ({ path: loc.path, snapshots: loc.snapshots, keepFor: keepUnderGlobal(keep) }));
+  const using = storage.filter(l => schedules.get(l.path.toLowerCase())?.from === 'the global policy').length;
+  const retention = retentionSection({ keep: current.keep, targets, scheduleNow, global: true, changed: ok => { save.disabled = !ok || !select.value; } });
+  select.addEventListener('change', retention.refresh);
+  const error = el('p', { class: 'error', hidden: true });
+  const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
+  const save = el('button', {
+    class: 'btn primary',
+    onclick: async () => {
+      save.disabled = cancel.disabled = true;
+      try {
+        await api.post('/api/global-schedule', { interval: Number(select.value), keep: retention.values() });
+      } catch (e) {
+        error.textContent = `Couldn't change it: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
+        error.hidden = false;
+        save.disabled = !retention.valid() || !select.value;
+        cancel.disabled = false;
+        return;
+      }
+      schedules.clear();
+      dialog.close();
+      loadAllSchedules();
+      redrawSoon();
+    },
+  }, 'Save');
+  const dialog = el('dialog', { class: 'confirm retention', 'aria-labelledby': 'schedule-title' },
+    el('h2', { id: 'schedule-title' }, 'How often to back up, and what to keep?'),
+    el('p', { class: 'what' }, el('b', {}, 'Global policy'),
+      ` - every location goes by it, unless it or a folder above it sets its own. ${plural(using, 'location')} ${using === 1 ? 'goes' : 'go'} by its schedule.`),
+    el('div', { class: 'retention-body' },
+      el('div', {},
+        el('label', { class: 'field' }, 'How often', select),
         retention.fields),
       retention.preview),
     el('p', {}, 'KopiaUI picks up the change when it next refreshes, within 4 hours.'),

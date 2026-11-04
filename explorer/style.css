@@ -23,6 +23,7 @@
   --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6; --series-other: #a8a69e;
   /* What kopia's retention policy keeps each snapshot as, coloured as in KopiaUI, the same in light and dark */
   --keep-latest: #4b8b3b; --keep-hourly: #4a77a8; --keep-daily: #17857b; --keep-weekly: #c4501b; --keep-monthly: #6b6e72; --keep-annual: #c99a0e;
+  --keep-pinned: #1d6fd6;
   --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-data: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
@@ -160,6 +161,8 @@ a.btn { color: inherit; text-decoration: none; display: inline-block; }
 /* The leading path gives way first, so the last folder's name stays readable */
 .fsrow .label .prefix { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; min-width: 0; margin-right: -6px; }
 .fsrow .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+/* In place of the dot, for the PC in the list of locations, whose page has the global policy, as KopiaUI marks it */
+.fsrow .label .marker { flex: none; width: 7px; text-align: center; color: var(--accent); font-weight: 600; line-height: 1; }
 .fsrow.group .label { color: var(--ink-2); }
 .fsrow .total { color: var(--ink-2); white-space: nowrap; }
 .fsrow.group .total { color: var(--muted); }
@@ -352,7 +355,7 @@ th[aria-sort] { color: var(--ink); }
 .keep-tag.weekly { background: var(--keep-weekly); }
 .keep-tag.monthly { background: var(--keep-monthly); }
 .keep-tag.annual { background: var(--keep-annual); }
-.keep-tag.pinned { background: #1d6fd6; cursor: pointer; }
+.keep-tag.pinned { background: var(--keep-pinned); cursor: pointer; }
 .keep-tag.pinned svg { fill: currentColor; }
 .keep-tag.pinned:hover:not(:disabled) { background: var(--removed); }
 .snap-tags .pin { display: flex; padding: 0 2px; border: 0; background: none; color: var(--muted); cursor: pointer; }
@@ -475,9 +478,17 @@ th[aria-sort] { color: var(--ink); }
 .retention-chart .dot.weekly { fill: var(--keep-weekly); }
 .retention-chart .dot.monthly { fill: var(--keep-monthly); }
 .retention-chart .dot.annual { fill: var(--keep-annual); }
+.retention-chart .dot.pinned { fill: var(--keep-pinned); }
 .retention-chart .dot.deleted { fill: none; stroke: var(--removed); }
 .retention-chart .chart-tip { top: calc(100% + 4px); }
 .retention-chart .chart-tip .snap-tags { margin: 0; }
+/* For the global policy, the locations that would lose snapshots, most first */
+.retention-losing { list-style: none; margin: 8px 0 0; padding: 0; max-height: 260px; overflow-y: auto; font-size: 0.82rem; }
+.retention-losing li { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border-top: 1px solid var(--line); }
+.retention-losing li .mono { font-family: var(--font-data); overflow-wrap: anywhere; min-width: 0; }
+.retention-losing li span:last-child { color: var(--warn-line); white-space: nowrap; }
+.retention-losing li span.anyway { color: var(--muted); }
+#history .history-head .schedule { margin-left: 0; }
 .retention .retention-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; font-size: 0.88rem; }
 .retention .retention-field > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .retention .retention-field small { font-size: 0.78rem; color: var(--ink-2); }

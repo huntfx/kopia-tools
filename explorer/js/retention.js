@@ -149,14 +149,15 @@ function clashText(collisions) {
   return parts.length ? `A kopia bug is in effect: ${listOf(parts)}.` : null;
 }
 
-// What a kept snapshot's reasons are, as keep tags, as on a snapshot's page
-const keepTags = (reasons, pinned, deleted) => el('div', { class: 'snap-tags' },
-  deleted ? el('span', { class: 'badge error' }, 'Deleted') : null,
+// What a kept snapshot's reasons are, as keep tags, as on a snapshot's page, or that it would be deleted, or is
+// already scheduled for deletion
+const keepTags = (reasons, pinned, deleted, due) => el('div', { class: 'snap-tags' },
+  deleted ? el('span', { class: 'badge error' }, due ? 'Scheduled for deletion' : 'Deleted') : null,
   pinned ? el('span', { class: 'keep-tag pinned' }, 'pinned') : null,
   reasons.map(([kind, n]) => el('span', { class: `keep-tag ${kind}` }, `${kind}-${n}`)));
 
 // A timeline of snapshots by age, on a log scale so recent hours and old years both fit: a lane for all those kept,
-// one for each kind that keeps any, and one for those deleted, if any are. Hovering one says why it's kept. Ages
+// one for each kind that keeps any, one for those pinned, and one for those deleted, if any are. Hovering one says why it's kept. Ages
 // are from the newest, as kopia counts back from it.
 const AGE_TICKS = [[HOUR, '1h'], [6 * HOUR, '6h'], [24 * HOUR, '1d'], [7 * 864e5, '1w'], [30.44 * 864e5, '1mo'],
   [182.6 * 864e5, '6mo'], [365.25 * 864e5, '1y'], [2 * 365.25 * 864e5, '2y'], [3 * 365.25 * 864e5, '3y'],
@@ -172,6 +173,8 @@ function drawTimeline(box, points) {
     const has = p => p.reasons.some(([k]) => k === kind);
     if (points.some(has)) lanes.push({ kind, name, has });
   }
+  // Pinned ones are kept whatever the numbers, so they're shown kept for that, then those that would go
+  if (points.some(p => p.pinned)) lanes.push({ kind: 'pinned', name: 'Pinned', has: p => p.pinned });
   if (points.some(p => p.deleted)) lanes.push({ kind: 'deleted', name: 'Deleted', has: p => p.deleted });
   const height = top + lanes.length * laneHeight + axisHeight;
   const offset = 30 * 60e3;  // So the newest, just made, isn't at minus infinity
@@ -215,7 +218,7 @@ function drawTimeline(box, points) {
     crosshair.setAttribute('x2', xs[best]);
     crosshair.setAttribute('visibility', 'visible');
     tip.replaceChildren(el('div', { class: 'when' }, formatFull(p.time), ` (${timeAgo(new Date(p.time).toISOString())})`),
-      keepTags(p.reasons, p.pinned, p.deleted));
+      keepTags(p.reasons, p.pinned, p.deleted, p.due));
     tip.hidden = false;
     const px = xs[best] * bounds.width / width;
     tip.style.left = `${px + 12 + tip.offsetWidth > bounds.width ? Math.max(0, px - tip.offsetWidth - 12) : px + 12}px`;
@@ -228,58 +231,82 @@ function drawTimeline(box, points) {
   box.append(svg, tip);
 }
 
-// In the long run on the schedule being picked, if that can be worked out, or the snapshots it has now. Drawn
-// again as the numbers or the schedule change.
-function retentionPreview(snapshots, scheduleNow) {
+// In the long run on the schedule being picked, if that can be worked out, or the snapshots there are now: for a
+// location, on a timeline, and for the global policy, which locations would lose any, with which of those are
+// already scheduled for deletion, by ID. Drawn again as the numbers or the schedule change.
+function retentionPreview(targets, scheduleNow, global, due) {
   let mode = simulable(scheduleNow()) ? 'long' : 'now';
   let shown = null;
   const summary = el('p', {});
   const chart = el('div', { class: 'retention-chart' });
   const clash = el('p', { class: 'warn', hidden: true });
-  const [long, now] = [['In the long run', 'long'], ['Its snapshots now', 'now']].map(([label, value]) =>
+  const note = el('p', { class: 'note' });
+  const [long, now] = [['In the long run', 'long'], [global ? 'Snapshots now' : 'Its snapshots now', 'now']].map(([label, value]) =>
     el('button', { onclick: () => { mode = value; draw(shown); } }, label));
-  now.title = 'Which of the snapshots it has now would be kept, and which deleted';
-  const draw = keep => {
-    shown = keep;
+  now.title = global ? 'Which locations would lose snapshots they have now, and how many'
+    : 'Which of the snapshots it has now would be kept, and which deleted';
+  const draw = chosen => {
+    shown = chosen;
     const schedule = scheduleNow();
     // The long run's only there for a schedule that can be worked out, so it's left when one's picked that can't
     if (!simulable(schedule)) mode = 'now';
     long.disabled = !simulable(schedule);
     long.title = simulable(schedule)
-      ? `What kopia would be keeping once it's been backing up ${scheduleText(schedule).toLowerCase()} for long enough`
+      ? `What kopia would be keeping of ${global ? 'a location going by the global policy' : 'it'} once it's been backing up ${scheduleText(schedule).toLowerCase()} for long enough`
       : 'Manual or custom schedules can\'t be worked out';
     long.setAttribute('aria-pressed', String(mode === 'long'));
     now.setAttribute('aria-pressed', String(mode === 'now'));
-    if (!keep) {
+    note.textContent = global && mode === 'now' ? 'Locations with their own numbers keep them, and pinned snapshots are always kept.'
+      : `How much older each is than the newest, on a log scale. Hover over one to see what keeps it.${global ? ' Locations with their own numbers keep them.' : ''}`;
+    chart.replaceChildren();
+    clash.hidden = true;
+    if (!chosen) {
       summary.textContent = '';
-      chart.replaceChildren();
-      clash.hidden = true;
       return;
     }
-    let points, collisions;
+    let collisions = [];
     if (mode === 'long') {
-      const times = longRunTimes(schedule, keep, Date.now());
-      const ranked = rank(times, keep);
+      const times = longRunTimes(schedule, chosen, Date.now());
+      const ranked = rank(times, chosen);
       collisions = ranked.collisions;
-      points = times.map((time, i) => ({ time, reasons: ranked.reasons[i] })).filter(p => p.reasons.length);
+      const points = times.map((time, i) => ({ time, reasons: ranked.reasons[i] })).filter(p => p.reasons.length);
       const oldest = points.at(-1);
-      summary.textContent = points.length
-        ? `Backing up ${scheduleText(schedule).toLowerCase()}, kopia keeps ${plural(points.length, 'snapshot')} once it's been going long enough, the oldest from ${timeAgo(new Date(oldest.time).toISOString())}.`
-        : 'Kopia would keep none of its snapshots.';
-    } else {
-      const complete = snapshots.filter(s => !s.incomplete).sort((a, b) => b.time.localeCompare(a.time));
+      summary.textContent = !points.length ? 'Kopia would keep none of its snapshots.'
+        : `${global ? 'For a location going by the global policy, backing' : 'Backing'} up ${scheduleText(schedule).toLowerCase()}, kopia keeps ${plural(points.length, 'snapshot')} once it's been going long enough, the oldest from ${timeAgo(new Date(oldest.time).toISOString())}.`;
+      drawTimeline(chart, points);
+    } else if (!global) {
+      const [target] = targets;
+      const keep = target.keepFor(chosen);
+      const complete = target.snapshots.filter(s => !s.incomplete).sort((a, b) => b.time.localeCompare(a.time));
       const ranked = rank(complete.map(s => Date.parse(s.time)), keep);
       collisions = ranked.collisions;
-      points = complete.map((s, i) => {
+      const points = complete.map((s, i) => {
         const pinned = !!s.pins?.length;
-        return { time: Date.parse(s.time), reasons: ranked.reasons[i], pinned, deleted: !pinned && !ranked.reasons[i].length };
+        const deleted = !pinned && !ranked.reasons[i].length;
+        return { time: Date.parse(s.time), reasons: ranked.reasons[i], pinned, deleted, due: deleted && due.has(s.id) };
       });
       const going = points.filter(p => p.deleted).length;
+      const anyway = points.filter(p => p.due).length;
       summary.textContent = complete.length
-        ? `Of the ${plural(complete.length, 'snapshot')} it has now, ${points.length - going} would be kept and ${going} deleted.`
+        ? `Of the ${plural(complete.length, 'snapshot')} it has now, ${points.length - going} would be kept and ${going} deleted${anyway ? `, ${anyway === going ? '' : `with ${anyway} of them `}already scheduled for deletion` : ''}.`
         : 'It has no snapshots yet.';
+      drawTimeline(chart, points);
+    } else {
+      // Each location that would lose any, most first
+      const losing = targets.map(t => {
+        const going = wouldDelete(t.snapshots, t.keepFor(chosen));
+        return { path: t.path, going: going.length, anyway: going.filter(s => due.has(s.id)).length, total: t.snapshots.filter(s => !s.incomplete).length };
+      }).filter(t => t.going).sort((a, b) => b.going - a.going || a.path.localeCompare(b.path));
+      const total = targets.reduce((sum, t) => sum + t.snapshots.filter(s => !s.incomplete).length, 0);
+      const going = losing.reduce((sum, t) => sum + t.going, 0);
+      const anyway = losing.reduce((sum, t) => sum + t.anyway, 0);
+      summary.textContent = `Of the ${plural(total, 'snapshot')} across ${plural(targets.length, 'location')}, ${total - going} would be kept and ${going} deleted${anyway ? `, ${anyway === going ? '' : `with ${anyway} of them `}already scheduled for deletion` : ''}.`;
+      if (losing.length) {
+        chart.append(el('ul', { class: 'retention-losing' }, losing.map(t =>
+          el('li', {}, el('span', { class: 'mono' }, t.path),
+            el('span', { class: t.going === t.anyway ? 'anyway' : null }, `${t.going} of ${t.total} deleted${t.anyway ? ` (${t.going === t.anyway ? '' : `${t.anyway} `}already scheduled)` : ''}`)))));
+      }
     }
-    drawTimeline(chart, points);
     const text = clashText(collisions);
     clash.textContent = text || '';
     clash.hidden = !text;
@@ -287,9 +314,7 @@ function retentionPreview(snapshots, scheduleNow) {
   return {
     element: el('section', { class: 'retention-preview' },
       el('div', { class: 'chart-head' }, el('h3', {}, 'Preview'), el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What to preview' }, long, now)),
-      summary, chart,
-      el('p', { class: 'note' }, 'How much older each is than the newest, on a log scale. Hover over one to see what keeps it.'),
-      clash),
+      summary, chart, note, clash),
     draw,
   };
 }
@@ -304,51 +329,75 @@ function wouldDelete(snapshots, keep) {
   return snapshots.filter(s => !s.incomplete && !s.pins?.length && reasons.get(s.id)?.length === 0);
 }
 
+// What a location would keep with the global policy's numbers changed: its own, or what it inherits from nearer
+// than the global policy, or the global policy's new ones
+export function keepUnderGlobal(keep) {
+  return chosen => Object.fromEntries(Object.entries(chosen).map(([kind, n]) => {
+    const { own, inherited, from } = keep[kind];
+    return [kind, own ?? (from && from !== 'the global policy' ? inherited : n)];
+  }));
+}
+
 // How many of a folder's snapshots to keep, for the schedule dialog: a field for each kind, what saving would
-// delete of the snapshots it has, and the preview, on the schedule the dialog has picked, from scheduleNow. Its
-// values are what to save, null for each to inherit; whether they're all whole numbers or empty is passed to
-// changed whenever they change. Refresh draws it again, as after the schedule's changed.
-export function retentionSection(keep, snapshots, scheduleNow, changed) {
+// delete of the snapshots there are, and the preview, on the schedule the dialog has picked, from scheduleNow.
+// Targets are the locations it applies to, each with its path, its snapshots, and what it would keep from the
+// numbers picked; for a folder, that's just the folder. For the global policy, every number's needed, as there's
+// nothing above it to inherit from. Its values are what to save, null for each to inherit; whether they're all
+// right is passed to changed whenever they change. Refresh draws it again, as after the schedule's changed.
+export function retentionSection({ keep, targets, scheduleNow, changed, global = false }) {
   const fields = RETENTION.map(([kind, name, about]) => {
     const { own, inherited, from } = keep[kind];
     // Left empty, it's inherited, which the placeholder says, as KopiaUI shows it
     const input = el('input', {
-      type: 'number', min: 0, step: 1, value: own ?? '', 'aria-label': name,
-      placeholder: inherited != null ? `${inherited} inherited` : 'None', title: from ? `Left empty, it's inherited from ${from}` : 'Left empty, none are kept',
+      type: 'number', min: 0, step: 1, value: own ?? '', 'aria-label': name, required: global,
+      placeholder: global ? '' : inherited != null ? `${inherited} inherited` : 'None',
+      title: global ? '' : from ? `Left empty, it's inherited from ${from}` : 'Left empty, none are kept',
     });
     return { kind, input, element: el('label', { class: 'retention-field' }, el('span', {}, el('b', {}, name), el('small', {}, about)), input) };
   });
   const values = () => Object.fromEntries(fields.map(f => [f.kind, f.input.value === '' ? null : Number(f.input.value)]));
-  const valid = () => fields.every(f => f.input.value === '' || (Number.isInteger(Number(f.input.value)) && Number(f.input.value) >= 0));
-  const effective = () => Object.fromEntries(Object.entries(values()).map(([kind, n]) => [kind, n ?? keep[kind].inherited ?? 0]));
-  const preview = retentionPreview(snapshots, scheduleNow);
-  const consequence = el('p', {});
+  const valid = () => fields.every(f => (f.input.value === '' ? !global : Number.isInteger(Number(f.input.value)) && Number(f.input.value) >= 0));
+  const chosen = () => Object.fromEntries(Object.entries(values()).map(([kind, n]) => [kind, n ?? keep[kind].inherited ?? 0]));
+  // Ones scheduled for deletion with the numbers there are now: kopia deletes them after a snapshot, and may not
+  // have yet, so they're not put down to what's changed
+  const due = new Set(targets.flatMap(t => wouldDelete(t.snapshots, t.keepFor(chosen())).map(s => s.id)));
+  const preview = retentionPreview(targets, scheduleNow, global, due);
+  const consequence = el('p', { class: 'warn', hidden: true });
+  const alreadyDue = el('p', { hidden: true });
   // What it would delete straight away, and the preview once typing pauses
   let previewSoon;
   const refresh = () => {
     changed(valid());
     clearTimeout(previewSoon);
     if (!valid()) {
+      alreadyDue.hidden = true;
       consequence.className = 'error';
-      consequence.textContent = 'Each must be a whole number, or empty to inherit it.';
+      consequence.hidden = false;
+      consequence.textContent = global ? 'Each must be a whole number.' : 'Each must be a whole number, or empty to inherit it.';
       preview.draw(null);
       return;
     }
-    const going = wouldDelete(snapshots, effective());
-    const total = snapshots.filter(s => !s.incomplete).length;
-    consequence.className = going.length ? 'warn' : '';
-    consequence.textContent = going.length
-      ? `After its next snapshot, kopia would delete ${going.length} of the ${plural(total, 'snapshot')} it has now, the oldest from ${formatFull(going[0].time)}. Pinned ones are always kept.`
-      : total ? `All ${plural(total, 'snapshot')} it has now would be kept.` : '';
-    previewSoon = setTimeout(() => preview.draw(effective()), 120);
+    const going = targets.map(t => wouldDelete(t.snapshots, t.keepFor(chosen())));
+    // What the change deletes that kopia keeps now, and what's going anyway
+    const extra = going.map(g => g.filter(s => !due.has(s.id)));
+    const anyway = going.map(g => g.filter(s => due.has(s.id)));
+    const count = lists => lists.reduce((sum, g) => sum + g.length, 0);
+    const places = lists => lists.filter(g => g.length).length;
+    const across = lists => (global ? ` across ${plural(places(lists), 'location')}` : '');
+    // Kopia deletes them after the next snapshot, so they're scheduled, as far as anyone can tell
+    alreadyDue.hidden = !count(anyway);
+    alreadyDue.textContent = `${plural(count(anyway), 'snapshot')}${across(anyway)} ${count(anyway) === 1 ? 'is' : 'are'} currently scheduled for deletion.`;
+    consequence.className = 'warn';
+    consequence.hidden = !count(extra);
+    consequence.textContent = `With the new settings, ${count(anyway) ? 'a further ' : ''}${plural(count(extra), 'snapshot')}${across(extra)} will be scheduled for deletion.`;
+    previewSoon = setTimeout(() => preview.draw(chosen()), 120);
   };
   for (const f of fields) f.input.addEventListener('input', refresh);
   return {
     fields: el('div', { class: 'retention-section' },
       el('h3', {}, 'Snapshots to keep'),
       el('div', { class: 'retention-fields' }, fields.map(f => f.element)),
-      el('p', {}, 'Left empty, each is inherited. Snapshots kept by any of them stay; kopia deletes the rest after the next snapshot.'),
-      consequence),
+      alreadyDue, consequence),
     preview: preview.element,
     values, valid, refresh,
     stop: () => clearTimeout(previewSoon),
