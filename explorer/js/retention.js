@@ -145,8 +145,8 @@ function clashText(collisions) {
     const list = [...found].sort((a, b) => a - b);
     return `${list.length > 1 ? 'weeks' : 'week'} ${listOf(list.map(String))} of ${year}`;
   });
-  const parts = [lost.length ? `the weekly rule keeps nothing for ${listOf(lost)}, as kopia names week 1 of a year the same as January, and so on, and the monthly rule has already kept those (kopia issues #2964 and #5096)` : null, ...other].filter(Boolean);
-  return parts.length ? `A kopia bug is in effect: ${listOf(parts)}.` : null;
+  const parts = [lost.length ? `the weekly rule keeps nothing for ${listOf(lost)}, as Kopia names week 1 of a year the same as January, and so on, and the monthly rule has already kept those (Kopia issues #2964 and #5096)` : null, ...other].filter(Boolean);
+  return parts.length ? `A Kopia bug is in effect: ${listOf(parts)}.` : null;
 }
 
 // What a kept snapshot's reasons are, as keep tags, as on a snapshot's page, or that it would be deleted, or is
@@ -252,7 +252,7 @@ function retentionPreview(targets, scheduleNow, global, due) {
     if (!simulable(schedule)) mode = 'now';
     long.disabled = !simulable(schedule);
     long.title = simulable(schedule)
-      ? `What kopia would be keeping of ${global ? 'a location going by the global policy' : 'it'} once it's been backing up ${scheduleText(schedule).toLowerCase()} for long enough`
+      ? `What Kopia would be keeping of ${global ? 'a location going by the global policy' : 'it'} once it's been backing up ${scheduleText(schedule).toLowerCase()} for long enough`
       : 'Manual or custom schedules can\'t be worked out';
     long.setAttribute('aria-pressed', String(mode === 'long'));
     now.setAttribute('aria-pressed', String(mode === 'now'));
@@ -272,7 +272,7 @@ function retentionPreview(targets, scheduleNow, global, due) {
       const points = times.map((time, i) => ({ time, reasons: ranked.reasons[i] })).filter(p => p.reasons.length);
       const oldest = points.at(-1);
       summary.textContent = !points.length ? 'Kopia would keep none of its snapshots.'
-        : `${global ? 'For a location going by the global policy, backing' : 'Backing'} up ${scheduleText(schedule).toLowerCase()}, kopia keeps ${plural(points.length, 'snapshot')} once it's been going long enough, the oldest from ${timeAgo(new Date(oldest.time).toISOString())}.`;
+        : `${global ? 'For a location going by the global policy, backing' : 'Backing'} up ${scheduleText(schedule).toLowerCase()}, Kopia keeps ${plural(points.length, 'snapshot')} once it's been going long enough, the oldest from ${timeAgo(new Date(oldest.time).toISOString())}.`;
       drawTimeline(chart, points);
     } else if (!global) {
       const [target] = targets;

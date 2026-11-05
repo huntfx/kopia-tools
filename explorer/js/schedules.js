@@ -162,7 +162,7 @@ export function settingsWarning(loc) {
   const apply = el('button', { class: 'btn', onclick: () => changeCopiedSettings(loc, false, apply) }, 'Apply parent settings fix');
   return el('section', { class: 'panel warning' },
     el('div', { class: 'chart-head' }, el('h2', {}, 'Parent settings not used')),
-    el('p', {}, `Backups of ${nested.container} don't use your ${listOf(nested.missing, 'or')} in here, as kopia doesn't pass them on to a location inside another. The parent settings fix copies them into this location's policy, and keeps them up to date.`),
+    el('p', {}, `Backups of ${nested.container} don't use your ${listOf(nested.missing, 'or')} in here, as Kopia doesn't pass them on to a location inside another. The parent settings fix copies them into this location's policy, and keeps them up to date.`),
     el('div', { class: 'actions' }, apply));
 }
 

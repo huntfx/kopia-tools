@@ -418,7 +418,7 @@ def find_snapshots_by_id(prefixes):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='List files added, removed and modified between kopia snapshots.')
+    parser = argparse.ArgumentParser(description='List files added, removed and modified between Kopia snapshots.')
     parser.add_argument('targets', nargs='+', metavar='path_or_id',
                         help='folder or file inside a snapshot source (need not exist locally), '
                              'or one or two snapshot IDs (or the start of them)')
@@ -430,7 +430,7 @@ def main():
     parser.add_argument('-t', '--transient', action='store_true',
                         help='with --group, also show files that only existed between the first and last snapshot')
     parser.add_argument('--show-ignored', action='store_true',
-                        help="show removals matched by kopia's current ignore rules (policy and .kopiaignore), "
+                        help="show removals matched by Kopia's current ignore rules (policy and .kopiaignore), "
                              'which are hidden by default as the files were most likely ignored, not deleted')
     parser.add_argument('-j', '--jobs', type=int, default=8, help='parallel kopia calls (default: 8)')
     parser.add_argument('--no-colour', action='store_true', help='disable coloured output')

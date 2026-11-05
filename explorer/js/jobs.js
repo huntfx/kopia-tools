@@ -226,9 +226,9 @@ export function confirmDelete(loc, snap, rel, isFolder) {
       snap.size != null ? `, ${formatSize(snap.size)}` : '', snap.incomplete ? `, ${unfinished(snap).status.toLowerCase()}` : ''),
     el('p', {}, inside ? `This deletes the whole snapshot of ${loc.path}, not just ${inside}. ` : '', 'It can\'t be undone.'),
     // Earlier checkpoints of the same backup are shown as it, so they go too
-    snap.checkpoints ? el('p', {}, `The ${plural(snap.checkpoints, 'earlier checkpoint')} kopia saved of the same backup ${snap.checkpoints === 1 ? 'goes' : 'go'} too.`) : null,
-    kept && kept[0] !== 'latest' ? el('p', {}, `It's kept ${kept[1]} by kopia's retention policy at the moment, so another snapshot may take its place.`) : null,
-    el('p', {}, 'Space on disk is only freed once kopia\'s maintenance runs, and only for data no other snapshot uses.'),
+    snap.checkpoints ? el('p', {}, `The ${plural(snap.checkpoints, 'earlier checkpoint')} Kopia saved of the same backup ${snap.checkpoints === 1 ? 'goes' : 'go'} too.`) : null,
+    kept && kept[0] !== 'latest' ? el('p', {}, `It's kept ${kept[1]} by Kopia's retention policy at the moment, so another snapshot may take its place.`) : null,
+    el('p', {}, 'Space on disk is only freed once Kopia\'s maintenance runs, and only for data no other snapshot uses.'),
     el('div', { class: 'actions' }, cancel, remove));
   // Gone once closed, however that happens
   dialog.addEventListener('close', () => dialog.remove());
@@ -494,7 +494,7 @@ export function settingsItems(j) {
 export function deleteItem(j) {
   const status = {
     deleting: () => el('div', { class: 'status muted' }, 'Deleting…'),
-    done: () => el('div', { class: 'status', title: 'Space on disk is freed once kopia\'s maintenance runs' },
+    done: () => el('div', { class: 'status', title: 'Space on disk is freed once Kopia\'s maintenance runs' },
       el('span', { class: 'c-added' }, '✓ Deleted')),
     failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
   }[j.state]();
@@ -565,7 +565,7 @@ export function backupItem(j) {
       el('div', { class: 'status' },
         el('span', { class: 'bar' }, el('span', { class: 'fill', style: `display:block;width:${percent ?? 0}%` })),
         percent != null
-          ? el('span', { title: j.estimated == null ? 'Going by the size of the last snapshot, until kopia has estimated it' : null },
+          ? el('span', { title: j.estimated == null ? 'Going by the size of the last snapshot, until Kopia has estimated it' : null },
             `${formatSize(j.bytes)} of about ${formatSize(about)} · ${Math.floor(percent)}%${j.left ? ` · ${j.left} left` : ''}`)
           : `${plural(j.files, 'file')} checked, ${formatSize(j.bytes)}`,
         el('button', { class: 'linklike', onclick: () => cancelBackup(j) }, 'Cancel')),
@@ -580,7 +580,7 @@ export function backupItem(j) {
       // Once the snapshots have been read again, it can be gone to
       made ? el('button', { class: 'linklike', onclick: () => navigate({ location: j.source, snapshot: made.id, asOf: null, scope: '', file: null }) }, 'View snapshot') : null),
     failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
-    cancelled: () => el('div', { class: 'status muted', title: 'kopia keeps what it got through as an incomplete snapshot, so the next backup doesn\'t upload it again' },
+    cancelled: () => el('div', { class: 'status muted', title: 'Kopia keeps what it got through as an incomplete snapshot, so the next backup doesn\'t upload it again' },
       `Cancelled after ${formatSize(j.uploaded)} uploaded`),
   }[j.state]();
   return el('li', { class: `${j.state}${jobActive(j) ? ' active' : ''}` },

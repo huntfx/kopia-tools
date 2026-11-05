@@ -90,7 +90,7 @@ export function actionsDialog(path) {
       element: el('div', { class: 'action-field' },
         el('label', {}, el('b', {}, label), script),
         el('div', { class: 'action-options' },
-          el('label', { title: 'How long it can take before it\'s stopped - left empty, none is saved, and kopia allows 3 minutes' }, 'Timeout', timeout, 'seconds'),
+          el('label', { title: 'How long it can take before it\'s stopped - left empty, none is saved, and Kopia allows 3 minutes' }, 'Timeout', timeout, 'seconds'),
           el('label', {}, 'Mode', mode))),
       value: () => ({ script: script.value, timeout: timeout.value ? Number(timeout.value) : null, mode: mode.value }),
       script,

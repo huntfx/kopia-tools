@@ -1,5 +1,5 @@
-"""Refresh the copies of kopia's documentation kept in this repository, in explorer/docs, which the explorer falls
-back to when it can't fetch a page and hasn't before. Fetches every page it shows, for the kopia installed, or
+"""Refresh the copies of Kopia's documentation kept in this repository, in explorer/docs, which the explorer falls
+back to when it can't fetch a page and hasn't before. Fetches every page it shows, for the Kopia installed, or
 another version with --ref, and notes the version each is from.
 
     py update_docs.py
@@ -14,7 +14,7 @@ from kopia_docs import BUNDLED_DIR, BUNDLED_VERSIONS, DOCS, bundled_versions, fe
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0], formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--ref', help='tag, commit or branch of kopia\'s repository to fetch from (default: the kopia installed)')
+    parser.add_argument('--ref', help='tag, commit or branch of Kopia\'s repository to fetch from (default: the Kopia installed)')
     ref = parser.parse_args().ref or kopia_version_ref()
     versions = bundled_versions()
     failed = False

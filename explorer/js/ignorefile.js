@@ -58,7 +58,7 @@ export function ignoreLine(path, loc) {
     file.policyRules.length ? `\nAlso ignored by ${policyName(file, file.location)}:\n${file.policyRules.join('\n')}` : null].filter(Boolean).join('\n');
   return el('div', { class: 'schedule' },
     file.exists ? el('span', { title }, `${plural(rules.length, 'ignore rule')} in ${name}`) : el('span', { class: 'muted', title }, `No ${name}`),
-    file.exists && !file.read ? el('span', { class: 'warn', title: `The policy here doesn't read ${file.name} files, so kopia won't use it` }, 'Not read') : null,
+    file.exists && !file.read ? el('span', { class: 'warn', title: `The policy here doesn't read ${file.name} files, so Kopia won't use it` }, 'Not read') : null,
     change);
 }
 
@@ -223,7 +223,7 @@ function ignoreDialog(path, loc) {
       ...(file.policyRules.length ? [{ name: policyName(file, file.location), rules: file.policyRules }] : []),
     ]);
     details.replaceChildren(...[
-      !file.read ? el('p', { class: 'warn' }, `The policy here doesn't read ${file.name} files, so kopia won't use it.`) : null,
+      !file.read ? el('p', { class: 'warn' }, `The policy here doesn't read ${file.name} files, so Kopia won't use it.`) : null,
       ...file.above.map(a => ruleList(`Carried down from ${a.path}`, a.rules)),
       file.policyRules.length ? ruleList(`Also ignored by ${policyName(file, file.location)}`, file.policyRules) : null,
     ].filter(Boolean));

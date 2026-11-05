@@ -95,7 +95,7 @@ export function describeStep(change, isFolder) {
     // Until the listings to compare are in, it isn't known which; if they can't be, all that's known is the diff's
     if (change.touched === undefined) return el('span', { class: 'muted' }, pending.size ? 'Checking…' : 'No content changes');
     return change.touched
-      ? el('span', { class: 'muted', title: 'kopia stored it again because a modified date changed, but no file\'s contents did' },
+      ? el('span', { class: 'muted', title: 'Kopia stored it again because a modified date changed, but no file\'s contents did' },
         isFolder ? 'Dates changed' : 'Date changed')
       : el('span', { class: 'muted', title: 'Nothing in it changed; something elsewhere in the location did' }, 'No changes');
   }

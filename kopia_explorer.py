@@ -829,7 +829,7 @@ def kopia_reason(error):
     lines = [line.strip() for line in str(error).strip().splitlines() if line.strip()]
     if len(lines) > 1:
         return lines[-1]
-    return f'{lines[0]} (kopia didn\'t say why)' if lines else type(error).__name__
+    return f'{lines[0]} (Kopia didn\'t say why)' if lines else type(error).__name__
 
 
 def start_restore(snapshot_id, path, is_folder):
@@ -1209,7 +1209,7 @@ def running_mounts():
 def other_mounts():
     """Drives mounted through a kopia server, such as KopiaUI's, rather than by kopia mount: all that's known is the
     drive, and what mounted it, as the server's mounts can only be asked about with its password."""
-    return sorted(({'drive': drive, 'by': 'KopiaUI' if '--ui' in args else 'a kopia server'}
+    return sorted(({'drive': drive, 'by': 'KopiaUI' if '--ui' in args else 'a Kopia server'}
                    for pid, args, drive in kopia_drives() if 'mount' not in args), key=lambda m: m['drive'])
 
 
@@ -2351,7 +2351,7 @@ def show_window(url):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Browse kopia snapshots in a window of their own.')
+    parser = argparse.ArgumentParser(description='Browse Kopia snapshots in a window of their own.')
     parser.add_argument('--port', type=int, default=8765, help='port to serve on (default: 8765)')
     shown = parser.add_mutually_exclusive_group()
     shown.add_argument('--browser', action='store_true', help='open the page in a browser rather than a window')

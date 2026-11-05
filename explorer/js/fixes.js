@@ -50,9 +50,9 @@ export function renderFixes() {
   if (!dialog) return;
   const fresh = el('div', {},
     el('h2', { id: 'fixes-title' }, 'Fixes'),
-    el('p', {}, 'Kopia Explorer\'s fixes for kopia\'s policies and snapshots, on each location that has one or needs one.'),
+    el('p', {}, 'Kopia Explorer\'s fixes for Kopia\'s policies and snapshots, on each location that has one or needs one.'),
     el('div', { class: 'section-head' }, el('h3', {}, 'Parent settings fix'), settingsForAll()),
-    el('p', {}, 'Copies the settings a location inside another would inherit into its own policy, as kopia doesn\'t use them in there when backing up the other location.'),
+    el('p', {}, 'Copies the settings a location inside another would inherit into its own policy, as Kopia doesn\'t use them in there when backing up the other location.'),
     el('ul', {}, settingsRows()),
     el('h3', {}, 'Last good pin'),
     el('p', {}, 'Pins the latest snapshot without missing files, and moves the pin on to each new one, so Kopia\'s retention settings never delete them.'),

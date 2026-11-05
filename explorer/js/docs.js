@@ -77,7 +77,7 @@ export function docsDialog(page) {
     if (!dialog.isConnected) return;
     if (doc.title) dialog.setAttribute('aria-label', doc.title);
     // The explorer's own copy, when the right one couldn't be fetched, may be from another version
-    version.textContent = `For kopia ${doc.version}${doc.version === doc.wanted ? '' : ` (failed to fetch ${doc.wanted})`}`;
+    version.textContent = `Kopia ${doc.version}${doc.version === doc.wanted ? '' : ` (failed to fetch ${doc.wanted})`}`;
     body.replaceChildren(...tidy(marked.parse(doc.markdown), doc.site));
   }).catch(error => {
     if (dialog.isConnected) body.replaceChildren(el('p', { class: 'error' }, `Couldn't load it: ${error instanceof TypeError ? 'can\'t reach the server' : error.message}`));

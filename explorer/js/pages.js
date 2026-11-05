@@ -308,12 +308,12 @@ function snapshotTags(loc, snap) {
   return el('div', { class: 'snap-tags' },
     snap === latest(loc) ? el('span', { class: 'tag' }, 'latest') : null,
     snap.incomplete ? el('span', { class: 'badge' }, unfinished(snap).badge) : null,
-    reasons.map(([kind, n]) => el('span', { class: `keep-tag ${kind}`, title: `Kept by kopia's retention policy as ${words[kind]} #${n}` }, `${kind}-${n}`)),
+    reasons.map(([kind, n]) => el('span', { class: `keep-tag ${kind}`, title: `Kept by Kopia's retention policy as ${words[kind]} #${n}` }, `${kind}-${n}`)),
     (snap.pins || []).map(pin => el('button', {
       class: 'keep-tag pinned', disabled: busy,
       title: pin === LAST_GOOD
-        ? 'Pinned as the latest good snapshot, so kopia\'s retention policy never deletes it, until the pin moves on to a newer one without missing files - click to remove the pin'
-        : 'Pinned, so kopia\'s retention policy never deletes it - click to remove the pin',
+        ? 'Pinned as the latest good snapshot, so Kopia\'s retention policy never deletes it, until the pin moves on to a newer one without missing files - click to remove the pin'
+        : 'Pinned, so Kopia\'s retention policy never deletes it - click to remove the pin',
       onclick: () => confirmPin(loc, snap, [pin]),
     }, PIN_ICON(), pin)),
     snap.incomplete ? null : el('button', {

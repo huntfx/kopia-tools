@@ -41,7 +41,7 @@ export function renderStorageChart(node) {
 
   return stackedChart({
     key: `folder:${node.path}`, heading: 'Space on disk over time', pieHeading: 'Space on disk', what: ['location', 'locations'], items, times, now,
-    note: 'Each location\'s data on disk, as it grew with each snapshot it still has, with locations inside another counted as part of it. kopia counts each location\'s storage separately, so data shared between them is counted more than once and the total can be a little more than the repository uses.',
+    note: 'Each location\'s data on disk, as it grew with each snapshot it still has, with locations inside another counted as part of it. Kopia counts each location\'s storage separately, so data shared between them is counted more than once and the total can be a little more than the repository uses.',
   });
 }
 
@@ -97,7 +97,7 @@ export function renderSizeChart(loc) {
     key: `size:${loc.path}:${state.scope}:${patterns()}:${countFiles}`, heading: sizeHeading(), pieHeading: countFiles ? 'Files' : 'Size',
     at: viewedAt(complete, loc), what: ['item', 'items'], items, times, now, views: sizeViews(), ...counting(),
     note: countFiles ? 'How many files each folder in here had at each snapshot, counting everything inside it, with each file in here as one.'
-      : 'How big each folder and file in here was at each snapshot. kopia only counts space on disk for a whole location, so this is their size rather than what they take up in the repository.',
+      : 'How big each folder and file in here was at each snapshot. Kopia only counts space on disk for a whole location, so this is their size rather than what they take up in the repository.',
   });
 }
 

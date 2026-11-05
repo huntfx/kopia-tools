@@ -60,9 +60,9 @@ export function followStorage() {
 // The header's line about the repository: which it is, when it was read, and how storage stats are getting on
 export function renderRepoStatus(progress = {}) {
   const status = document.getElementById('repo-status');
-  status.replaceChildren(`${DATA.repository.description || DATA.repository.path} · live from kopia, read ${formatFull(new Date(storageRead * 1000))}`);
+  status.replaceChildren(`${DATA.repository.description || DATA.repository.path} · live from Kopia, read ${formatFull(new Date(storageRead * 1000))}`);
   if (storageWorking) {
-    status.append(el('span', { title: 'Space on disk for new snapshots, which kopia takes a while over' },
+    status.append(el('span', { title: 'Space on disk for new snapshots, which Kopia takes a while over' },
       ` · working out storage${progress.total ? ` for ${progress.done} of ${plural(progress.total, 'location')}` : ''}…`));
   }
 }
@@ -206,7 +206,7 @@ const UNFINISHED = {
   cancelled: { badge: 'Cancelled', status: 'Cancelled before it finished', is: 'was cancelled before it finished' },
   live: { badge: 'In progress', status: 'Still in progress', is: 'is still in progress' },
   stopped: { badge: 'Incomplete', status: 'Stopped before it finished',
-    is: 'stopped before it finished, as kopia was closed part way, such as by KopiaUI closing or the computer shutting down' },
+    is: 'stopped before it finished, as Kopia was closed part way, such as by KopiaUI closing or the computer shutting down' },
 };
 
 export const unfinished = snap => UNFINISHED[isCancelled(snap) ? 'cancelled' : isLive(snap) ? 'live' : 'stopped'];

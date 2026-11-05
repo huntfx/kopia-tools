@@ -60,7 +60,7 @@ export function forgetExactSize() {
 // sum. Where it can be clicked, which is on the PC's page, it's marked ~ as about that, and clicking works out
 // the exact size. That's only for now, so with an as-of date it's just the sum.
 export function repositoryDiskText(total, clickable = false) {
-  if (!state.asOf && exactSize?.size != null) return el('span', { title: 'Measured from kopia\'s index' }, formatSize(exactSize.size));
+  if (!state.asOf && exactSize?.size != null) return el('span', { title: 'Measured from Kopia\'s index' }, formatSize(exactSize.size));
   if (!clickable || state.asOf || total == null) return diskText(total);
   const sum = `~${formatSize(total)}`;
   if (exactSize === 'loading') return el('span', { class: 'muted', title: 'Calculating the exact size…' }, `${sum}…`);
@@ -270,7 +270,7 @@ function whenCell(loc) {
   // Kopia only says it's being backed up once it's saved its first checkpoint, up to 45 minutes in
   return Date.now() - dueFrom(next) >= OVERDUE && !backingUpNow(loc)
     ? el('span', { class: 'total due', title: `Due since ${formatFull(next)} - it's backed up as soon as KopiaUI is running` }, 'overdue')
-    : el('span', { class: 'total', title: `Due at ${formatFull(next)} - KopiaUI backs it up as soon as it gets to it, which shows here once kopia's saved what it's got through so far, up to 45 minutes in` }, 'due now');
+    : el('span', { class: 'total', title: `Due at ${formatFull(next)} - KopiaUI backs it up as soon as it gets to it, which shows here once Kopia's saved what it's got through so far, up to 45 minutes in` }, 'due now');
 }
 
 // The snapshot a location's folders are read from: the one selected if it's open, otherwise its latest
