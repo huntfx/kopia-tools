@@ -4,6 +4,7 @@
 import { api } from './data.js';
 import { el } from './format.js';
 import { renderNotice } from './jobs.js';
+import { pageHidden, whenShown } from './shown.js';
 
 const TICK = 30 * 1000;
 
@@ -30,8 +31,9 @@ export async function checkKopiaUI() {
 }
 
 setInterval(() => {
-  if (!document.hidden) checkKopiaUI();
+  if (!pageHidden()) checkKopiaUI();
 }, TICK);
+whenShown(checkKopiaUI);
 
 // Asked again every couple of seconds until it's running, which takes a few, or giving up after a minute
 async function startKopiaUI() {

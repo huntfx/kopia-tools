@@ -191,6 +191,8 @@ class Repository:
         with self.lock:
             # When they were read, so the page knows which backups and deletes since then it still has to apply
             read = time.time()
+            # The policies are read alongside, as each takes most of a second, mostly kopia opening the repository
+            policies = pool.submit(self.policies, fresh=True)
             snapshots = list_snapshots(include_incomplete=True)
             # Last good pins move on to snapshots made since, which saves both again under new IDs
             if moved := self.move_last_good(snapshots):
@@ -206,7 +208,7 @@ class Repository:
             # Folders with a policy of their own are backup locations too, as kopia's scheduler backs them up,
             # even before their first snapshot, which they don't have yet
             prefix = policy_key('')
-            policies = self.policies(fresh=True)
+            policies = policies.result()
             for key in policies:
                 if key.startswith(prefix):
                     by_source.setdefault(key[len(prefix):], [])
@@ -2368,11 +2370,22 @@ def confirm_close():
 
 def show_window(url):
     """The page in a window of its own, until it's closed. Its settings, such as how charts are shown, are kept
-    in Kopia Explorer in the local app data folder."""
+    in Kopia Explorer in the local app data folder. The page is told when the window's minimised and brought
+    back, as it isn't otherwise, so it stops checking for new snapshots and the like meanwhile."""
     import webview
     window = webview.create_window('Kopia Explorer', url, width=1500, height=950, min_size=(800, 500),
                                    background_color='#0f1216', text_select=True, zoomable=True)
     window.events.closing += confirm_close
+
+    def minimised(value):
+        try:
+            window.evaluate_js(f'window.kopiaExplorerMinimised?.({json.dumps(value)})')
+        except Exception:  # Not loaded yet, or closing, when there's nothing to tell
+            pass
+    window.events.minimized += lambda: minimised(True)
+    # Brought back to how it was: maximised, if it was, or not
+    window.events.restored += lambda: minimised(False)
+    window.events.maximized += lambda: minimised(False)
     storage = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'Kopia Explorer'
     webview.start(private_mode=False, storage_path=str(storage))
 

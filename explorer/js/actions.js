@@ -8,6 +8,7 @@ import { api, redrawSoon } from './data.js';
 import { el, joined, listOf } from './format.js';
 import { renderNotice } from './jobs.js';
 import { renderSettings } from './settings.js';
+import { pageHidden, whenShown } from './shown.js';
 import { navigate } from './state.js';
 import { storage } from './storage.js';
 
@@ -40,8 +41,9 @@ export async function checkActions() {
 }
 
 setInterval(() => {
-  if (!document.hidden) checkActions();
+  if (!pageHidden()) checkActions();
 }, TICK);
+whenShown(checkActions);
 
 export async function setActions(enabled) {
   changing = true;

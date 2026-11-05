@@ -5,6 +5,7 @@ import { el, formatFull, listOf, plural } from './format.js';
 import { jobList, renderNotice } from './jobs.js';
 import { render } from './render.js';
 import { OVERDUE, dueFrom, loadAllSchedules, nextScheduled } from './schedules.js';
+import { pageHidden, whenShown } from './shown.js';
 import { buildSidebarTree, forgetExactSize, rescaleTree } from './sidebar.js';
 import { navigate, state, ui, writeHash } from './state.js';
 
@@ -181,18 +182,21 @@ export function hardRefresh() {
 // minute it's redrawn, so times like "3 minutes ago" and "in 5 minutes" stay right, or the snapshots are read
 // again instead: soon after one falls due, every minute while KopiaUI catches up with ones due or one's being
 // made, and every few minutes anyway, for ones made by hand. Ones overdue are left to that, as KopiaUI isn't
-// running to make them. Not while the page is hidden.
+// running to make them. Not while the page is hidden, or its window's minimised, but straight away on coming back.
 const TICK = 30 * 1000, GRACE = 20 * 1000, CATCHING_UP = 60 * 1000, RECHECK = 5 * 60 * 1000;
 
-setInterval(() => {
-  if (document.hidden || !storage) return;
+function keepUp() {
+  if (pageHidden() || !storage) return;
   loadAllSchedules();
   const now = Date.now(), read = storageRead * 1000;
   const due = storage.map(loc => nextScheduled(loc, now)).filter(next => next != null && next + GRACE <= now);
   const catchingUp = due.some(next => now - dueFrom(next) < OVERDUE) || storage.some(backingUpNow);
   if (due.some(next => next > read) || now - read >= (catchingUp ? CATCHING_UP : RECHECK)) refreshStorage();
   else redrawSoon();
-}, TICK);
+}
+
+setInterval(keepUp, TICK);
+whenShown(keepUp);
 
 // kopia keeps a backup stopped part way as an incomplete snapshot, saying why: cancelled, or a checkpoint, which
 // it saves as it goes. The server says whether a checkpoint's of a backup still going (live), or was left behind

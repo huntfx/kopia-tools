@@ -9,6 +9,7 @@ import { renderMounts } from './mounts.js';
 import { LAST_GOOD, failingNotice } from './lastgood.js';
 import { render } from './render.js';
 import { schedules } from './schedules.js';
+import { pageHidden, whenShown } from './shown.js';
 import { KEEP_KINDS } from './snapshots.js';
 import { navigate, writeHash } from './state.js';
 import { applyJobs, followRenamed, latest, refreshStorage, snapshotsChanged, storage, unfinished } from './storage.js';
@@ -604,12 +605,15 @@ export function pickUpJobs() {
 // Mounts can come and go with nothing here doing it, as the server checks every minute: ones found running, and
 // ones whose drive was taken away in Explorer. So while nothing's being followed, the list is asked for again
 // every half minute, while the page is showing.
-setInterval(async () => {
-  if (document.hidden || jobPolling) return;
+async function checkJobs() {
+  if (pageHidden() || jobPolling) return;
   const list = await fetch('/api/jobs').then(r => r.json()).catch(() => null);
   if (!list || JSON.stringify(list) === JSON.stringify(jobList)) return;
   jobList = list;
   if (list.some(jobActive)) jobsShown = true;
   jobsChanged();
   if (list.some(jobMoving)) followJobs();
-}, 30 * 1000);
+}
+
+setInterval(checkJobs, 30 * 1000);
+whenShown(checkJobs);
