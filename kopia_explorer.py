@@ -1306,12 +1306,17 @@ def retention_of(chain, policies):
     return keep
 
 
-def set_retention(policy, keep):
-    """Set how many snapshots of each kind a policy keeps, as KopiaUI's policy editor does: a whole number, or None
-    to inherit it, taken out of the policy. Kopia applies it after the location's next snapshot."""
+def check_retention(keep):
+    """How many snapshots of each kind to keep, by kind: each a whole number, or None to inherit it"""
     for kind, count in keep.items():
         if kind not in RETENTION or (count is not None and (not isinstance(count, int) or isinstance(count, bool) or count < 0)):
             raise KeyError(kind)
+
+
+def set_retention(policy, keep):
+    """Set how many snapshots of each kind a policy keeps, as KopiaUI's policy editor does: a whole number, or None
+    to inherit it, taken out of the policy. Kopia applies it after the location's next snapshot."""
+    check_retention(keep)
     retention = policy.setdefault('retention', {})
     for kind, count in keep.items():
         if count is None:
@@ -1396,16 +1401,15 @@ def global_schedule(policies=None):
 def set_global_schedule(interval, keep):
     """Set how often the global policy says to back up, which isn't manual snapshots only then, and how many
     snapshots of each kind it keeps, all of which it must say, as there's nothing above it to inherit them from.
-    Every location that doesn't set them nearer to it goes by these."""
+    Every location that doesn't set them nearer to it goes by these. Set with kopia policy set, which replaces the
+    global policy, as kopia policy import adds another alongside it instead, which kopia may read either of."""
     check_interval(interval)
+    check_retention(keep)
     if set(keep) != set(RETENTION) or any(count is None for count in keep.values()):
         raise ValueError('The global policy needs a number for each kind of snapshot to keep')
-    policy = json.loads(kopia('policy', 'export')).get(GLOBAL) or {}
-    scheduling = policy.setdefault('scheduling', {})
-    scheduling['intervalSeconds'] = interval
-    scheduling.pop('manual', None)
-    set_retention(policy, keep)
-    import_policy(GLOBAL, policy)
+    manual = global_schedule()['manual']
+    kopia('policy', 'set', '--global', f'--snapshot-interval={interval}s', *[f'--keep-{kind}={count}' for kind, count in keep.items()],
+          *(['--no-manual'] if manual else []))
     return global_schedule()
 
 
