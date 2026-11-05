@@ -1,5 +1,6 @@
 // The snapshots panel on the right: the history of the folder or file being looked at
 import { actionsLine } from './actions.js';
+import { globalIgnoreLine, ignoreLine } from './ignorefile.js';
 import { compareTarget, ignoredReason, isGone, kindCount } from './changes.js';
 import { api, pending } from './data.js';
 import { inFilter, matchingFiles, patterns } from './filter.js';
@@ -134,7 +135,8 @@ export function renderFolderSide(aside) {
     el('div', { class: 'history-head' },
       el('div', {}, el('h2', {}, `Backup locations (${locations.length})`), el('div', { class: 'target' }, state.folder),
         // The PC's is the global policy's, which every location goes by unless it sets its own
-        node?.root ? globalLine() : null)),
+        node?.root ? globalLine() : null,
+        node?.root ? globalIgnoreLine() : null)),
     el('ul', { class: 'snaps' }, locations.map(loc => {
       // The snapshot for the as-of date, or with none set, the latest; and what was on disk by then
       const newest = state.asOf ? (tooOld(loc) ? null : asOfSnapshot(loc)) : latest(loc);
@@ -194,7 +196,9 @@ export function renderSide() {
           empty ? el('span', { class: 'name' }, ...name) : el('button', { class: 'name', onclick: toggle }, ...name),
           backupButton(loc)),
         open ? scheduleLine(loc, loc.path.toLowerCase() === target.toLowerCase()) : null,
-        open && loc.path.toLowerCase() === target.toLowerCase() ? actionsLine(loc) : null),
+        open && loc.path.toLowerCase() === target.toLowerCase() ? actionsLine(loc) : null,
+        // The .kopiaignore of the folder being looked at, under the nearest location, which reads it
+        open && loc === nearest && isFolder ? ignoreLine(target, loc) : null),
       open ? snapshotList(loc, target, isFolder) : null,
     ].filter(Boolean);
   };

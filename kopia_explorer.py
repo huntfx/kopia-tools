@@ -1882,6 +1882,128 @@ def set_location_actions(path, before, after):
     return snapshot_actions()
 
 
+# The ignore file kopia reads in each folder it backs up, unless a policy says otherwise, and the one edited here,
+# at the top of a location
+IGNORE_FILE = '.kopiaignore'
+
+
+def first_files_setting(chain, policies, setting):
+    """A files setting as kopia works it out for a folder, from the first policy in its chain that has it, as a
+    list there replaces the one above rather than adding to it, and the name of that policy; None for both if
+    none has it"""
+    for key, name in chain:
+        files = (policies.get(key) or {}).get('files') or {}
+        if setting in files:
+            return files[setting], name
+    return None, None
+
+
+def ignore_location(path):
+    """The backup location a folder's .kopiaignore is read in: the folder itself, if it's one, or the nearest
+    it's inside. A folder above them all has none, as nothing backs it up."""
+    location = path if path in repository.sources else containing_location(path)
+    if not location:
+        raise PermissionError(f'{path} isn\'t in a backup location')
+    return location
+
+
+def ignore_rules(file):
+    """The rules in an ignore file, leaving out blank lines and comments; none if it isn't there"""
+    try:
+        text = file.read_text(encoding='utf-8-sig')
+    except OSError:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith('#')]
+
+
+def ignore_file(path):
+    """A folder's .kopiaignore, in a backup location or at its top, for editing: what's in it, with Unix line
+    endings, whether it's there, and whether the folder's on disk to put one in; whether kopia reads it, as the
+    folder's policy lists the ignore files it reads; the ignore rules in its policy, which apply as well, and the
+    policy they're set in; and the rules in the .kopiaignore files of the folders above it in the location, which
+    carry down into it."""
+    location = ignore_location(path)
+    folder = Path(path)
+    try:
+        content, exists = (folder / IGNORE_FILE).read_text(encoding='utf-8-sig').replace('\r\n', '\n'), True
+    except FileNotFoundError:
+        content, exists = '', False
+    except OSError as e:
+        raise ValueError(f'Couldn\'t read {IGNORE_FILE} in {path}: {e.strerror}')
+    policies = json.loads(kopia('policy', 'export'))
+    chain = policy_chain(path)
+    read, _ = first_files_setting(chain, policies, 'ignoreDotFiles')
+    rules, rules_from = first_files_setting(chain, policies, 'ignore')
+    above = [folder.parents[i] for i in reversed(range(len(folder.relative_to(location).parts)))]
+    return {'path': path, 'location': location, 'name': IGNORE_FILE, 'exists': exists, 'onDisk': folder.is_dir(), 'content': content,
+            'read': IGNORE_FILE in (read or []), 'policyRules': rules or [], 'policyFrom': rules_from,
+            'above': [{'path': str(f / IGNORE_FILE), 'rules': r} for f in above if (r := ignore_rules(f / IGNORE_FILE))]}
+
+
+def global_ignore():
+    """The global policy's ignore rules, which apply from the top of every location that doesn't have a list of its
+    own, or get one from a policy nearer to it, as a list there replaces this one; and those locations, as these
+    don't apply to them."""
+    policies = json.loads(kopia('policy', 'export'))
+    rules = ((policies.get(GLOBAL) or {}).get('files') or {}).get('ignore') or []
+    replaced = sorted((path for path in repository.sources
+                       if first_files_setting(policy_chain(path), policies, 'ignore')[1] not in (None, 'the global policy')), key=str.casefold)
+    return {'rules': rules, 'replaced': replaced}
+
+
+def set_global_ignore(rules):
+    """Set the global policy's ignore rules, with kopia policy set, as kopia policy import adds another global policy
+    alongside the one there instead: the ones no longer there are removed and the new ones added, in one go, as
+    clearing and adding in one go leaves none. Kopia keeps them sorted, so there are no comments, which it would
+    keep as rules and move. The explorer's ignore rules are read again for every location, as they may have changed."""
+    if not isinstance(rules, list) or any(not isinstance(r, str) or not r.strip() or '\n' in r or r.strip().startswith('#') for r in rules):
+        raise ValueError('Each rule must be a pattern on a line of its own, with no comments')
+    wanted = {r.strip() for r in rules}
+    there = set(global_ignore()['rules'])
+    if not wanted and there:
+        kopia('policy', 'set', '--global', '--clear-ignore')
+    elif wanted != there:
+        kopia('policy', 'set', '--global', *[f'--remove-ignore={r}' for r in sorted(there - wanted)],
+              *[f'--add-ignore={r}' for r in sorted(wanted - there)])
+    repository.ignores.clear()
+    return global_ignore()
+
+
+def set_ignore_file(path, content):
+    """Write a folder's .kopiaignore, in a backup location or at its top, or delete it when there's nothing in it but
+    blank lines, as kopia then has nothing to read from it. Written with Windows line endings, unless the one there
+    already has Unix ones, to a temporary file first, so a full disk can't leave it half written. The explorer's
+    ignore rules for every location it's in are read again next time, as they've changed. Kopia uses it from the
+    next snapshot of each."""
+    ignore_location(path)
+    if not os.path.isdir(path):
+        raise ValueError(f'There\'s no folder {path} on this PC to put {IGNORE_FILE} in')
+    file = Path(path) / IGNORE_FILE
+    try:
+        if not content.strip():
+            file.unlink(missing_ok=True)
+        else:
+            text = content.replace('\r\n', '\n').rstrip('\n') + '\n'
+            newline = '\n' if file.exists() and b'\r\n' not in file.read_bytes() else '\r\n'
+            partial = file.with_name(IGNORE_FILE + '.tmp')
+            partial.write_text(text, encoding='utf-8', newline=newline)
+            # Windows won't replace a file while something's reading it, so that's given a moment
+            for attempt in range(5):
+                try:
+                    partial.replace(file)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        partial.unlink(missing_ok=True)
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+    except OSError as e:
+        raise ValueError(f'Couldn\'t {"delete" if not content.strip() else "write"} {IGNORE_FILE} in {path}: {e.strerror}')
+    for source in [s for s in repository.ignores if s == path or (path.lower() + '\\').startswith(s.rstrip('\\').lower() + '\\')]:
+        repository.ignores.pop(source, None)
+    return ignore_file(path)
+
+
 def snapshot_actions():
     """Whether kopia runs the snapshot actions in policies here, which it only does once they're turned on in its
     config, which policies have any, and whether KopiaUI's server was started before the config last changed, so
@@ -1996,6 +2118,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(sorted(jobs.values(), key=lambda j: j['id']))
             if url.path == '/api/kopiaui':
                 return self.send_json(kopia_ui())
+            if url.path == '/api/global-ignore':
+                return self.send_json(global_ignore())
+            if url.path == '/api/ignore-file':
+                return self.send_json(ignore_file(query['path']))
             if url.path == '/api/actions':
                 return self.send_json(snapshot_actions())
             if url.path == '/api/free-drives':
@@ -2007,8 +2133,12 @@ class Handler(BaseHTTPRequestHandler):
             pass
         except KeyError as e:
             self.send_error(400, f'Missing or unknown {e}')
+        except ValueError as e:
+            self.send_error(400, str(e))
         except RuntimeError as e:
             self.send_error(502, kopia_reason(e))
+        except PermissionError as e:
+            self.send_error(403, str(e))
         except Exception as e:
             traceback.print_exc()
             self.send_error(500, f'{type(e).__name__}: {e}')
@@ -2053,6 +2183,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(start_kopia_ui())
             if self.path == '/api/actions':
                 return self.send_json(set_actions(bool(body['enabled'])))
+            if self.path == '/api/global-ignore':
+                return self.send_json(set_global_ignore(body['rules']))
+            if self.path == '/api/ignore-file':
+                return self.send_json(set_ignore_file(body['path'], body['content']))
             if self.path == '/api/location-actions':
                 return self.send_json(set_location_actions(body['path'], body.get('before'), body.get('after')))
             if self.path == '/api/forget':

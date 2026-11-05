@@ -452,6 +452,20 @@ th[aria-sort] { color: var(--ink); }
   width: 80px; padding: 3px 6px; border: 1px solid var(--axis); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 0.82rem;
 }
 .location-actions textarea:focus, .location-actions input:focus { border-color: var(--accent); outline: none; }
+/* Editing a folder's .kopiaignore, with the rules carried down from above and its policy's under it, folded away */
+.confirm.ignore-file { width: min(600px, calc(100vw - 32px)); }
+.ignore-file textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; padding: 5px 7px; border: 1px solid var(--axis); border-radius: 6px;
+  background: var(--bg); color: var(--ink); font: 0.82rem var(--font-data);
+}
+.ignore-file textarea:focus { border-color: var(--accent); outline: none; }
+.ignore-file textarea:disabled { opacity: 0.6; }
+/* Kopia's documentation, shown in the explorer, as big as fits */
+.confirm.docs[open] { width: min(1100px, calc(100vw - 32px)); height: min(900px, calc(100vh - 48px)); display: flex; flex-direction: column; }
+.docs iframe { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.ignore-file .other-rules { margin: 0 0 10px; font-size: 0.85rem; color: var(--ink-2); }
+.ignore-file .other-rules summary { cursor: pointer; overflow-wrap: anywhere; }
+.ignore-file .other-rules pre { margin: 6px 0 0; max-height: 180px; overflow-y: auto; font: 0.78rem var(--font-data); color: var(--ink-2); }
 /* Changing how often a location's backed up, and how many of its snapshots it keeps: each kind with what it means,
    and its number beside it, with a preview of what that keeps beside them, or under them when there isn't room */
 .confirm.retention { width: min(1020px, calc(100vw - 32px)); }
