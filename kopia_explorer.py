@@ -43,7 +43,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 from urllib.parse import parse_qs, urlparse
 
-from snapshot_diff import ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, glob_to_regex, kopia, list_snapshots, log_command
+from snapshot_diff import (ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, glob_to_regex, kopia, list_snapshots, log_command,
+                           parse_ignore_rule)
 
 PAGE_DIR = Path(__file__).parent / 'explorer'
 # In the temp folder, as it can be thrown away and can get big
@@ -1969,6 +1970,87 @@ def set_global_ignore(rules):
     return global_ignore()
 
 
+def latest_complete(source):
+    """A location's newest finished snapshot, or None"""
+    snaps = [s for s in repository.snapshots.values() if s['source']['path'] == source and not s.get('incomplete')]
+    return max(snaps, key=lambda s: s['startTime'], default=None)
+
+
+def folder_in(root, parts):
+    """A folder's object ID in a snapshot, from its root's, by the names of the folders down to it; None if it
+    isn't there"""
+    obj = root
+    for part in parts:
+        obj = next((e.get('o') for e in listing(obj) if e['t'] == 'd' and e['n'] == part), None)
+        if not obj:
+            return None
+    return obj
+
+
+# What a rule would leave out of a tree, by the tree's object ID and the rule, kept while the server runs, as a tree
+# with the same ID never changes
+rule_drops_cache = {}
+
+
+def rule_drops(obj, line):
+    """What an ignore rule, applying from the top of a snapshot's tree, would leave out of it: (folders, files,
+    bytes), counting everything in a folder it leaves out, which it doesn't look inside, from the tree kopia lists in
+    one go for file types."""
+    key = (obj, line)
+    if key in rule_drops_cache:
+        return rule_drops_cache[key]
+    _, dir_only, regex = parse_ignore_rule(line)
+    file_types.get(obj)
+    folders = files = size = 0
+    stack = [(obj, '')]
+    while stack:
+        here, prefix = stack.pop()
+        entries = file_types.entries(here) or {'f': [], 'd': []}
+        if not dir_only:
+            for name, nbytes in entries['f']:
+                if regex.fullmatch(prefix + name):
+                    files += 1
+                    size += nbytes or 0
+        for name, child in entries['d']:
+            if regex.fullmatch(prefix + name):
+                tally = file_types.get(child) or {}
+                folders += 1
+                files += sum(n for n, _ in tally.values())
+                size += sum(b for _, b in tally.values())
+            else:
+                stack.append((child, f'{prefix}{name}/'))
+    rule_drops_cache[key] = found = (folders, files, size)
+    return found
+
+
+def check_ignore_rules(path, rules):
+    """What each of some ignore rules would leave out of the latest snapshots, by rule: for a folder's .kopiaignore,
+    of the folder in its location's latest snapshot, and for the global policy (path None), of the latest snapshot of
+    every location going by its rules, from the top of each. Each is its folders, files and bytes, and how many
+    locations; None for a rule that only brings things back, or doesn't parse, or with nothing to check it against.
+    Only what's in the snapshots can be counted, so a rule leaving out what's already left out finds nothing."""
+    if path is None:
+        policies = json.loads(kopia('policy', 'export'))
+        trees = [(snap['rootEntry']['obj'], source) for source in sorted(repository.sources)
+                 if first_files_setting(policy_chain(source), policies, 'ignore')[1] in (None, 'the global policy')
+                 and (snap := latest_complete(source))]
+    else:
+        location = ignore_location(path)
+        snap = latest_complete(location)
+        obj = snap and folder_in(snap['rootEntry']['obj'], Path(path).relative_to(location).parts)
+        trees = [(obj, location)] if obj else []
+    found = {}
+    for line in rules:
+        rule = parse_ignore_rule(line) if isinstance(line, str) else None
+        if not rule or rule[0] or not trees:
+            found[line] = None
+            continue
+        counts = [rule_drops(obj, line) for obj, _ in trees]
+        found[line] = {'folders': sum(c[0] for c in counts), 'files': sum(c[1] for c in counts), 'bytes': sum(c[2] for c in counts),
+                       'locations': sum(1 for c in counts if c[0] or c[1])}
+    return found
+
+
 def set_ignore_file(path, content):
     """Write a folder's .kopiaignore, in a backup location or at its top, or delete it when there's nothing in it but
     blank lines, as kopia then has nothing to read from it. Written with Windows line endings, unless the one there
@@ -2183,6 +2265,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(start_kopia_ui())
             if self.path == '/api/actions':
                 return self.send_json(set_actions(bool(body['enabled'])))
+            if self.path == '/api/check-ignore':
+                return self.send_json(check_ignore_rules(body.get('path'), body.get('rules') or []))
             if self.path == '/api/global-ignore':
                 return self.send_json(set_global_ignore(body['rules']))
             if self.path == '/api/ignore-file':

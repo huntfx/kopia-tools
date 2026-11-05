@@ -4,7 +4,7 @@
 // the ignore rules in its policy apply as well, from the nearest policy that has any, as a list there replaces the
 // one above, so both are shown with it.
 import { DATA, api, redrawSoon } from './data.js';
-import { el, plural } from './format.js';
+import { el, formatSize, plural } from './format.js';
 import { storage } from './storage.js';
 
 // From the server, by lower-cased folder path: what's in the file, whether it's there and whether the folder's
@@ -82,10 +82,91 @@ const ruleList = (summary, lines, word = 'rule') => el('details', { class: 'othe
 // until then. Saved empty, the file's deleted. Every location it's in has its snapshots' changes worked out
 // again, as which removed files count as ignored goes by the rules there are now, and the folders inside it are
 // read again, as what carries down into them has changed.
+// ---- Notes on the lines being edited ----
+
+// What new rules would leave out of the latest snapshots, by folder (or the global policy, as null) and rule, as
+// the server works it out, kept while the page is open: the first check of a location after it's backed up can
+// take a minute or two, as kopia lists its whole snapshot
+const drops = new Map();
+
+const dropKey = (path, line) => `${path ?? ''}\n${line}`;
+
+// What a rule would leave out, in words
+function dropText(found, global) {
+  if (!found.files && !found.folders) return { text: 'Matches nothing in the latest snapshot', kind: 'muted' };
+  const what = found.folders ? plural(found.folders, 'folder') : plural(found.files, 'file');
+  const where = global && found.locations > 1 ? ` across ${plural(found.locations, 'location')}` : '';
+  return { text: `Would leave out ${what}${where} (${formatSize(found.bytes)})`, kind: '' };
+}
+
+// A list under an editor's box, of the lines with something to say: a mistake, a line that changes nothing, or for
+// a new line, what it would leave out of the latest snapshots, which is asked for once typing pauses. Others are
+// other lists of rules that apply too, by name, so a line already in one says so. The global policy can't have
+// comments, as kopia keeps its list sorted, which also stops ! lines bringing anything back. Blocked says whether
+// it can't be saved as it is.
+function ruleChecks({ text, path, global = false }) {
+  const list = el('ul', { class: 'rule-checks', hidden: true });
+  let saved = new Set();
+  let others = [];
+  let soon = null;
+  const lines = () => text.value.split('\n').map(line => line.trim());
+  const ask = rules => {
+    for (const line of rules) drops.set(dropKey(path, line), 'checking');
+    draw();
+    api.post('/api/check-ignore', { path: global ? null : path, rules })
+      .then(found => { for (const [line, result] of Object.entries(found)) drops.set(dropKey(path, line), result); })
+      .catch(() => { for (const line of rules) drops.delete(dropKey(path, line)); })
+      .finally(() => { if (list.isConnected) draw(); });
+  };
+  const noteFor = (line, i, all) => {
+    if (global && line.startsWith('#')) return { text: 'Comments can\'t be kept in the global policy', kind: 'error' };
+    if (!line || line.startsWith('#')) return null;
+    if (global && line.startsWith('!')) return { text: 'Kopia keeps this list sorted, so this can\'t bring anything back', kind: 'warn' };
+    if (/\\[A-Za-z0-9_.-]/.test(line)) return { text: 'Use / between folders, not \\', kind: 'warn' };
+    const first = all.indexOf(line);
+    if (first < i) return { text: `Same as line ${first + 1}`, kind: 'muted' };
+    const elsewhere = others.find(o => o.rules.includes(line));
+    if (elsewhere) return { text: `Already in ${elsewhere.name}`, kind: 'muted' };
+    if (saved.has(line) || line.startsWith('!')) return null;
+    const found = drops.get(dropKey(path, line));
+    if (found === 'checking') return { text: 'Checking…', kind: 'muted' };
+    return found ? dropText(found, global) : null;
+  };
+  const draw = () => {
+    const all = lines();
+    const notes = all.map((line, i) => [i, line, noteFor(line, i, all)]).filter(([, , note]) => note);
+    list.hidden = !notes.length;
+    list.replaceChildren(...notes.map(([i, line, note]) => el('li', {},
+      el('span', { class: 'n' }, `Line ${i + 1}`), el('span', { class: 'rule' }, line), el('span', { class: `note ${note.kind}` }, note.text))));
+  };
+  const refresh = () => {
+    draw();
+    clearTimeout(soon);
+    soon = setTimeout(() => {
+      const wanted = [...new Set(lines())].filter(line => line && !line.startsWith('#') && !line.startsWith('!') && !saved.has(line)
+        && !drops.has(dropKey(path, line)) && !/\\[A-Za-z0-9_.-]/.test(line));
+      if (wanted.length) ask(wanted);
+    }, 600);
+  };
+  text.addEventListener('input', refresh);
+  return {
+    element: list,
+    // Once what's saved is loaded: its lines, which aren't new, and the other lists that apply
+    start: (savedLines, otherLists = []) => {
+      saved = new Set(savedLines.map(line => line.trim()));
+      others = otherLists;
+      refresh();
+    },
+    blocked: () => global && lines().some(line => line.startsWith('#')),
+    stop: () => clearTimeout(soon),
+  };
+}
+
 function ignoreDialog(path, loc) {
   if (document.querySelector('dialog.ignore-file')) return;
   const name = fileName(path, loc);
   const text = el('textarea', { rows: 12, spellcheck: false, 'aria-label': `${name} rules`, disabled: true, placeholder: 'Loading…' });
+  const checks = ruleChecks({ text, path });
   const details = el('div', {});
   const error = el('p', { class: 'error', hidden: true });
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
@@ -120,11 +201,15 @@ function ignoreDialog(path, loc) {
     el('h2', { id: 'ignore-file-title' }, 'Ignore rules'),
     el('p', { class: 'what' }, el('b', {}, `${path.replace(/\\$/, '')}\\.kopiaignore`)),
     text,
-    el('p', {}, 'One pattern per line, as in .gitignore. ', el('button', { class: 'linklike', onclick: docsDialog }, 'Documentation')),
+    el('p', {}, el('button', { class: 'linklike', onclick: docsDialog }, 'Documentation')),
+    checks.element,
     details,
     error,
     el('div', { class: 'actions' }, cancel, save));
-  dialog.addEventListener('close', () => dialog.remove());
+  dialog.addEventListener('close', () => {
+    checks.stop();
+    dialog.remove();
+  });
   document.body.append(dialog);
   dialog.showModal();
   loadIgnoreFile(path).then(found => {
@@ -141,6 +226,10 @@ function ignoreDialog(path, loc) {
     text.disabled = false;
     save.disabled = false;
     label();
+    checks.start(file.content.split('\n'), [
+      ...file.above.map(a => ({ name: a.path, rules: a.rules })),
+      ...(file.policyRules.length ? [{ name: policyName(file, file.location), rules: file.policyRules }] : []),
+    ]);
     details.replaceChildren(...[
       !file.read ? el('p', { class: 'warn' }, `The policy here doesn't read ${file.name} files, so kopia won't use it.`) : null,
       ...file.above.map(a => ruleList(`Carried down from ${a.path}`, a.rules)),
@@ -192,7 +281,7 @@ export function globalIgnoreLine() {
 function globalIgnoreDialog() {
   if (document.querySelector('dialog.ignore-file')) return;
   const text = el('textarea', { rows: 14, spellcheck: false, 'aria-label': 'Global ignore rules', disabled: true, placeholder: 'Loading…' });
-  const check = el('p', { hidden: true });
+  const checks = ruleChecks({ text, global: true });
   const details = el('div', {});
   const error = el('p', { class: 'error', hidden: true });
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
@@ -217,26 +306,22 @@ function globalIgnoreDialog() {
       redrawSoon();
     },
   }, 'Save');
-  const checkRules = () => {
-    const comments = rules().some(r => r.startsWith('#'));
-    const negations = rules().some(r => r.startsWith('!'));
-    check.hidden = !comments && !negations;
-    check.className = comments ? 'error' : 'warn';
-    check.textContent = comments ? 'Comments can\'t be kept here, as kopia keeps this list sorted.'
-      : 'Kopia keeps this list sorted, so a rule starting with ! comes first and can\'t bring anything back.';
-    save.disabled = comments || text.disabled;
-  };
+  // A comment can't be saved in the global policy, which the line's note says
+  const checkRules = () => { save.disabled = checks.blocked() || text.disabled; };
   text.addEventListener('input', checkRules);
   const dialog = el('dialog', { class: 'confirm ignore-file', 'aria-labelledby': 'ignore-file-title' },
     el('h2', { id: 'ignore-file-title' }, 'Ignore rules'),
     el('p', { class: 'what' }, el('b', {}, 'Global policy')),
     text,
-    el('p', {}, 'One pattern per line, as in .gitignore, applying from the top of each location. ', el('button', { class: 'linklike', onclick: docsDialog }, 'Documentation')),
-    check,
+    el('p', {}, el('button', { class: 'linklike', onclick: docsDialog }, 'Documentation')),
+    checks.element,
     details,
     error,
     el('div', { class: 'actions' }, cancel, save));
-  dialog.addEventListener('close', () => dialog.remove());
+  dialog.addEventListener('close', () => {
+    checks.stop();
+    dialog.remove();
+  });
   document.body.append(dialog);
   dialog.showModal();
   loadGlobalIgnore().then(found => {
@@ -250,6 +335,7 @@ function globalIgnoreDialog() {
     text.value = found.rules.join('\n');
     text.placeholder = '';
     text.disabled = false;
+    checks.start(found.rules);
     checkRules();
     details.replaceChildren(...[found.replaced.length ? ruleList('Not used by locations with a list of their own', found.replaced, 'location') : null].filter(Boolean));
     text.focus();

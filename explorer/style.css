@@ -460,6 +460,16 @@ th[aria-sort] { color: var(--ink); }
 }
 .ignore-file textarea:focus { border-color: var(--accent); outline: none; }
 .ignore-file textarea:disabled { opacity: 0.6; }
+/* Under the box, the lines with something to say: its number, the rule, and what about it */
+.rule-checks { list-style: none; margin: 0 0 10px; padding: 0; font-size: 0.82rem; max-height: 200px; overflow-y: auto; }
+.rule-checks li { display: grid; grid-template-columns: 4.5em minmax(0, 1fr) minmax(0, 1.4fr); gap: 10px; padding: 3px 0; border-top: 1px solid var(--line); }
+.rule-checks li:first-child { border-top: 0; }
+.rule-checks .n { color: var(--muted); white-space: nowrap; }
+.rule-checks .rule { font-family: var(--font-data); overflow-wrap: anywhere; }
+.rule-checks .note { color: var(--ink-2); }
+.rule-checks .note.muted { color: var(--muted); }
+.rule-checks .note.warn { color: var(--warn-line); }
+.rule-checks .note.error { color: var(--removed); }
 /* Kopia's documentation, shown in the explorer, as big as fits */
 .confirm.docs[open] { width: min(1100px, calc(100vw - 32px)); height: min(900px, calc(100vh - 48px)); display: flex; flex-direction: column; }
 .docs iframe { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
