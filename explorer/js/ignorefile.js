@@ -4,6 +4,7 @@
 // the ignore rules in its policy apply as well, from the nearest policy that has any, as a list there replaces the
 // one above, so both are shown with it.
 import { DATA, api, redrawSoon } from './data.js';
+import { docsDialog } from './docs.js';
 import { el, formatSize, plural } from './format.js';
 import { storage } from './storage.js';
 
@@ -61,17 +62,8 @@ export function ignoreLine(path, loc) {
     change);
 }
 
-// Kopia's page about .kopiaignore, shown in the explorer, over the editor, so what's typed stays as it is
-const DOCS = 'https://kopia.io/docs/advanced/kopiaignore/';
-
-function docsDialog() {
-  const dialog = el('dialog', { class: 'confirm docs', 'aria-label': 'Kopia\'s documentation on .kopiaignore' },
-    el('iframe', { src: DOCS, title: 'Kopia\'s documentation on .kopiaignore' }),
-    el('div', { class: 'actions' }, el('button', { class: 'btn', onclick: () => dialog.close() }, 'Close')));
-  dialog.addEventListener('close', () => dialog.remove());
-  document.body.append(dialog);
-  dialog.showModal();
-}
+// Kopia's page about .kopiaignore, over the editor, so what's typed stays as it is
+const documentation = () => el('p', {}, el('button', { class: 'linklike', onclick: () => docsDialog('kopiaignore') }, 'Documentation'));
 
 // Rules shown under the box, folded away: carried down from a folder above, or from the policy, or the locations
 // with their own
@@ -201,7 +193,7 @@ function ignoreDialog(path, loc) {
     el('h2', { id: 'ignore-file-title' }, 'Ignore rules'),
     el('p', { class: 'what' }, el('b', {}, `${path.replace(/\\$/, '')}\\.kopiaignore`)),
     text,
-    el('p', {}, el('button', { class: 'linklike', onclick: docsDialog }, 'Documentation')),
+    documentation(),
     checks.element,
     details,
     error,
@@ -313,7 +305,7 @@ function globalIgnoreDialog() {
     el('h2', { id: 'ignore-file-title' }, 'Ignore rules'),
     el('p', { class: 'what' }, el('b', {}, 'Global policy')),
     text,
-    el('p', {}, el('button', { class: 'linklike', onclick: docsDialog }, 'Documentation')),
+    documentation(),
     checks.element,
     details,
     error,

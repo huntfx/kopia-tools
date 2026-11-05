@@ -43,6 +43,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 from urllib.parse import parse_qs, urlparse
 
+from kopia_docs import kopia_doc
 from snapshot_diff import (ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, glob_to_regex, kopia, list_snapshots, log_command,
                            parse_ignore_rule)
 
@@ -2202,6 +2203,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(kopia_ui())
             if url.path == '/api/global-ignore':
                 return self.send_json(global_ignore())
+            if url.path == '/api/docs':
+                return self.send_json(kopia_doc(query['page']))
             if url.path == '/api/ignore-file':
                 return self.send_json(ignore_file(query['path']))
             if url.path == '/api/actions':

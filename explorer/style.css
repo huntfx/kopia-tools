@@ -470,9 +470,28 @@ th[aria-sort] { color: var(--ink); }
 .rule-checks .note.muted { color: var(--muted); }
 .rule-checks .note.warn { color: var(--warn-line); }
 .rule-checks .note.error { color: var(--removed); }
-/* Kopia's documentation, shown in the explorer, as big as fits */
-.confirm.docs[open] { width: min(1100px, calc(100vw - 32px)); height: min(900px, calc(100vh - 48px)); display: flex; flex-direction: column; }
-.docs iframe { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+/* Kopia's documentation, shown in the explorer in its own style, scrolling inside, as big as fits for reading, with
+   the kopia version it's for opposite Close */
+.confirm.docs[open] { width: min(860px, calc(100vw - 32px)); height: min(900px, calc(100vh - 48px)); display: flex; flex-direction: column; }
+.docs .docs-body { flex: 1; min-height: 0; overflow-y: auto; padding-right: 8px; font-size: 0.9rem; line-height: 1.55; color: var(--ink-2); }
+.docs .docs-body h1, .docs .docs-body h2, .docs .docs-body h3, .docs .docs-body h4 { color: var(--ink); text-transform: none; letter-spacing: normal; line-height: 1.3; margin: 1.4em 0 0.5em; }
+.docs .docs-body > :first-child { margin-top: 0; }
+.docs .docs-body h2 { font-size: 1.3rem; }
+.docs .docs-body h3 { font-size: 1.08rem; }
+.docs .docs-body h4 { font-size: 0.95rem; }
+.docs .docs-body p, .docs .docs-body ul, .docs .docs-body ol { margin: 0 0 0.8em; font-size: inherit; color: inherit; }
+.docs .docs-body li { margin: 0.2em 0; }
+.docs .docs-body a { color: var(--accent); }
+.docs .docs-body a[data-target] { text-decoration: underline; cursor: pointer; }
+.docs .docs-body code { font: 0.85em var(--font-data); background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--ink); }
+.docs .docs-body pre { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow-x: auto; margin: 0 0 0.9em; }
+.docs .docs-body pre code { background: none; border: 0; padding: 0; }
+.docs .docs-body blockquote { margin: 0 0 0.9em; padding: 6px 12px; border-left: 3px solid var(--accent); background: var(--accent-bg); border-radius: 0 6px 6px 0; }
+.docs .docs-body blockquote > :last-child { margin-bottom: 0; }
+.docs .docs-body table { border-collapse: collapse; margin: 0 0 0.9em; font-size: 0.85rem; }
+.docs .docs-body th, .docs .docs-body td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.docs .docs-body th { color: var(--ink); background: var(--surface-2); }
+.docs .docs-version { margin-right: auto; align-self: center; font-size: 0.8rem; color: var(--muted); }
 .ignore-file .other-rules { margin: 0 0 10px; font-size: 0.85rem; color: var(--ink-2); }
 .ignore-file .other-rules summary { cursor: pointer; overflow-wrap: anywhere; }
 .ignore-file .other-rules pre { margin: 6px 0 0; max-height: 180px; overflow-y: auto; font: 0.78rem var(--font-data); color: var(--ink-2); }
