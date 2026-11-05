@@ -147,7 +147,24 @@ class Repository:
         self.renames = {}     # old id -> new id, for snapshots pinned or unpinned, for the page to follow them
         self.live = set()     # IDs of checkpoints of backups still going, as of when the snapshots were last read
         self.folded = {}      # id -> IDs of the earlier checkpoints of the same backup shown as it, deleted with it
+        self.exported = None  # kopia policy export's output, kept between asks, or None until it's read again
+        self.policies_lock = threading.Lock()
         self.info = self.read_info()
+
+    def policies(self, fresh=False):
+        """Every policy, by kopia's key for it, as kopia policy export gives them, kept between asks, as reading
+        them takes most of a second, such as for each folder opened. Read again when asked for fresh, as before one's
+        changed, so nothing changed elsewhere is undone, and after the explorer changes any. Reading the snapshots
+        reads them fresh too, so ones changed in KopiaUI are picked up on a refresh. Each ask gets its own copy,
+        to change as it likes."""
+        with self.policies_lock:
+            if fresh or self.exported is None:
+                self.exported = kopia('policy', 'export')
+            return json.loads(self.exported)
+
+    def policies_changed(self):
+        with self.policies_lock:
+            self.exported = None
 
     @staticmethod
     def read_info():
@@ -164,6 +181,7 @@ class Repository:
         such as ignore rules in .kopiaignore files, and the repository's description. Diffs, listings and file
         types stay cached, as they never change for a given snapshot."""
         self.ignores.clear()
+        self.policies_changed()
         self.info = self.read_info()
 
     def storage(self):
@@ -188,7 +206,7 @@ class Repository:
             # Folders with a policy of their own are backup locations too, as kopia's scheduler backs them up,
             # even before their first snapshot, which they don't have yet
             prefix = policy_key('')
-            policies = json.loads(kopia('policy', 'export'))
+            policies = self.policies(fresh=True)
             for key in policies:
                 if key.startswith(prefix):
                     by_source.setdefault(key[len(prefix):], [])
@@ -1261,7 +1279,7 @@ def schedule_of(path, policies=None, nested=True):
     policies are read unless given. Whether it's missing settings from a location it's inside is left out
     unless nested, as that asks kopia again."""
     if policies is None:
-        policies = json.loads(kopia('policy', 'export'))
+        policies = repository.policies()
     folder = Path(path)
     chain = policy_chain(path)
 
@@ -1331,7 +1349,7 @@ def all_schedules():
     """Every backup location's schedule by its path, for the sidebar's next snapshots, and the global policy's,
     as (global). The policies are read once and nothing else asks kopia, so it's quick, and doesn't wait behind
     the pool's work."""
-    policies = json.loads(kopia('policy', 'export'))
+    policies = repository.policies()
     return {**{path: schedule_of(path, policies, nested=False) for path in sorted(repository.sources)},
             GLOBAL: global_schedule(policies)}
 
@@ -1350,7 +1368,7 @@ def set_schedule(path, interval, manual=False, copy_settings=False, keep=None):
     if interval is not None:
         check_interval(interval)
     key = policy_key(path)
-    existing = json.loads(kopia('policy', 'export')).get(key)
+    existing = repository.policies(fresh=True).get(key)
     policy = existing or {}
     scheduling = policy.setdefault('scheduling', {})
     if manual:
@@ -1388,7 +1406,7 @@ def global_schedule(policies=None):
     """How often the global policy says to back up, and how many snapshots of each kind it keeps, as schedule_of
     gives a folder's, with nothing above it to inherit from. The policies are read unless given."""
     if policies is None:
-        policies = json.loads(kopia('policy', 'export'))
+        policies = repository.policies()
     policy = policies.get(GLOBAL) or {}
     scheduling, retention = policy.get('scheduling') or {}, policy.get('retention') or {}
     return {
@@ -1409,14 +1427,23 @@ def set_global_schedule(interval, keep):
     check_retention(keep)
     if set(keep) != set(RETENTION) or any(count is None for count in keep.values()):
         raise ValueError('The global policy needs a number for each kind of snapshot to keep')
-    manual = global_schedule()['manual']
-    kopia('policy', 'set', '--global', f'--snapshot-interval={interval}s', *[f'--keep-{kind}={count}' for kind, count in keep.items()],
+    manual = global_schedule(repository.policies(fresh=True))['manual']
+    change_policies('set', '--global', f'--snapshot-interval={interval}s', *[f'--keep-{kind}={count}' for kind, count in keep.items()],
           *(['--no-manual'] if manual else []))
     return global_schedule()
 
 
+def change_policies(*args, **kwargs):
+    """A kopia policy command that changes policies, which are read again when next wanted, even if it fails, as
+    it may have changed some"""
+    try:
+        return kopia('policy', *args, **kwargs)
+    finally:
+        repository.policies_changed()
+
+
 def import_policy(key, policy):
-    kopia('policy', 'import', key, input=json.dumps({key: policy}))
+    change_policies('import', key, input=json.dumps({key: policy}))
 
 
 # Settings kopia reads folder by folder while backing up. Inside a folder with a policy of its own, while a
@@ -1516,7 +1543,7 @@ def copy_settings_in(path):
     so the other location's backups use them in here. Only settings it leaves unset are copied, and any copied
     before that have been changed by hand since are left as they are, as its own."""
     key = policy_key(path)
-    policy = json.loads(kopia('policy', 'export')).get(key)
+    policy = repository.policies(fresh=True).get(key)
     if policy is None or not containing_location(path):
         raise ValueError(f'{path} isn\'t a backup location inside another')
     above = settings_above(path)
@@ -1546,7 +1573,7 @@ def copy_settings_in(path):
 def undo_copied_settings(path):
     """Take the copied settings out of a location's policy again, apart from any changed by hand since"""
     key = policy_key(path)
-    policy = json.loads(kopia('policy', 'export')).get(key) or {}
+    policy = repository.policies(fresh=True).get(key) or {}
     codes, stamp = marker_in(policy)
     if codes is None:
         return
@@ -1578,7 +1605,7 @@ def write_marker(policy, old, codes):
 def nested_settings():
     """Every location inside another whose backups don't use some of the settings it would inherit in there, or
     that's had them copied in, with which"""
-    policies = json.loads(kopia('policy', 'export'))
+    policies = repository.policies()
     prefix = policy_key('')
     paths = sorted(key[len(prefix):] for key in policies if key.startswith(prefix))
     found = zip(paths, pool.map(lambda path: nested_status(path, policies), paths))
@@ -1593,7 +1620,7 @@ def needing_settings():
 
 def with_copied_settings():
     """Every location that's had settings copied in"""
-    policies = json.loads(kopia('policy', 'export'))
+    policies = repository.policies()
     prefix = policy_key('')
     return sorted(key[len(prefix):] for key, policy in policies.items()
                   if key.startswith(prefix) and marker_in(policy)[0] is not None)
@@ -1643,7 +1670,7 @@ def keep_copied_settings_up_to_date():
     """At startup: bring settings copied into locations inside others up to date with the ones above, unless
     they've been changed by hand since. The page offers to copy them into locations that need them."""
     try:
-        policies = json.loads(kopia('policy', 'export'))
+        policies = repository.policies()
         prefix = policy_key('')
         for path in sorted(key[len(prefix):] for key in policies if key.startswith(prefix)):
             status = nested_status(path, policies)
@@ -1863,7 +1890,7 @@ def set_location_actions(path, before, after):
     if path not in repository.sources:
         raise PermissionError(f'{path} isn\'t a backup location')
     key = policy_key(path)
-    existing = json.loads(kopia('policy', 'export')).get(key)
+    existing = repository.policies(fresh=True).get(key)
     # Without a policy of its own, one's only made for actions to go in
     if existing is None and not any(a and a.get('script', '').strip() for a in (before, after)):
         return snapshot_actions()
@@ -1932,7 +1959,7 @@ def ignore_file(path):
         content, exists = '', False
     except OSError as e:
         raise ValueError(f'Couldn\'t read {IGNORE_FILE} in {path}: {e.strerror}')
-    policies = json.loads(kopia('policy', 'export'))
+    policies = repository.policies()
     chain = policy_chain(path)
     read, _ = first_files_setting(chain, policies, 'ignoreDotFiles')
     rules, rules_from = first_files_setting(chain, policies, 'ignore')
@@ -1942,11 +1969,11 @@ def ignore_file(path):
             'above': [{'path': str(f / IGNORE_FILE), 'rules': r} for f in above if (r := ignore_rules(f / IGNORE_FILE))]}
 
 
-def global_ignore():
+def global_ignore(fresh=False):
     """The global policy's ignore rules, which apply from the top of every location that doesn't have a list of its
     own, or get one from a policy nearer to it, as a list there replaces this one; and those locations, as these
-    don't apply to them."""
-    policies = json.loads(kopia('policy', 'export'))
+    don't apply to them. The policies are read fresh if asked, as before changing them."""
+    policies = repository.policies(fresh)
     rules = ((policies.get(GLOBAL) or {}).get('files') or {}).get('ignore') or []
     replaced = sorted((path for path in repository.sources
                        if first_files_setting(policy_chain(path), policies, 'ignore')[1] not in (None, 'the global policy')), key=str.casefold)
@@ -1961,11 +1988,11 @@ def set_global_ignore(rules):
     if not isinstance(rules, list) or any(not isinstance(r, str) or not r.strip() or '\n' in r or r.strip().startswith('#') for r in rules):
         raise ValueError('Each rule must be a pattern on a line of its own, with no comments')
     wanted = {r.strip() for r in rules}
-    there = set(global_ignore()['rules'])
+    there = set(global_ignore(fresh=True)['rules'])
     if not wanted and there:
-        kopia('policy', 'set', '--global', '--clear-ignore')
+        change_policies('set', '--global', '--clear-ignore')
     elif wanted != there:
-        kopia('policy', 'set', '--global', *[f'--remove-ignore={r}' for r in sorted(there - wanted)],
+        change_policies('set', '--global', *[f'--remove-ignore={r}' for r in sorted(there - wanted)],
               *[f'--add-ignore={r}' for r in sorted(wanted - there)])
     repository.ignores.clear()
     return global_ignore()
@@ -2031,7 +2058,7 @@ def check_ignore_rules(path, rules):
     locations; None for a rule that only brings things back, or doesn't parse, or with nothing to check it against.
     Only what's in the snapshots can be counted, so a rule leaving out what's already left out finds nothing."""
     if path is None:
-        policies = json.loads(kopia('policy', 'export'))
+        policies = repository.policies()
         trees = [(snap['rootEntry']['obj'], source) for source in sorted(repository.sources)
                  if first_files_setting(policy_chain(source), policies, 'ignore')[1] in (None, 'the global policy')
                  and (snap := latest_complete(source))]
@@ -2099,7 +2126,7 @@ def snapshot_actions():
     except (OSError, ValueError):
         enabled = changed = None
     if repository.actions is None:
-        repository.actions = with_actions(json.loads(kopia('policy', 'export')))
+        repository.actions = with_actions(repository.policies())
     try:
         running = processes()
     except OSError:
