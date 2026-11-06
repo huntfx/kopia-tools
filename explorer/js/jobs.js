@@ -5,6 +5,7 @@ import { api, redrawSoon } from './data.js';
 import { loadFixes, renderFixes } from './fixes.js';
 import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
 import { kopiaUINotice } from './kopiaui.js';
+import { maintenanceNotice } from './maintenance.js';
 import { renderMounts } from './mounts.js';
 import { LAST_GOOD, failingNotice } from './lastgood.js';
 import { render } from './render.js';
@@ -442,7 +443,7 @@ export function renderJobs() {
 // so it isn't announced again.
 export function renderNotice() {
   const notice = document.getElementById('notice');
-  const parts = [kopiaUINotice(), actionsNotice(), settingsNotice(), failingNotice()].filter(Boolean).map(part => el('div', {}, part));
+  const parts = [kopiaUINotice(), actionsNotice(), settingsNotice(), failingNotice(), maintenanceNotice()].filter(Boolean).map(part => el('div', {}, part));
   const fresh = el('section', {}, parts);
   notice.hidden = !parts.length;
   if (fresh.innerHTML !== notice.innerHTML) notice.replaceChildren(...parts);

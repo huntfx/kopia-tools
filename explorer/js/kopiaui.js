@@ -12,6 +12,9 @@ const TICK = 30 * 1000;
 // be started from here
 let kopiaUI = null;
 
+// Whether it's known not to be running
+export const kopiaUIStopped = () => kopiaUI?.running === false;
+
 // When KopiaUI's server started, in milliseconds, or null if it isn't running or that isn't known
 export const kopiaUIStarted = () => (kopiaUI?.running && kopiaUI.since ? kopiaUI.since * 1000 : null);
 

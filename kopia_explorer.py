@@ -2167,6 +2167,49 @@ def set_actions(enabled):
     return snapshot_actions()
 
 
+# The task only kopia's full maintenance runs, every time, so its last run is when that last ran
+FULL_MAINTENANCE_TASK = 'snapshot-gc'
+
+
+def maintenance_time(timestamp):
+    """A Unix time from one of kopia's maintenance timestamps, which have up to 9 fractional digits, and are in UTC
+    or have the offset of where they were run"""
+    return datetime.fromisoformat(re.sub(r'(\.\d{6})\d+', r'\1', timestamp)).timestamp()
+
+
+def maintenance():
+    """Kopia's maintenance, which frees the space deleted snapshots used and keeps the repository tidy: who runs it,
+    as only kopia running as its owner does, and for each cycle, whether it's enabled, how often it runs, when it
+    last did and when it's next due, as Unix times. Failed is each task whose latest run failed, as kopia counts a
+    cycle as run once it starts, so a failing one is still put off to the next."""
+    info = json.loads(kopia('maintenance', 'info', '--json'))
+    schedule = info.get('schedule') or {}
+    runs = schedule.get('runs') or {}
+    latest = {task: max(task_runs, key=lambda r: maintenance_time(r['start'])) for task, task_runs in runs.items() if task_runs}
+    last_any = max((maintenance_time(r['start']) for r in latest.values()), default=None)
+
+    def cycle(name, next_due, last):
+        settings = info.get(name) or {}
+        return {'enabled': bool(settings.get('enabled')), 'interval': (settings.get('interval') or 0) / 1e9,
+                'next': maintenance_time(next_due) if next_due and not next_due.startswith('0001') else None, 'last': last}
+
+    full_run = latest.get(FULL_MAINTENANCE_TASK)
+    return {
+        'owner': info.get('owner') or '', 'me': f'{repository.info["user"]}@{repository.info["host"]}',
+        'quick': cycle('quick', schedule.get('nextQuickMaintenance'), last_any),
+        'full': cycle('full', schedule.get('nextFullMaintenance'), full_run and maintenance_time(full_run['start'])),
+        'failed': sorted(({'task': task, 'when': maintenance_time(run['start']), 'error': run.get('error') or 'failed'}
+                          for task, run in latest.items() if not run.get('success')), key=lambda f: f['when']),
+    }
+
+
+def own_maintenance():
+    """Make kopia run maintenance from here, as this user on this PC, for when it's owned by one that no longer
+    runs it"""
+    kopia('maintenance', 'set', '--owner=me')
+    return maintenance()
+
+
 def pick_folder():
     """A folder to back up, picked in a folder picker, or None if cancelled."""
     def show(root):
@@ -2254,6 +2297,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(ignore_file(query['path']))
             if url.path == '/api/actions':
                 return self.send_json(snapshot_actions())
+            if url.path == '/api/maintenance':
+                return self.send_json(maintenance())
             if url.path == '/api/free-drives':
                 return self.send_json(free_drives())
             if url.path == '/api/other-mounts':
@@ -2313,6 +2358,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(start_kopia_ui())
             if self.path == '/api/actions':
                 return self.send_json(set_actions(bool(body['enabled'])))
+            if self.path == '/api/maintenance/own':
+                return self.send_json(own_maintenance())
             if self.path == '/api/check-ignore':
                 return self.send_json(check_ignore_rules(body.get('path'), body.get('rules') or []))
             if self.path == '/api/global-ignore':

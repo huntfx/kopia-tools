@@ -1,7 +1,8 @@
-// The Settings window, from the header's gear button. So far that's snapshot actions, with every policy that has
-// any, what each runs, and whether it will, which is asked about again when the window opens.
+// The Settings window, from the header's gear button: snapshot actions, with every policy that has any, what each
+// runs, and whether it will, and Kopia's maintenance, both asked about again when the window opens.
 import { actions, actionsDialog, changeError, changing, checkActions, policyName, setActions } from './actions.js';
 import { el } from './format.js';
+import { checkMaintenance, maintenanceSection } from './maintenance.js';
 import { storage } from './storage.js';
 
 let dialog = null;
@@ -17,6 +18,7 @@ export function openSettings() {
   dialog.showModal();
   renderSettings();
   checkActions();
+  checkMaintenance();
   dialog.querySelector('[data-key="close"]').focus({ preventScroll: true });
 }
 
@@ -31,6 +33,7 @@ export function renderSettings() {
     actions?.kopiaUIBehind ? el('p', { class: 'warn' }, 'The Kopia config has changed since KopiaUI was started, so any changes will not take effect in KopiaUI until it\'s next restarted.') : null,
     changeError ? el('p', { class: 'c-removed' }, changeError) : null,
     el('ul', {}, actionRows()),
+    maintenanceSection(),
     el('div', { class: 'actions' }, el('button', { class: 'btn', 'data-key': 'close', onclick: () => dialog.close() }, 'Close')));
   if (fresh.innerHTML === dialog.innerHTML) return;
   const key = dialog.contains(document.activeElement) ? document.activeElement.dataset.key : null;
