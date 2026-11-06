@@ -143,7 +143,7 @@ export const scheduleSource = (schedule, here) => (schedule.from ? `Set by ${sch
 export function scheduleLine(loc, changeable) {
   const schedule = scheduleOf(loc.path);
   return el('div', { class: 'schedule' },
-    schedule ? el('span', { title: scheduleSource(schedule, changeable) }, scheduleText(schedule)) : el('span', { class: 'muted' }, '…'),
+    schedule ? el('span', { title: scheduleSource(schedule, changeable) }, scheduleText(schedule)) : el('span', { class: 'muted' }, 'Loading schedule…'),
     changeable ? el('button', { class: 'linklike', disabled: !schedule, onclick: () => scheduleDialog(loc.path, 'change') }, 'Change…') : null);
 }
 
@@ -309,10 +309,8 @@ export async function scheduleDialog(path, mode) {
 export function globalLine() {
   const schedule = schedules.get(GLOBAL);
   if (!schedule) loadAllSchedules();
-  const using = schedule && storage.filter(l => schedules.get(l.path.toLowerCase())?.from === 'the global policy').length;
   return el('div', { class: 'schedule' },
-    schedule ? el('span', { title: `Set by the global policy, which ${plural(using, 'location')} ${using === 1 ? 'goes' : 'go'} by for this` }, scheduleText(schedule))
-      : el('span', { class: 'muted' }, '…'),
+    schedule ? el('span', {}, scheduleText(schedule)) : el('span', { class: 'muted' }, 'Loading global schedule…'),
     el('span', { class: 'muted' }, 'global policy'),
     el('button', { class: 'linklike', disabled: !schedule, onclick: globalScheduleDialog }, 'Change…'));
 }
@@ -334,7 +332,6 @@ export function globalScheduleDialog() {
   const scheduleNow = () => ({ interval: Number(select.value) || null, times: current.times, cron: current.cron, manual: !select.value && current.manual });
   const targets = storage.map(loc => ({ loc, keep: schedules.get(loc.path.toLowerCase())?.keep })).filter(t => t.keep)
     .map(({ loc, keep }) => ({ path: loc.path, snapshots: loc.snapshots, keepFor: keepUnderGlobal(keep) }));
-  const using = storage.filter(l => schedules.get(l.path.toLowerCase())?.from === 'the global policy').length;
   const retention = retentionSection({ keep: current.keep, targets, scheduleNow, global: true, changed: ok => { save.disabled = !ok || !select.value; } });
   select.addEventListener('change', retention.refresh);
   const error = el('p', { class: 'error', hidden: true });
@@ -360,8 +357,7 @@ export function globalScheduleDialog() {
   }, 'Save');
   const dialog = el('dialog', { class: 'confirm retention', 'aria-labelledby': 'schedule-title' },
     el('h2', { id: 'schedule-title' }, 'How often to back up, and what to keep?'),
-    el('p', { class: 'what' }, el('b', {}, 'Global policy'),
-      ` - every location goes by it, unless it or a folder above it sets its own. ${plural(using, 'location')} ${using === 1 ? 'goes' : 'go'} by its schedule.`),
+    el('p', { class: 'what' }, el('b', {}, 'Global policy')),
     el('div', { class: 'retention-body' },
       el('div', {},
         el('label', { class: 'field' }, 'How often', select),

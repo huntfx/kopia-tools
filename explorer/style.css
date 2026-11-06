@@ -504,7 +504,6 @@ th[aria-sort] { color: var(--ink); }
 .retention-preview .chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
 .retention .retention-section h3 { margin: 18px 0 10px; }
 .retention h3 { margin: 0; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-.retention-preview .note { color: var(--muted); font-size: 0.78rem; margin: 4px 0 0; }
 .retention-chart { position: relative; }
 .retention-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
 .retention-chart text { font-size: 11px; fill: var(--muted); }

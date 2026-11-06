@@ -36,28 +36,26 @@ const rulesIn = content => content.split('\n').map(line => line.trim()).filter(l
 // Where the policy's rules are set, in words
 const policyName = (file, path) => (file.policyFrom === path ? 'its own policy' : file.policyFrom);
 
-// The file's name, with its folder's when it isn't a location's, like Python\.kopiaignore
-const fileName = (path, loc) => (path.toLowerCase() === loc.path.toLowerCase() ? '.kopiaignore'
-  : `${path.replace(/\\$/, '').split('\\').pop()}\\.kopiaignore`);
+// The file's name, which is all that's needed, as it's shown under its folder's path
+const NAME = '.kopiaignore';
 
-// Under the heading of the nearest location: how many rules the folder being looked at has in its .kopiaignore,
-// with what else applies in the tooltip, and changing it, which can start before it's loaded. Not for a folder
-// that's only in snapshots, as there's nowhere to put one.
-export function ignoreLine(path, loc) {
+// Under the path of the folder being looked at: how many rules there are in its .kopiaignore, with what else
+// applies in the tooltip, and changing it, which can start before it's loaded. Not for a folder that's only in
+// snapshots, as there's nowhere to put one.
+export function ignoreLine(path) {
   const key = path.toLowerCase();
   if (!files.has(key)) loadIgnoreFile(path);
   const file = files.get(key);
   if (file && !file.onDisk) return null;
-  const name = fileName(path, loc);
-  const change = el('button', { class: 'linklike', onclick: () => ignoreDialog(path, loc) }, 'Change…');
-  if (file === undefined) return el('div', { class: 'schedule' }, el('span', { class: 'muted' }, '…'), change);
-  if (file === null) return el('div', { class: 'schedule' }, el('span', { class: 'muted', title: `Couldn't read ${name}` }, `${name} ?`), change);
+  const change = el('button', { class: 'linklike', onclick: () => ignoreDialog(path) }, 'Change…');
+  if (file === undefined) return el('div', { class: 'schedule' }, el('span', { class: 'muted' }, `Loading ${NAME}…`), change);
+  if (file === null) return el('div', { class: 'schedule' }, el('span', { class: 'muted', title: `Couldn't read ${NAME}` }, `${NAME} ?`), change);
   const rules = rulesIn(file.content);
-  const title = [file.exists ? `${name}:\n${rules.join('\n') || '(no rules)'}` : `No ${name}`,
+  const title = [file.exists ? `${NAME}:\n${rules.join('\n') || '(no rules)'}` : `No ${NAME}`,
     ...file.above.map(a => `\nCarried down from ${a.path}:\n${a.rules.join('\n')}`),
     file.policyRules.length ? `\nAlso ignored by ${policyName(file, file.location)}:\n${file.policyRules.join('\n')}` : null].filter(Boolean).join('\n');
   return el('div', { class: 'schedule' },
-    file.exists ? el('span', { title }, `${plural(rules.length, 'ignore rule')} in ${name}`) : el('span', { class: 'muted', title }, `No ${name}`),
+    file.exists ? el('span', { title }, `${plural(rules.length, 'rule')} in ${NAME}`) : el('span', { class: 'muted', title }, `No ${NAME}`),
     file.exists && !file.read ? el('span', { class: 'warn', title: `The policy here doesn't read ${file.name} files, so Kopia won't use it` }, 'Not read') : null,
     change);
 }
@@ -154,10 +152,9 @@ function ruleChecks({ text, path, global = false }) {
   };
 }
 
-function ignoreDialog(path, loc) {
+function ignoreDialog(path) {
   if (document.querySelector('dialog.ignore-file')) return;
-  const name = fileName(path, loc);
-  const text = el('textarea', { rows: 12, spellcheck: false, 'aria-label': `${name} rules`, disabled: true, placeholder: 'Loading…' });
+  const text = el('textarea', { rows: 12, spellcheck: false, 'aria-label': `${NAME} rules`, disabled: true, placeholder: 'Loading…' });
   const checks = ruleChecks({ text, path });
   const details = el('div', {});
   const error = el('p', { class: 'error', hidden: true });
@@ -191,7 +188,7 @@ function ignoreDialog(path, loc) {
   text.addEventListener('input', label);
   const dialog = el('dialog', { class: 'confirm ignore-file', 'aria-labelledby': 'ignore-file-title' },
     el('h2', { id: 'ignore-file-title' }, 'Ignore rules'),
-    el('p', { class: 'what' }, el('b', {}, `${path.replace(/\\$/, '')}\\.kopiaignore`)),
+    el('p', { class: 'what' }, el('b', {}, `${path.replace(/\\$/, '')}\\${NAME}`)),
     text,
     documentation(),
     checks.element,
@@ -208,7 +205,7 @@ function ignoreDialog(path, loc) {
     if (!dialog.isConnected) return;
     if (!found || !found.onDisk) {
       text.placeholder = '';
-      error.textContent = found ? `There's no folder ${path} on this PC to put it in.` : `Couldn't read ${name}.`;
+      error.textContent = found ? `There's no folder ${path} on this PC to put it in.` : `Couldn't read ${NAME}.`;
       error.hidden = false;
       return;
     }
@@ -259,11 +256,11 @@ const replacedText = found => `${plural(found.replaced.length, 'location')} ${fo
 export function globalIgnoreLine() {
   if (global === undefined) loadGlobalIgnore();
   const change = el('button', { class: 'linklike', onclick: globalIgnoreDialog }, 'Change…');
-  if (global === undefined) return el('div', { class: 'schedule' }, el('span', { class: 'muted' }, '…'), change);
-  if (global === null) return el('div', { class: 'schedule' }, el('span', { class: 'muted', title: 'Couldn\'t read the global policy\'s ignore rules' }, 'Ignore rules ?'), change);
+  if (global === undefined) return el('div', { class: 'schedule' }, el('span', { class: 'muted' }, 'Loading global ignore rules…'), change);
+  if (global === null) return el('div', { class: 'schedule' }, el('span', { class: 'muted', title: 'Couldn\'t read the global policy\'s ignore rules' }, 'Global ignore rules ?'), change);
   const title = [global.rules.join('\n') || 'None', global.replaced.length ? `\n${replacedText(global)}` : null].filter(Boolean).join('\n');
   return el('div', { class: 'schedule' },
-    el('span', { title }, global.rules.length ? `${plural(global.rules.length, 'ignore rule')} in the global policy` : 'No ignore rules in the global policy'),
+    el('span', { title }, global.rules.length ? plural(global.rules.length, 'global ignore rule') : 'No global ignore rules'),
     change);
 }
 

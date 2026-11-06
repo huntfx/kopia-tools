@@ -196,15 +196,16 @@ export function renderSide() {
           empty ? el('span', { class: 'name' }, ...name) : el('button', { class: 'name', onclick: toggle }, ...name),
           backupButton(loc)),
         open ? scheduleLine(loc, loc.path.toLowerCase() === target.toLowerCase()) : null,
-        open && loc.path.toLowerCase() === target.toLowerCase() ? actionsLine(loc) : null,
-        // The .kopiaignore of the folder being looked at, under the nearest location, which reads it
-        open && loc === nearest && isFolder ? ignoreLine(target, loc) : null),
+        open && loc.path.toLowerCase() === target.toLowerCase() ? actionsLine(loc) : null),
       open ? snapshotList(loc, target, isFolder) : null,
     ].filter(Boolean);
   };
+  // The folder's own settings head the panel, as on the PC's page: backing it up on its own, and its .kopiaignore,
+  // which the nearest location reads
   aside.replaceChildren(
     el('div', { class: 'history-head' },
-      el('div', {}, el('h2', {}, 'Snapshots'), el('div', { class: 'target' }, target), separateLine(target, isFolder)),
+      el('div', {}, el('h2', {}, 'Snapshots'), el('div', { class: 'target' }, target), separateLine(target, isFolder),
+        isFolder ? ignoreLine(target) : null),
       // Up one folder level within the location, for the panel only; the middle stays where it is
       rel ? el('button', {
         class: 'btn', style: 'font-size:0.8rem;flex:none', title: 'Show the snapshots of the folder above',

@@ -240,7 +240,6 @@ function retentionPreview(targets, scheduleNow, global, due) {
   const summary = el('p', {});
   const chart = el('div', { class: 'retention-chart' });
   const clash = el('p', { class: 'warn', hidden: true });
-  const note = el('p', { class: 'note' });
   const [long, now] = [['In the long run', 'long'], [global ? 'Snapshots now' : 'Its snapshots now', 'now']].map(([label, value]) =>
     el('button', { onclick: () => { mode = value; draw(shown); } }, label));
   now.title = global ? 'Which locations would lose snapshots they have now, and how many'
@@ -256,8 +255,6 @@ function retentionPreview(targets, scheduleNow, global, due) {
       : 'Manual or custom schedules can\'t be worked out';
     long.setAttribute('aria-pressed', String(mode === 'long'));
     now.setAttribute('aria-pressed', String(mode === 'now'));
-    note.textContent = global && mode === 'now' ? 'Locations with their own numbers keep them, and pinned snapshots are always kept.'
-      : `How much older each is than the newest, on a log scale. Hover over one to see what keeps it.${global ? ' Locations with their own numbers keep them.' : ''}`;
     chart.replaceChildren();
     clash.hidden = true;
     if (!chosen) {
@@ -314,7 +311,7 @@ function retentionPreview(targets, scheduleNow, global, due) {
   return {
     element: el('section', { class: 'retention-preview' },
       el('div', { class: 'chart-head' }, el('h3', {}, 'Preview'), el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'What to preview' }, long, now)),
-      summary, chart, note, clash),
+      summary, chart, clash),
     draw,
   };
 }
