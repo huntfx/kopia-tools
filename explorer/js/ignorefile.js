@@ -251,6 +251,10 @@ function loadGlobalIgnore() {
 // The locations that don't go by them, in words, for tooltips and the editor
 const replacedText = found => `${plural(found.replaced.length, 'location')} ${found.replaced.length === 1 ? 'has' : 'have'} a list of ${found.replaced.length === 1 ? 'its' : 'their'} own, which replaces these:\n${found.replaced.join('\n')}`;
 
+// Folders Kopia leaves the contents out of when asked, by the standard marker file in them, as other software
+// writes into its caches, and Kopia into its own
+const CACHE_DIRS = 'Folders containing CACHEDIR.TAG';
+
 // Under the global policy's schedule on the PC's page: how many ignore rules it has, and changing them, which
 // can start before they're loaded
 export function globalIgnoreLine() {
@@ -258,7 +262,8 @@ export function globalIgnoreLine() {
   const change = el('button', { class: 'linklike', onclick: globalIgnoreDialog }, 'Change…');
   if (global === undefined) return el('div', { class: 'schedule' }, el('span', { class: 'muted' }, 'Loading global ignore rules…'), change);
   if (global === null) return el('div', { class: 'schedule' }, el('span', { class: 'muted', title: 'Couldn\'t read the global policy\'s ignore rules' }, 'Global ignore rules ?'), change);
-  const title = [global.rules.join('\n') || 'None', global.replaced.length ? `\n${replacedText(global)}` : null].filter(Boolean).join('\n');
+  const title = [global.rules.join('\n') || 'None', global.replaced.length ? `\n${replacedText(global)}` : null,
+    `\n${CACHE_DIRS} ${global.cacheDirs ? 'will be excluded from backups' : 'will be backed up'}`].filter(Boolean).join('\n');
   return el('div', { class: 'schedule' },
     el('span', { title }, global.rules.length ? plural(global.rules.length, 'global ignore rule') : 'No global ignore rules'),
     change);
@@ -266,10 +271,12 @@ export function globalIgnoreLine() {
 
 // Edit the global policy's ignore rules. Kopia keeps them sorted, so there can't be comments, which it would keep
 // as rules and move, and a ! rule ends up before what it's meant to bring back, so can't, which it warns about.
-// Every location's ignore rules and changes are read again after, as any may have changed.
+// Whether cache folders are ignored is set with them. Every location's ignore rules and changes are read again
+// after, as any may have changed.
 function globalIgnoreDialog() {
   if (document.querySelector('dialog.ignore-file')) return;
   const text = el('textarea', { rows: 14, spellcheck: false, 'aria-label': 'Global ignore rules', disabled: true, placeholder: 'Loading…' });
+  const cacheDirs = el('input', { type: 'checkbox', disabled: true });
   const checks = ruleChecks({ text, global: true });
   const details = el('div', {});
   const error = el('p', { class: 'error', hidden: true });
@@ -281,7 +288,7 @@ function globalIgnoreDialog() {
       save.disabled = cancel.disabled = true;
       let saved;
       try {
-        saved = await api.post('/api/global-ignore', { rules: rules() });
+        saved = await api.post('/api/global-ignore', { rules: rules(), cacheDirs: cacheDirs.checked });
       } catch (e) {
         error.textContent = `Couldn't save them: ${e instanceof TypeError ? 'can\'t reach the server' : e.message}`;
         error.hidden = false;
@@ -304,6 +311,7 @@ function globalIgnoreDialog() {
     text,
     documentation(),
     checks.element,
+    el('label', { class: 'field', title: `${CACHE_DIRS} will be excluded from backups` }, cacheDirs, 'Ignore cache folders'),
     details,
     error,
     el('div', { class: 'actions' }, cancel, save));
@@ -324,9 +332,14 @@ function globalIgnoreDialog() {
     text.value = found.rules.join('\n');
     text.placeholder = '';
     text.disabled = false;
+    cacheDirs.checked = found.cacheDirs;
+    cacheDirs.disabled = false;
     checks.start(found.rules);
     checkRules();
-    details.replaceChildren(...[found.replaced.length ? ruleList('Not used by locations with a list of their own', found.replaced, 'location') : null].filter(Boolean));
+    details.replaceChildren(...[
+      found.replaced.length ? ruleList('Not used by locations with a list of their own', found.replaced, 'location') : null,
+      found.cacheDirsOwn.length ? ruleList('Not used by locations with their own cache folder setting', found.cacheDirsOwn, 'location') : null,
+    ].filter(Boolean));
     text.focus();
   });
 }

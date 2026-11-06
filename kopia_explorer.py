@@ -1974,28 +1974,42 @@ def ignore_file(path):
 def global_ignore(fresh=False):
     """The global policy's ignore rules, which apply from the top of every location that doesn't have a list of its
     own, or get one from a policy nearer to it, as a list there replaces this one; and those locations, as these
-    don't apply to them. The policies are read fresh if asked, as before changing them."""
+    don't apply to them. Also whether it ignores cache folders (with a CACHEDIR.TAG), which kopia does when it's
+    unset, and the locations that do otherwise, by a setting nearer to them. The policies are read fresh if asked,
+    as before changing them."""
     policies = repository.policies(fresh)
-    rules = ((policies.get(GLOBAL) or {}).get('files') or {}).get('ignore') or []
+    files = (policies.get(GLOBAL) or {}).get('files') or {}
+    rules = files.get('ignore') or []
+    cache_dirs = files.get('ignoreCacheDirs', True)
     replaced = sorted((path for path in repository.sources
                        if first_files_setting(policy_chain(path), policies, 'ignore')[1] not in (None, 'the global policy')), key=str.casefold)
-    return {'rules': rules, 'replaced': replaced}
+    cache_dirs_own = sorted((path for path in repository.sources
+                             if first_files_setting(policy_chain(path), policies, 'ignoreCacheDirs')[0] not in (None, cache_dirs)), key=str.casefold)
+    return {'rules': rules, 'replaced': replaced, 'cacheDirs': cache_dirs, 'cacheDirsOwn': cache_dirs_own}
 
 
-def set_global_ignore(rules):
+def set_global_ignore(rules, cache_dirs=None):
     """Set the global policy's ignore rules, with kopia policy set, as kopia policy import adds another global policy
     alongside the one there instead: the ones no longer there are removed and the new ones added, in one go, as
     clearing and adding in one go leaves none. Kopia keeps them sorted, so there are no comments, which it would
-    keep as rules and move. The explorer's ignore rules are read again for every location, as they may have changed."""
+    keep as rules and move. Whether it ignores cache folders is set along with them, if given and changed. The
+    explorer's ignore rules are read again for every location, as they may have changed."""
     if not isinstance(rules, list) or any(not isinstance(r, str) or not r.strip() or '\n' in r or r.strip().startswith('#') for r in rules):
         raise ValueError('Each rule must be a pattern on a line of its own, with no comments')
+    if cache_dirs is not None and not isinstance(cache_dirs, bool):
+        raise ValueError('Whether to ignore cache folders must be true or false')
     wanted = {r.strip() for r in rules}
-    there = set(global_ignore(fresh=True)['rules'])
+    current = global_ignore(fresh=True)
+    there = set(current['rules'])
+    changes = []
     if not wanted and there:
-        change_policies('set', '--global', '--clear-ignore')
+        changes.append('--clear-ignore')
     elif wanted != there:
-        change_policies('set', '--global', *[f'--remove-ignore={r}' for r in sorted(there - wanted)],
-              *[f'--add-ignore={r}' for r in sorted(wanted - there)])
+        changes += [f'--remove-ignore={r}' for r in sorted(there - wanted)] + [f'--add-ignore={r}' for r in sorted(wanted - there)]
+    if cache_dirs is not None and cache_dirs != current['cacheDirs']:
+        changes.append(f'--ignore-cache-dirs={str(cache_dirs).lower()}')
+    if changes:
+        change_policies('set', '--global', *changes)
     repository.ignores.clear()
     return global_ignore()
 
@@ -2300,7 +2314,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/check-ignore':
                 return self.send_json(check_ignore_rules(body.get('path'), body.get('rules') or []))
             if self.path == '/api/global-ignore':
-                return self.send_json(set_global_ignore(body['rules']))
+                return self.send_json(set_global_ignore(body['rules'], body.get('cacheDirs')))
             if self.path == '/api/ignore-file':
                 return self.send_json(set_ignore_file(body['path'], body['content']))
             if self.path == '/api/location-actions':
