@@ -18,6 +18,8 @@ export const RETENTION = [
 // ---- A port of kopia's snapshot/policy/retention_policy.go, as in retention-preview.html ----
 // Like kopia, hour, day, month and year are taken in UTC, but the ISO week in local time. The periods share one
 // set of keys, as in kopia, so a weekly "2027-01" (week 1) and a monthly "2027-01" (January) count as the same.
+// Kopia PR #5769 (https://github.com/kopia/kopia/pull/5769, for issue #2964) gives each kind its own keys, so
+// once a release includes it, the clash should only be shown for older versions.
 const HOUR = 3600e3;
 const pad = (n, width = 2) => String(n).padStart(width, '0');
 

@@ -1452,6 +1452,8 @@ def import_policy(key, policy):
 # location it's in is backed up, kopia takes these from that policy alone, rather than what it would inherit,
 # and uses its own defaults for any it leaves unset (kopia issue #3671), so they're copied into it. Each is
 # (code for the marker, section, setting, what kopia uses when it's unset there, or None to always copy it).
+# Kopia PR #5766 (https://github.com/kopia/kopia/pull/5766, for issue #5763) makes kopia inherit them there, so
+# once a release includes it, copying them in is only needed for older versions.
 PASSED_ON = [
     ('dot-ignore', 'files', 'ignoreDotFiles', []),
     ('cache-dirs', 'files', 'ignoreCacheDirs', True),

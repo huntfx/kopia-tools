@@ -228,6 +228,8 @@ tr.gap-row td { border-top: 0; padding-block: 0 4px; }
 // Like kopia, hour/day/month/year keys are formatted in UTC (UTCTimestamp.Format) while the ISO
 // week comes from local time (ToTime().ISOWeek()). Keys share one namespace across rule types,
 // as in kopia, so weekly "2027-01" (ISO week 1) collides with monthly "2027-01" (January).
+// Kopia PR #5769 (https://github.com/kopia/kopia/pull/5769, for issue #2964) gives each kind its own keys, so
+// once a release includes it, the clash should only be shown for older versions.
 
 const HOUR = 3600e3;
 const pad = (n, w = 2) => String(n).padStart(w, "0");
