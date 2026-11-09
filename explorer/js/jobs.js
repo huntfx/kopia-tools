@@ -77,23 +77,25 @@ export function restoreItem(snap, rel, folder) {
   startRestore(snap, rel, folder, []);
 }
 
-function startRestore(snap, rel, folder, nested) {
+function startRestore(snap, rel, folder, nested, keepDeleted = false) {
   jobsShown = true;
-  startJob('/api/restore', { snapshot: snap.id, path: rel, folder, nested: nested.map(n => n.snap.id) },
+  startJob('/api/restore', { snapshot: snap.id, path: rel, folder, nested: nested.map(n => n.snap.id), keepDeleted },
     { kind: 'restore', name: rel.split('/').pop() || 'this location', snapshotTime: snap.time });
 }
 
-// Locations nested inside a folder being restored, each with its snapshot closest in time to the folder's, as
-// they're backed up on their own schedules: { loc, rel, snap }, with snap null if it has none finished
+// Locations nested inside a folder being restored, each with its last snapshot before the location's next one
+// after the folder's, as they're backed up on their own schedules: what it was like while that snapshot was the
+// latest, so the latest goes with the latest. With none that old, its oldest. { loc, rel, snap }, with snap null
+// if it has none finished.
 export function nestedRestores(snap, rel) {
   const loc = storage.find(l => l.snapshots.includes(snap));
   const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
   const prefix = `${folder.replace(/\\$/, '')}\\`.toLowerCase();
-  const when = new Date(snap.time);
+  const next = loc.snapshots.find(s => !s.incomplete && new Date(s.time) > new Date(snap.time));
   return storage.filter(l => l.path.toLowerCase().startsWith(prefix)).map(inside => {
     const finished = inside.snapshots.filter(s => !s.incomplete && !beingDeleted(s));
-    const closest = finished.reduce((best, s) => (!best || Math.abs(new Date(s.time) - when) < Math.abs(new Date(best.time) - when) ? s : best), null);
-    return { loc: inside, rel: inside.path.slice(prefix.length).replace(/\\$/, ''), snap: closest };
+    const until = finished.filter(s => !next || new Date(s.time) < new Date(next.time)).at(-1) || finished[0] || null;
+    return { loc: inside, rel: inside.path.slice(prefix.length).replace(/\\$/, ''), snap: until };
   });
 }
 
@@ -103,12 +105,15 @@ function confirmRestore(snap, rel, nested) {
   const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
   const restorable = nested.filter(n => n.snap);
   const include = el('input', { type: 'checkbox', checked: restorable.length > 0, disabled: !restorable.length });
+  // Only with them, as it's files only one of the two snapshots has that can be deleted since
+  const keepDeleted = el('input', { type: 'checkbox', disabled: !include.checked });
+  include.addEventListener('change', () => { keepDeleted.disabled = !include.checked; });
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
   const go = el('button', {
     class: 'btn primary',
     onclick: () => {
       dialog.close();
-      startRestore(snap, rel, true, include.checked ? restorable : []);
+      startRestore(snap, rel, true, include.checked ? restorable : [], include.checked && keepDeleted.checked);
     },
   }, 'Restore…');
   const name = `${folder.replace(/\\$/, '').split('\\').pop()}\\`;
@@ -118,11 +123,16 @@ function confirmRestore(snap, rel, nested) {
     el('p', {}, `${plural(nested.length, 'location')} inside it ${nested.length === 1 ? 'is' : 'are'} backed up on ${nested.length === 1 ? 'its' : 'their'} own, so this snapshot may not have what's in ${nested.length === 1 ? 'it' : 'them'}.`),
     el('label', {
       class: 'field',
-      title: 'Restores each one into its place inside the folder, from its snapshot closest in time to this one. Where both snapshots have a file, the one modified later is kept.',
+      title: 'Restores each one into its place inside the folder, from its last snapshot before this location\'s next one. Where both snapshots have a file, the one modified later is kept. Files only the older snapshot has are kept too, unless the other location\'s snapshots show them deleted since.',
     }, include, `Include ${plural(restorable.length, 'nested location')}`),
-    el('ul', { class: 'nested-restores' }, nested.map(n => el('li', { class: n.snap ? null : 'muted' },
+    // Each one's path on a line of its own, as they can be long, with its snapshot under it
+    el('ul', { class: 'nested-restores' }, nested.map(n => el('li', {},
       el('b', {}, `${n.rel}\\`),
-      n.snap ? ` from ${formatFull(n.snap.time)} (${shortId(n.snap.id)})` : ' has no finished snapshot to restore'))),
+      el('div', { class: 'muted' }, n.snap ? `${formatFull(n.snap.time)} (${shortId(n.snap.id)})` : 'No finished snapshot to restore')))),
+    el('label', {
+      class: 'field',
+      title: 'Restores files that only the older snapshot has, even where the other location\'s snapshots show them deleted since, such as to get absolutely everything back after a disaster',
+    }, keepDeleted, 'Include files deleted since'),
     el('p', {}, 'Then pick a folder to put it in.'),
     el('div', { class: 'actions' }, cancel, go));
   dialog.addEventListener('close', () => dialog.remove());
@@ -452,6 +462,7 @@ export function renderJobs() {
       done: () => el('div', { class: 'status' },
         el('span', { class: 'c-added' }, '✓ Restored'), ' to ', el('b', {}, r.target),
         parts ? el('span', { title: r.nested.map(n => `${n.path}, ${formatFull(n.snapshotTime)}`).join('\n') }, `, with ${plural(r.nested.length, 'nested location')}`) : null,
+        r.deleted?.length ? el('span', { title: r.deleted.join('\n') }, `, leaving out ${plural(r.deleted.length, 'file')} deleted since`) : null,
         el('button', { class: 'linklike', onclick: event => showInExplorer(r.target, event.currentTarget) }, 'Show in Explorer')),
       failed: () => el('div', { class: 'status c-removed' }, `Failed: ${r.error}`),
       cancelled: () => el('div', { class: 'status muted' }, 'Cancelled'),

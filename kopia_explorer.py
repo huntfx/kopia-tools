@@ -857,10 +857,11 @@ def kopia_reason(error):
     return f'{lines[0]} (Kopia didn\'t say why)' if lines else type(error).__name__
 
 
-def start_restore(snapshot_id, path, is_folder, nested=()):
+def start_restore(snapshot_id, path, is_folder, nested=(), keep_deleted=False):
     """Restore a file or folder from a snapshot in the background, returning its progress record. A folder can
     have snapshots of locations nested inside it restored into it too, as the folder's own snapshot doesn't have
-    what's in them when its ignore rules leave them out."""
+    what's in them when its ignore rules leave them out. Files the snapshots show deleted since are left out,
+    unless they're all to be kept, as after a disaster."""
     snap = repository.snapshots[snapshot_id]
     if being_deleted(snapshot_id):
         raise BusyError('That snapshot is being deleted')
@@ -885,6 +886,7 @@ def start_restore(snapshot_id, path, is_folder, nested=()):
         'id': next(job_ids), 'kind': 'restore', 'name': path.rsplit('/', 1)[-1] if path else source.name,
         'from': str(folder), 'snapshotTime': snap['startTime'],
         'nested': [{'path': i['source']['path'], 'snapshotTime': i['startTime']} for i, _ in inner], 'part': 0,
+        'keepDeleted': bool(keep_deleted), 'deleted': [],
         'state': 'picking', 'target': None, 'files': 0, 'totalFiles': None, 'bytes': 0, 'totalBytes': None,
         'error': None, 'started': time.time(), 'finished': None,
     }
@@ -921,6 +923,15 @@ def run_restore(job, snap, path, is_folder, nested=()):
             job['alone'] = str(alone)
             restore_into(job, inside['rootEntry']['obj'], alone)
             into = working / rel
+            # Files in there that only the older of the two snapshots has are kept, unless the newer one's
+            # location shows them deleted since, so they aren't brought back, or they're all to be kept
+            if not job['keepDeleted']:
+                outer_older = unix_time(snap['startTime']) <= unix_time(inside['startTime'])
+                older, newer = (snap, inside) if outer_older else (inside, snap)
+                parts = () if newer is inside else (*(path.split('/') if path else ()), *rel.parts)
+                deleted = deleted_since(older, newer, parts)
+                drop_files(into if outer_older else alone, deleted)
+                job['deleted'] += [str(Path(job['from']) / rel / p) for p in sorted(deleted)]
             # Merging it in changes the modified times of the folders it's in, so they're put back after.
             # Ones that weren't restored, as the snapshot left them out, are made.
             above = [p for p in into.parents[:len(rel.parts)] if p.is_dir()]
@@ -948,21 +959,76 @@ def run_restore(job, snap, path, is_folder, nested=()):
         job['finished'] = time.time()
 
 
+def deleted_since(older, newer, parts):
+    """Files in a folder that the newer snapshot's location shows were deleted after the older snapshot was
+    taken: removed between its own snapshot from then and the newer one, apart from ones its ignore rules leave
+    out, as backups no longer having them doesn't mean they're gone. parts is the folder's path inside the
+    newer one's location. Paths are inside the folder, with forward slashes; none if it has no snapshot from
+    then to go by."""
+    source = newer['source']['path']
+    then = max((s for s in list_snapshots(source) if s['source']['path'] == source
+                and unix_time(s['startTime']) <= unix_time(older['startTime'])), key=lambda s: unix_time(s['startTime']), default=None)
+    if not then or then['rootEntry']['obj'] == newer['rootEntry']['obj']:
+        return set()
+    ignore = snapshot_ignore(newer)
+    try:
+        changes = diff_snapshots(then, newer, list(parts), len(parts))
+    except RuntimeError as e:
+        # Then it can't be told, so everything's kept, as a file brought back is better than one missing
+        print(f'Couldn\'t check {source} for files deleted since {older["startTime"]}: {kopia_reason(e)}', flush=True)
+        return set()
+    return {p for kind, p, old, _ in changes
+            if kind == REMOVED and old['type'] == 'f' and not ignore.ignored([*parts, *p.split('/')], False)}
+
+
+def snapshot_ignore(snap):
+    """A snapshot's ignore rules: its location's policy, and the ignore files in each folder as the snapshot has
+    them, so they're the ones that decided what it left out, and are there even if the files on disk are gone,
+    as after losing a drive. One the snapshot hasn't got, such as one its rules leave out, is read from disk if
+    it's there, as more rules only mean more files kept rather than counted deleted."""
+    source = snap['source']['path']
+    policy = pool.submit(lambda: json.loads(kopia('policy', 'show', source, '--json')))
+
+    def read(dir_parts, name):
+        obj = snap['rootEntry']['obj']
+        for part in dir_parts:
+            obj = next((e['o'] for e in listing(obj) if e['n'] == part and e['t'] == 'd'), None)
+            if obj is None:
+                break
+        if obj is not None and any(e['n'] == name and e['t'] == 'f' for e in listing(obj)):
+            return kopia('show', f'{obj}/{name}')
+        try:
+            return Path(source, *dir_parts, name).read_text(encoding='utf-8-sig')
+        except OSError:
+            return None
+    return KopiaIgnore(source, policy, read)
+
+
+def drop_files(folder, paths):
+    """Delete files from a restore, putting back the modified times of the folders they were in"""
+    for p in paths:
+        file = folder / p
+        if file.is_file():
+            times = file.parent.stat()
+            file.unlink()
+            os.utime(file.parent, (times.st_atime, times.st_mtime))
+
+
 def restore_into(job, source, into):
     """Have kopia restore something to a path, following its progress in the restore's record"""
     # Progress lines end in carriage returns, which text mode reads as line ends
     started = time.time()
-    process = subprocess.Popen(['kopia', 'restore', '--progress', source, str(into)], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
     last = ''
-    for line in process.stdout:
-        if match := PROGRESS.search(line):
-            files, size, unit, total_files, total, total_unit = match.groups()
-            job.update(files=min(int(files), int(total_files)), totalFiles=int(total_files),
-                       bytes=min(size_of(size, unit), size_of(total, total_unit)), totalBytes=size_of(total, total_unit))
-        elif line.strip():
-            last = line.strip()
-    log_command(process.args[1:], started, process.wait() and (last or f'exit code {process.returncode}'))
+    with subprocess.Popen(['kopia', 'restore', '--progress', source, str(into)], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace') as process:
+        for line in process.stdout:
+            if match := PROGRESS.search(line):
+                files, size, unit, total_files, total, total_unit = match.groups()
+                job.update(files=min(int(files), int(total_files)), totalFiles=int(total_files),
+                           bytes=min(size_of(size, unit), size_of(total, total_unit)), totalBytes=size_of(total, total_unit))
+            elif line.strip():
+                last = line.strip()
+    log_command(process.args[1:], started, process.returncode and (last or f'exit code {process.returncode}'))
     if process.returncode:
         raise RuntimeError(last or f'kopia restore failed with exit code {process.returncode}')
 
@@ -2375,7 +2441,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
             if self.path == '/api/restore':
-                return self.send_json(start_restore(body['snapshot'], body['path'], bool(body.get('folder')), body.get('nested') or []))
+                return self.send_json(start_restore(body['snapshot'], body['path'], bool(body.get('folder')), body.get('nested') or [],
+                                                         bool(body.get('keepDeleted'))))
             if self.path == '/api/backup':
                 return self.send_json(start_backup(body['source']))
             if self.path == '/api/backup/cancel':
