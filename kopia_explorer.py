@@ -53,6 +53,11 @@ CACHE_DIR = Path(tempfile.gettempdir()) / 'kopia-explorer'
 SYMBOL = {ADDED: '+', REMOVED: '-', MODIFIED: '~'}
 
 pool = ThreadPoolExecutor(max_workers=8)
+# Working out storage stats has workers of its own, as each source's can take most of a minute: in the shared
+# pool, after a restart with every source to do, they took all its workers, so everything the page asked for
+# that needs it waited behind them, and those requests used up the browser's connections to the server, holding
+# up even ones that don't, like its progress and the folder picker
+stats_pool = ThreadPoolExecutor(max_workers=4)
 
 
 class DiskCache:
@@ -250,7 +255,7 @@ class Repository:
         started = time.time()
         self.progress = {'step': 'Working out storage', 'done': 0, 'total': len(stale)}
         try:
-            futures = {pool.submit(source_stats, source): source for source in stale}
+            futures = {stats_pool.submit(source_stats, source): source for source in stale}
             for future in as_completed(futures):
                 source = futures[future]
                 try:
@@ -2497,6 +2502,7 @@ def main():
     finally:
         server.server_close()
         pool.shutdown(wait=False, cancel_futures=True)
+        stats_pool.shutdown(wait=False, cancel_futures=True)
         # Backups would carry on without anything following them, so they're stopped, saving what they got through
         for job_id, process in list(backup_processes.items()):
             print(f'Cancelling the backup of {jobs[job_id]["source"]}...', flush=True)
