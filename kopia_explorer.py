@@ -44,8 +44,8 @@ from tkinter import filedialog, messagebox
 from urllib.parse import parse_qs, urlparse
 
 from kopia_docs import kopia_doc
-from snapshot_diff import (ADDED, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, glob_to_regex, kopia, list_snapshots, log_command,
-                           parse_ignore_rule)
+from snapshot_diff import (ADDED, DIFF_FILE, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, glob_to_regex, kopia, list_snapshots,
+                           log_command, parse_ignore_rule)
 
 PAGE_DIR = Path(__file__).parent / 'explorer'
 # In the temp folder, as it can be thrown away and can get big
@@ -857,11 +857,10 @@ def kopia_reason(error):
     return f'{lines[0]} (Kopia didn\'t say why)' if lines else type(error).__name__
 
 
-def start_restore(snapshot_id, path, is_folder, nested=(), keep_deleted=False):
+def start_restore(snapshot_id, path, is_folder, nested=()):
     """Restore a file or folder from a snapshot in the background, returning its progress record. A folder can
-    have snapshots of locations nested inside it restored into it too, as the folder's own snapshot doesn't have
-    what's in them when its ignore rules leave them out. Files the snapshots show deleted since are left out,
-    unless they're all to be kept, as after a disaster."""
+    have snapshots of locations nested inside it restored into it too, for the files in them that the folder's
+    own snapshot leaves out, by its ignore rules, as when they're backed up on their own instead."""
     snap = repository.snapshots[snapshot_id]
     if being_deleted(snapshot_id):
         raise BusyError('That snapshot is being deleted')
@@ -886,7 +885,6 @@ def start_restore(snapshot_id, path, is_folder, nested=(), keep_deleted=False):
         'id': next(job_ids), 'kind': 'restore', 'name': path.rsplit('/', 1)[-1] if path else source.name,
         'from': str(folder), 'snapshotTime': snap['startTime'],
         'nested': [{'path': i['source']['path'], 'snapshotTime': i['startTime']} for i, _ in inner], 'part': 0,
-        'keepDeleted': bool(keep_deleted), 'deleted': [],
         'state': 'picking', 'target': None, 'files': 0, 'totalFiles': None, 'bytes': 0, 'totalBytes': None,
         'error': None, 'started': time.time(), 'finished': None,
     }
@@ -899,8 +897,7 @@ def run_restore(job, snap, path, is_folder, nested=()):
     """Pick where a restore goes, then run it, straight from kopia so it keeps its modified times and
     attributes, following kopia's progress. It's restored under a temporary name next to where it's going,
     so something half restored is never mistaken for the real thing, then moved into place once complete,
-    along with any nested locations merged into it, each where it is inside it, keeping the later of each file
-    both have."""
+    along with the files from any nested locations that its snapshot leaves out, each where it is inside it."""
     working = None
     try:
         source = f'{snap["rootEntry"]["obj"]}/{path}' if path else snap['rootEntry']['obj']
@@ -915,29 +912,23 @@ def run_restore(job, snap, path, is_folder, nested=()):
             working = target.with_name(f'{target.name}.kopia-restoring-{job["id"]}')
         job.update(state='restoring', target=str(target), working=str(working))
         restore_into(job, source, working)
+        # What the outer snapshot leaves out, by its ignore rules as it has them, so they're there even if the ones
+        # on disk were lost, by paths inside its location
+        if nested:
+            ignore = snapshot_ignore(snap)
+            here = tuple(path.split('/')) if path else ()
         for part, (inside, rel) in enumerate(nested, 1):
             job.update(part=part, files=0, totalFiles=None, bytes=0, totalBytes=None)
-            # Restored on its own first, then merged in, as both snapshots can have files in there: the
-            # outer one's backups may leave out only some, or none, and run more or less often
+            # Restored on its own first, then only what the outer snapshot leaves out is moved in, as both can
+            # have files in there: anything the outer one has comes from it
             alone = working.with_name(f'{working.name}-nested-{job["id"]}-{part}')
             job['alone'] = str(alone)
             restore_into(job, inside['rootEntry']['obj'], alone)
             into = working / rel
-            # Files in there that only the older of the two snapshots has are kept, unless the newer one's
-            # location shows them deleted since, so they aren't brought back, or they're all to be kept
-            if not job['keepDeleted']:
-                outer_older = unix_time(snap['startTime']) <= unix_time(inside['startTime'])
-                older, newer = (snap, inside) if outer_older else (inside, snap)
-                parts = () if newer is inside else (*(path.split('/') if path else ()), *rel.parts)
-                deleted = deleted_since(older, newer, parts)
-                drop_files(into if outer_older else alone, deleted)
-                job['deleted'] += [str(Path(job['from']) / rel / p) for p in sorted(deleted)]
-            # Merging it in changes the modified times of the folders it's in, so they're put back after.
-            # Ones that weren't restored, as the snapshot left them out, are made.
+            # Moving things in changes the modified times of the folders it's in, so they're put back after
             above = [p for p in into.parents[:len(rel.parts)] if p.is_dir()]
             times = [(p, (p.stat().st_atime, p.stat().st_mtime)) for p in above]
-            into.parent.mkdir(parents=True, exist_ok=True)
-            move_into_place(alone, into, newest=True)
+            move_left_out(alone, into, lambda p, is_dir: ignore.ignored([*here, *rel.parts, *p.parts], is_dir))
             job.pop('alone')
             for folder, folder_times in times:
                 os.utime(folder, folder_times)
@@ -959,42 +950,16 @@ def run_restore(job, snap, path, is_folder, nested=()):
         job['finished'] = time.time()
 
 
-def deleted_since(older, newer, parts):
-    """Files in a folder that the newer snapshot's location shows were deleted after the older snapshot was
-    taken: removed between its own snapshot from then and the newer one, apart from ones its ignore rules leave
-    out, as backups no longer having them doesn't mean they're gone. parts is the folder's path inside the
-    newer one's location. Paths are inside the folder, with forward slashes; none if it has no snapshot from
-    then to go by."""
-    source = newer['source']['path']
-    then = max((s for s in list_snapshots(source) if s['source']['path'] == source
-                and unix_time(s['startTime']) <= unix_time(older['startTime'])), key=lambda s: unix_time(s['startTime']), default=None)
-    if not then or then['rootEntry']['obj'] == newer['rootEntry']['obj']:
-        return set()
-    ignore = snapshot_ignore(newer)
-    try:
-        changes = diff_snapshots(then, newer, list(parts), len(parts))
-    except RuntimeError as e:
-        # Then it can't be told, so everything's kept, as a file brought back is better than one missing
-        print(f'Couldn\'t check {source} for files deleted since {older["startTime"]}: {kopia_reason(e)}', flush=True)
-        return set()
-    return {p for kind, p, old, _ in changes
-            if kind == REMOVED and old['type'] == 'f' and not ignore.ignored([*parts, *p.split('/')], False)}
-
-
 def snapshot_ignore(snap):
     """A snapshot's ignore rules: its location's policy, and the ignore files in each folder as the snapshot has
     them, so they're the ones that decided what it left out, and are there even if the files on disk are gone,
     as after losing a drive. One the snapshot hasn't got, such as one its rules leave out, is read from disk if
-    it's there, as more rules only mean more files kept rather than counted deleted."""
+    it's there."""
     source = snap['source']['path']
     policy = pool.submit(lambda: json.loads(kopia('policy', 'show', source, '--json')))
 
     def read(dir_parts, name):
-        obj = snap['rootEntry']['obj']
-        for part in dir_parts:
-            obj = next((e['o'] for e in listing(obj) if e['n'] == part and e['t'] == 'd'), None)
-            if obj is None:
-                break
+        obj = folder_object(snap['rootEntry']['obj'], dir_parts)
         if obj is not None and any(e['n'] == name and e['t'] == 'f' for e in listing(obj)):
             return kopia('show', f'{obj}/{name}')
         try:
@@ -1004,14 +969,74 @@ def snapshot_ignore(snap):
     return KopiaIgnore(source, policy, read)
 
 
-def drop_files(folder, paths):
-    """Delete files from a restore, putting back the modified times of the folders they were in"""
-    for p in paths:
-        file = folder / p
-        if file.is_file():
-            times = file.parent.stat()
-            file.unlink()
-            os.utime(file.parent, (times.st_atime, times.st_mtime))
+def folder_object(root, parts):
+    """kopia's ID for a folder inside another, by the names of the folders on the way to it, or None if it
+    isn't there"""
+    obj = root
+    for part in parts:
+        obj = next((e['o'] for e in listing(obj) if e['n'] == part and e['t'] == 'd'), None)
+        if obj is None:
+            return None
+    return obj
+
+
+def nested_additions(snapshot_id, path, nested_ids):
+    """Which snapshots of locations nested inside a folder being restored have anything to add to it, by ID:
+    files the folder's snapshot leaves out, by its ignore rules, as only those are worth offering. Any that
+    can't be checked are counted as having something, so they're still offered."""
+    snap = repository.snapshots[snapshot_id]
+    here = path.split('/') if path else []
+    folder = Path(snap['source']['path'], *here)
+    ignore = snapshot_ignore(snap)
+
+    def adds(nested_id):
+        try:
+            inside = repository.snapshots[nested_id]
+            parts = [*here, *Path(inside['source']['path']).relative_to(folder).parts]
+            there = folder_object(snap['rootEntry']['obj'], parts)
+            if there is None:
+                # Left out altogether, or not there for some other reason, which can't be told without going
+                # through all of it, so it's offered
+                return bool(inside['rootEntry'].get('summ', {}).get('files', 1))
+            if there == inside['rootEntry']['obj']:
+                return False
+            # Files only the nested snapshot has, of which any the outer one leaves out are worth having
+            return any((m := DIFF_FILE.match(line)) and m[1] == ADDED and ignore.ignored([*parts, *m[2].split('/')], False)
+                       for line in kopia('diff', there, inside['rootEntry']['obj']).splitlines())
+        except (KeyError, ValueError, RuntimeError) as e:
+            print(f'Couldn\'t check {nested_id} for anything to add: {kopia_reason(e)}', flush=True)
+            return True
+    return dict(zip(nested_ids, pool.map(adds, nested_ids)))
+
+
+def move_left_out(finished, target, left_out):
+    """Move what a nested location's restore has that the outer one's snapshot left out, by left_out(path inside,
+    is_dir), into the outer one's restore, where it goes. Anything already there stays as it is, folders' modified
+    times too; folders it makes keep their times as restored."""
+    times = {}
+
+    def make(rel):
+        # The folders on the way to it, remembering their times as they were, or as restored for ones made
+        for depth in range(len(rel.parts) + 1):
+            folder = target / Path(*rel.parts[:depth])
+            if folder not in times:
+                stat = (folder if folder.exists() else finished / Path(*rel.parts[:depth])).stat()
+                times[folder] = (stat.st_atime, stat.st_mtime)
+                folder.mkdir(parents=True, exist_ok=True)
+
+    for folder, _, files in os.walk(finished):
+        rel = Path(folder).relative_to(finished)
+        # Folders it leaves out are made even if they're empty, as they're part of what's restored
+        if rel.parts and not (target / rel).exists() and left_out(rel, True):
+            make(rel)
+        for name in files:
+            if not (target / rel / name).exists() and left_out(rel / name, False):
+                make(rel)
+                os.replace(Path(folder) / name, target / rel / name)
+    # Deepest first, as setting a folder's times doesn't change its parent's
+    for folder, folder_times in sorted(times.items(), key=lambda t: -len(t[0].parts)):
+        os.utime(folder, folder_times)
+    shutil.rmtree(finished)
 
 
 def restore_into(job, source, into):
@@ -1033,26 +1058,22 @@ def restore_into(job, source, into):
         raise RuntimeError(last or f'kopia restore failed with exit code {process.returncode}')
 
 
-def move_into_place(finished, target, newest=False):
+def move_into_place(finished, target):
     """Move a completed restore to where it was going. A file replaces one already there in one step. A folder
     restored over an existing one has its files moved in, replacing those with the same names, and its folders'
-    modified times put back, as moving things into a folder changes them. Newest, as for a nested location's
-    snapshot merged into the restore of the folder it's in, keeps whichever of each file and folder was modified
-    later, the one there already if they're the same."""
+    modified times put back, as moving things into a folder changes them."""
     if not target.exists() or target.is_file():
         os.replace(finished, target)
         return
-    later = lambda moving, there: not newest or not there.exists() or moving.stat().st_mtime > there.stat().st_mtime
     folders = []
     for folder, _, files in os.walk(finished):
         inside = target / Path(folder).relative_to(finished)
-        # Its times as restored, before moving its files out changes them, or the ones there already
-        times = (Path(folder) if later(Path(folder), inside) else inside).stat()
         inside.mkdir(exist_ok=True)
+        # Its times as restored, before moving its files out changes them
+        times = Path(folder).stat()
         folders.append((inside, (times.st_atime, times.st_mtime)))
         for name in files:
-            if later(Path(folder) / name, inside / name):
-                os.replace(Path(folder) / name, inside / name)
+            os.replace(Path(folder) / name, inside / name)
     # Deepest first, as setting a folder's times doesn't change its parent's
     for inside, times in reversed(folders):
         os.utime(inside, times)
@@ -2390,6 +2411,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Any number of patterns to filter by, and where the folder is, for those matching folders
                 match, path = parse_qs(url.query).get('match', []), query.get('in', '')
                 return self.send_json(file_types.inside(query['obj'], match, path) if query.get('inside') else file_types.get(query['obj'], match, path))
+            if url.path == '/api/nested-additions':
+                return self.send_json(nested_additions(query['snapshot'], query.get('path', ''), parse_qs(url.query).get('nested', [])))
             if url.path == '/api/schedule':
                 return self.send_json(schedule_of(query['path']))
             if url.path == '/api/schedules':
@@ -2441,8 +2464,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
             if self.path == '/api/restore':
-                return self.send_json(start_restore(body['snapshot'], body['path'], bool(body.get('folder')), body.get('nested') or [],
-                                                         bool(body.get('keepDeleted'))))
+                return self.send_json(start_restore(body['snapshot'], body['path'], bool(body.get('folder')), body.get('nested') or []))
             if self.path == '/api/backup':
                 return self.send_json(start_backup(body['source']))
             if self.path == '/api/backup/cancel':

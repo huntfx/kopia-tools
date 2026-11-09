@@ -65,21 +65,37 @@ export const beingDeleted = snap => jobList.some(j => j.kind === 'delete' && j.s
 export const backupOf = loc => jobList.find(j => j.kind === 'backup' && j.source === loc.path && jobActive(j));
 
 // Restore a file or folder (rel inside the location, '' for all of it) as it was in a snapshot. A folder with
-// locations nested inside it asks first whether to restore those too, from their own snapshots.
-export function restoreItem(snap, rel, folder) {
+// locations nested inside it asks first whether to restore those too, from their own snapshots, offering only
+// the ones with anything to add, which the server checks meanwhile, as the button says.
+export async function restoreItem(snap, rel, folder, button = null) {
   // One at a time while choosing where: the panel shows the one waiting instead of queueing another
   if (jobList.some(j => j.state === 'picking')) {
     jobsShown = true;
     return renderJobs();
   }
   const nested = folder ? nestedRestores(snap, rel) : [];
-  if (nested.length) return confirmRestore(snap, rel, nested);
-  startRestore(snap, rel, folder, []);
+  const restorable = nested.filter(n => n.snap);
+  if (!restorable.length) return startRestore(snap, rel, folder, []);
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Checking nested locations…';
+  }
+  const query = new URLSearchParams([['snapshot', snap.id], ['path', rel], ...restorable.map(n => ['nested', n.snap.id])]);
+  // If it can't be checked, they're all offered
+  const adds = await fetch(`/api/nested-additions?${query}`).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+  if (button) {
+    button.disabled = false;
+    button.textContent = label;
+  }
+  const offered = restorable.filter(n => adds[n.snap.id] !== false);
+  if (!offered.length) return startRestore(snap, rel, folder, []);
+  confirmRestore(snap, rel, offered, nested.length);
 }
 
-function startRestore(snap, rel, folder, nested, keepDeleted = false) {
+function startRestore(snap, rel, folder, nested) {
   jobsShown = true;
-  startJob('/api/restore', { snapshot: snap.id, path: rel, folder, nested: nested.map(n => n.snap.id), keepDeleted },
+  startJob('/api/restore', { snapshot: snap.id, path: rel, folder, nested: nested.map(n => n.snap.id) },
     { kind: 'restore', name: rel.split('/').pop() || 'this location', snapshotTime: snap.time });
 }
 
@@ -99,18 +115,16 @@ export function nestedRestores(snap, rel) {
   });
 }
 
-// Asking whether to restore the locations nested inside a folder too, listing which snapshot of each goes with it
-function confirmRestore(snap, rel, nested) {
+// Asking whether to restore the locations nested inside a folder too, listing which snapshot of each goes with it:
+// the ones with anything to add, of the total nested inside it, saying how many others have nothing to add
+function confirmRestore(snap, rel, restorable, total) {
   const loc = storage.find(l => l.snapshots.includes(snap));
   const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
-  const restorable = nested.filter(n => n.snap);
-  // A checkbox for each one with a snapshot to restore, and one above for all of them, showing when only some are
-  // ticked, and saying how many
+  const others = total - restorable.length;
+  // A checkbox for each one, and one above for all of them, showing when only some are ticked, and saying how many
   const checks = new Map(restorable.map(n => [n, el('input', { type: 'checkbox', checked: true })]));
-  const include = el('input', { type: 'checkbox', checked: restorable.length > 0, disabled: !restorable.length });
+  const include = el('input', { type: 'checkbox', checked: true });
   const includeText = el('span', {});
-  // Only with some, as it's files only one of the two snapshots has that can be deleted since
-  const keepDeleted = el('input', { type: 'checkbox' });
   const picked = () => restorable.filter(n => checks.get(n).checked);
   const update = () => {
     const count = picked().length;
@@ -118,7 +132,6 @@ function confirmRestore(snap, rel, nested) {
     include.indeterminate = count > 0 && count < restorable.length;
     includeText.textContent = count && count < restorable.length
       ? `Include ${count} of ${plural(restorable.length, 'nested location')}` : `Include ${plural(restorable.length, 'nested location')}`;
-    keepDeleted.disabled = !count;
   };
   include.addEventListener('change', () => {
     for (const check of checks.values()) check.checked = include.checked;
@@ -131,30 +144,29 @@ function confirmRestore(snap, rel, nested) {
     class: 'btn primary',
     onclick: () => {
       dialog.close();
-      const chosen = picked();
-      startRestore(snap, rel, true, chosen, chosen.length > 0 && keepDeleted.checked);
+      startRestore(snap, rel, true, picked());
     },
   }, 'Restore…');
   const name = `${folder.replace(/\\$/, '').split('\\').pop()}\\`;
   const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
     el('h2', { id: 'confirm-title' }, `Restore ${name}?`),
     el('p', { class: 'what' }, el('b', {}, folder), `, ${formatFull(snap.time)} (${shortId(snap.id)})`),
-    el('p', {}, `${plural(nested.length, 'location')} inside it ${nested.length === 1 ? 'is' : 'are'} backed up on ${nested.length === 1 ? 'its' : 'their'} own, so this snapshot may not have what's in ${nested.length === 1 ? 'it' : 'them'}.`),
+    others
+      ? el('p', {}, `${plural(total, 'location')} inside it are backed up on their own. `,
+        restorable.length === 1 ? 'This one has files this snapshot leaves out; ' : `These ${restorable.length} have files this snapshot leaves out; `,
+        `the other ${others === 1 ? 'one has' : `${others} have`} nothing to add.`)
+      : el('p', {}, `${plural(total, 'location')} inside it ${total === 1 ? 'is' : 'are'} backed up on ${total === 1 ? 'its' : 'their'} own, with files this snapshot leaves out.`),
     el('label', {
       class: 'field',
-      title: 'Restores each one into its place inside the folder, from its last snapshot before this location\'s next one. Where both snapshots have a file, the one modified later is kept. Files only the older snapshot has are kept too, unless the other location\'s snapshots show them deleted since.',
+      title: 'Restores the files this snapshot\'s ignore rules leave out from each one, from its last snapshot before this location\'s next one. Everything this snapshot has comes from it.',
     }, include, includeText),
     // Each one's path on a line of its own, as they can be long, with its snapshot under it
-    el('ul', { class: 'nested-restores' }, nested.map(n => el('li', {},
+    el('ul', { class: 'nested-restores' }, restorable.map(n => el('li', {},
       el('label', { title: n.loc.path },
-        checks.get(n) || el('input', { type: 'checkbox', disabled: true }),
+        checks.get(n),
         el('span', {},
           el('b', {}, `${n.rel}\\`),
-          el('div', { class: 'muted' }, n.snap ? `${formatFull(n.snap.time)} (${shortId(n.snap.id)})` : 'No finished snapshot to restore')))))),
-    el('label', {
-      class: 'field',
-      title: 'Restores files that only the older snapshot has, even where the other location\'s snapshots show them deleted since, such as to get absolutely everything back after a disaster',
-    }, keepDeleted, 'Include files deleted since'),
+          el('div', { class: 'muted' }, `${formatFull(n.snap.time)} (${shortId(n.snap.id)})`)))))),
     el('p', {}, 'Then pick a folder to put it in.'),
     el('div', { class: 'actions' }, cancel, go));
   dialog.addEventListener('close', () => dialog.remove());
@@ -483,9 +495,7 @@ export function renderJobs() {
       finishing: () => el('div', { class: 'status' }, 'Moving into place at ', el('b', {}, r.target), '…'),
       done: () => el('div', { class: 'status' },
         el('span', { class: 'c-added' }, '✓ Restored'), ' to ', el('b', {}, r.target),
-        parts ? el('span', { title: r.nested.map(n => `${n.path}, ${formatFull(n.snapshotTime)}`).join('\n') }, `, with ${plural(r.nested.length, 'nested location')}`) : null,
-        r.deleted?.length ? el('span', { title: r.deleted.join('\n') }, `, leaving out ${plural(r.deleted.length, 'file')} deleted since`) : null,
-        el('button', { class: 'linklike', onclick: event => showInExplorer(r.target, event.currentTarget) }, 'Show in Explorer')),
+        parts ? el('span', { title: r.nested.map(n => `${n.path}, ${formatFull(n.snapshotTime)}`).join('\n') }, `, with ${plural(r.nested.length, 'nested location')}`) : null,        el('button', { class: 'linklike', onclick: event => showInExplorer(r.target, event.currentTarget) }, 'Show in Explorer')),
       failed: () => el('div', { class: 'status c-removed' }, `Failed: ${r.error}`),
       cancelled: () => el('div', { class: 'status muted' }, 'Cancelled'),
     }[r.state]();

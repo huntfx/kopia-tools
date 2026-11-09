@@ -289,9 +289,9 @@ export function snapshotPanel({ selected, rel, present, size, what, facts, butto
         class: 'btn primary', disabled: !present || beingDeleted(selected),
         title: !present ? 'It isn\'t in this snapshot'
           : beingDeleted(selected) ? 'This snapshot is being deleted'
-          : `${nested ? `Choose whether to include the ${plural(nested, 'nested location')} inside it, then pick a folder to put it in`
+          : `${nested ? `Check the ${plural(nested, 'nested location')} inside it for files this snapshot leaves out, choose which to include, then pick a folder to put it in`
             : what === 'folder' ? 'Pick a folder to put it in' : 'Pick where to save it'}, keeping modified dates, as it was on ${formatFull(selected.time)}`,
-        onclick: () => restoreItem(selected, rel, what === 'folder'),
+        onclick: event => restoreItem(selected, rel, what === 'folder', event.currentTarget),
       }, `Restore this ${what}${size != null ? ` (${formatSize(size)})` : ''}…`),
       what === 'folder' ? mountButton(selected, rel, present) : null,
       explorerButton, buttons),
