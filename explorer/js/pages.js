@@ -7,7 +7,7 @@ import { filterControls, filteredCounts, inFilter, matchingFiles, patterns } fro
 import { settingsStatus, settingsWarning } from './schedules.js';
 import { api, notKnown, notLoaded, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
-import { beingDeleted, beingPinned, confirmPin, mountButton, restoreItem, showInExplorer } from './jobs.js';
+import { beingDeleted, beingPinned, confirmPin, mountButton, nestedRestores, restoreItem, showInExplorer } from './jobs.js';
 import { LAST_GOOD, failingWarning, lastGoodStatus } from './lastgood.js';
 import { compactFolder, diskText, joinRel, locationTree, locationsBelow, repositoryDiskText, shownBelow, treeNodes, treeTotal } from './sidebar.js';
 import { render } from './render.js';
@@ -272,6 +272,7 @@ export function snapshotPanel({ selected, rel, present, size, what, facts, butto
   const detail = ([label, value]) => [el('dt', {}, label), el('dd', {}, value)];
   const loc = storage.find(l => l.snapshots.includes(selected));
   const onDisk = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
+  const nested = what === 'folder' ? nestedRestores(selected, rel).length : 0;
   const explorerButton = el('button', {
     class: 'btn', title: `Open ${onDisk} in Windows Explorer, as it is now (or the nearest folder above it, if it's gone)`,
     onclick: () => showInExplorer(onDisk, explorerButton),
@@ -288,7 +289,8 @@ export function snapshotPanel({ selected, rel, present, size, what, facts, butto
         class: 'btn primary', disabled: !present || beingDeleted(selected),
         title: !present ? 'It isn\'t in this snapshot'
           : beingDeleted(selected) ? 'This snapshot is being deleted'
-          : `${what === 'folder' ? 'Pick a folder to put it in' : 'Pick where to save it'}, keeping modified dates, as it was on ${formatFull(selected.time)}`,
+          : `${nested ? `Choose whether to include the ${plural(nested, 'nested location')} inside it, then pick a folder to put it in`
+            : what === 'folder' ? 'Pick a folder to put it in' : 'Pick where to save it'}, keeping modified dates, as it was on ${formatFull(selected.time)}`,
         onclick: () => restoreItem(selected, rel, what === 'folder'),
       }, `Restore this ${what}${size != null ? ` (${formatSize(size)})` : ''}…`),
       what === 'folder' ? mountButton(selected, rel, present) : null,

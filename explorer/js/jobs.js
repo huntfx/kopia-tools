@@ -64,13 +64,71 @@ export const beingDeleted = snap => jobList.some(j => j.kind === 'delete' && j.s
 // A location's backup still going, if there is one
 export const backupOf = loc => jobList.find(j => j.kind === 'backup' && j.source === loc.path && jobActive(j));
 
-// Restore a file or folder (rel inside the location, '' for all of it) as it was in a snapshot
+// Restore a file or folder (rel inside the location, '' for all of it) as it was in a snapshot. A folder with
+// locations nested inside it asks first whether to restore those too, from their own snapshots.
 export function restoreItem(snap, rel, folder) {
-  jobsShown = true;
   // One at a time while choosing where: the panel shows the one waiting instead of queueing another
-  if (jobList.some(j => j.state === 'picking')) return renderJobs();
-  startJob('/api/restore', { snapshot: snap.id, path: rel, folder },
+  if (jobList.some(j => j.state === 'picking')) {
+    jobsShown = true;
+    return renderJobs();
+  }
+  const nested = folder ? nestedRestores(snap, rel) : [];
+  if (nested.length) return confirmRestore(snap, rel, nested);
+  startRestore(snap, rel, folder, []);
+}
+
+function startRestore(snap, rel, folder, nested) {
+  jobsShown = true;
+  startJob('/api/restore', { snapshot: snap.id, path: rel, folder, nested: nested.map(n => n.snap.id) },
     { kind: 'restore', name: rel.split('/').pop() || 'this location', snapshotTime: snap.time });
+}
+
+// Locations nested inside a folder being restored, each with its snapshot closest in time to the folder's, as
+// they're backed up on their own schedules: { loc, rel, snap }, with snap null if it has none finished
+export function nestedRestores(snap, rel) {
+  const loc = storage.find(l => l.snapshots.includes(snap));
+  const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
+  const prefix = `${folder.replace(/\\$/, '')}\\`.toLowerCase();
+  const when = new Date(snap.time);
+  return storage.filter(l => l.path.toLowerCase().startsWith(prefix)).map(inside => {
+    const finished = inside.snapshots.filter(s => !s.incomplete && !beingDeleted(s));
+    const closest = finished.reduce((best, s) => (!best || Math.abs(new Date(s.time) - when) < Math.abs(new Date(best.time) - when) ? s : best), null);
+    return { loc: inside, rel: inside.path.slice(prefix.length).replace(/\\$/, ''), snap: closest };
+  });
+}
+
+// Asking whether to restore the locations nested inside a folder too, listing which snapshot of each goes with it
+function confirmRestore(snap, rel, nested) {
+  const loc = storage.find(l => l.snapshots.includes(snap));
+  const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
+  const restorable = nested.filter(n => n.snap);
+  const include = el('input', { type: 'checkbox', checked: restorable.length > 0, disabled: !restorable.length });
+  const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
+  const go = el('button', {
+    class: 'btn primary',
+    onclick: () => {
+      dialog.close();
+      startRestore(snap, rel, true, include.checked ? restorable : []);
+    },
+  }, 'Restore…');
+  const name = `${folder.replace(/\\$/, '').split('\\').pop()}\\`;
+  const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
+    el('h2', { id: 'confirm-title' }, `Restore ${name}?`),
+    el('p', { class: 'what' }, el('b', {}, folder), `, ${formatFull(snap.time)} (${shortId(snap.id)})`),
+    el('p', {}, `${plural(nested.length, 'location')} inside it ${nested.length === 1 ? 'is' : 'are'} backed up on ${nested.length === 1 ? 'its' : 'their'} own, so this snapshot may not have what's in ${nested.length === 1 ? 'it' : 'them'}.`),
+    el('label', {
+      class: 'field',
+      title: 'Restores each one into its place inside the folder, from its snapshot closest in time to this one. Where both snapshots have a file, the one modified later is kept.',
+    }, include, `Include ${plural(restorable.length, 'nested location')}`),
+    el('ul', { class: 'nested-restores' }, nested.map(n => el('li', { class: n.snap ? null : 'muted' },
+      el('b', {}, `${n.rel}\\`),
+      n.snap ? ` from ${formatFull(n.snap.time)} (${shortId(n.snap.id)})` : ' has no finished snapshot to restore'))),
+    el('p', {}, 'Then pick a folder to put it in.'),
+    el('div', { class: 'actions' }, cancel, go));
+  dialog.addEventListener('close', () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  go.focus();
 }
 
 // The drive last mounted on, offered again while it's free
@@ -377,6 +435,9 @@ export function renderJobs() {
     if (r.kind === 'mount') return mountItem(r);
     if (r.kind === 'settings') return settingsItems(r);
     const percent = r.totalBytes ? 100 * r.bytes / r.totalBytes : 0;
+    // With nested locations, each is restored after it in turn, with a progress bar of its own
+    const parts = r.nested?.length ? r.nested.length + 1 : 0;
+    const part = parts ? `${r.part ? r.nested[r.part - 1].path : r.from} (${r.part + 1} of ${parts}) · ` : '';
     const status = {
       // After a few seconds, the picker may well have opened behind something
       picking: () => el('div', { class: 'status muted' }, Date.now() / 1000 - r.started > 5
@@ -385,11 +446,12 @@ export function renderJobs() {
         el('div', { class: 'status' }, 'To ', el('b', {}, r.target)),
         el('div', { class: 'status' },
           el('span', { class: 'bar' }, el('span', { class: 'fill', style: `display:block;width:${percent}%` })),
-          r.totalBytes ? `${formatSize(r.bytes)} of ${formatSize(r.totalBytes)} · ${Math.floor(percent)}%` : 'Starting…'),
+          part + (r.totalBytes ? `${formatSize(r.bytes)} of ${formatSize(r.totalBytes)} · ${Math.floor(percent)}%` : 'Starting…')),
       ],
       finishing: () => el('div', { class: 'status' }, 'Moving into place at ', el('b', {}, r.target), '…'),
       done: () => el('div', { class: 'status' },
         el('span', { class: 'c-added' }, '✓ Restored'), ' to ', el('b', {}, r.target),
+        parts ? el('span', { title: r.nested.map(n => `${n.path}, ${formatFull(n.snapshotTime)}`).join('\n') }, `, with ${plural(r.nested.length, 'nested location')}`) : null,
         el('button', { class: 'linklike', onclick: event => showInExplorer(r.target, event.currentTarget) }, 'Show in Explorer')),
       failed: () => el('div', { class: 'status c-removed' }, `Failed: ${r.error}`),
       cancelled: () => el('div', { class: 'status muted' }, 'Cancelled'),

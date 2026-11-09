@@ -857,8 +857,10 @@ def kopia_reason(error):
     return f'{lines[0]} (Kopia didn\'t say why)' if lines else type(error).__name__
 
 
-def start_restore(snapshot_id, path, is_folder):
-    """Restore a file or folder from a snapshot in the background, returning its progress record."""
+def start_restore(snapshot_id, path, is_folder, nested=()):
+    """Restore a file or folder from a snapshot in the background, returning its progress record. A folder can
+    have snapshots of locations nested inside it restored into it too, as the folder's own snapshot doesn't have
+    what's in them when its ignore rules leave them out."""
     snap = repository.snapshots[snapshot_id]
     if being_deleted(snapshot_id):
         raise BusyError('That snapshot is being deleted')
@@ -867,21 +869,36 @@ def start_restore(snapshot_id, path, is_folder):
     if choosing:
         raise BusyError(f'Finish choosing where to restore {choosing["name"]} first')
     source = Path(snap['source']['path'])
+    folder = source / path if path else source
+    inner = []
+    for nested_id in nested if is_folder else ():
+        inside = repository.snapshots[nested_id]
+        if being_deleted(nested_id):
+            raise BusyError(f'The snapshot of {inside["source"]["path"]} is being deleted')
+        where = Path(inside['source']['path'])
+        if folder not in where.parents:
+            raise ValueError(f'{where} isn\'t inside {folder}')
+        inner.append((inside, where.relative_to(folder)))
+    # Shallowest first, so ones nested deeper go into what those restored
+    inner.sort(key=lambda i: len(i[1].parts))
     job = {
         'id': next(job_ids), 'kind': 'restore', 'name': path.rsplit('/', 1)[-1] if path else source.name,
-        'from': str(source / path) if path else str(source), 'snapshotTime': snap['startTime'],
+        'from': str(folder), 'snapshotTime': snap['startTime'],
+        'nested': [{'path': i['source']['path'], 'snapshotTime': i['startTime']} for i, _ in inner], 'part': 0,
         'state': 'picking', 'target': None, 'files': 0, 'totalFiles': None, 'bytes': 0, 'totalBytes': None,
         'error': None, 'started': time.time(), 'finished': None,
     }
     jobs[job['id']] = job
-    threading.Thread(target=run_restore, args=(job, snap, path, is_folder), daemon=True).start()
+    threading.Thread(target=run_restore, args=(job, snap, path, is_folder, inner), daemon=True).start()
     return job
 
 
-def run_restore(job, snap, path, is_folder):
+def run_restore(job, snap, path, is_folder, nested=()):
     """Pick where a restore goes, then run it, straight from kopia so it keeps its modified times and
     attributes, following kopia's progress. It's restored under a temporary name next to where it's going,
-    so something half restored is never mistaken for the real thing, then moved into place once complete."""
+    so something half restored is never mistaken for the real thing, then moved into place once complete,
+    along with any nested locations merged into it, each where it is inside it, keeping the later of each file
+    both have."""
     working = None
     try:
         source = f'{snap["rootEntry"]["obj"]}/{path}' if path else snap['rootEntry']['obj']
@@ -895,21 +912,24 @@ def run_restore(job, snap, path, is_folder):
         if working.exists():
             working = target.with_name(f'{target.name}.kopia-restoring-{job["id"]}')
         job.update(state='restoring', target=str(target), working=str(working))
-        # Progress lines end in carriage returns, which text mode reads as line ends
-        started = time.time()
-        process = subprocess.Popen(['kopia', 'restore', '--progress', source, str(working)], stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
-        last = ''
-        for line in process.stdout:
-            if match := PROGRESS.search(line):
-                files, size, unit, total_files, total, total_unit = match.groups()
-                job.update(files=min(int(files), int(total_files)), totalFiles=int(total_files),
-                           bytes=min(size_of(size, unit), size_of(total, total_unit)), totalBytes=size_of(total, total_unit))
-            elif line.strip():
-                last = line.strip()
-        log_command(process.args[1:], started, process.wait() and (last or f'exit code {process.returncode}'))
-        if process.returncode:
-            raise RuntimeError(last or f'kopia restore failed with exit code {process.returncode}')
+        restore_into(job, source, working)
+        for part, (inside, rel) in enumerate(nested, 1):
+            job.update(part=part, files=0, totalFiles=None, bytes=0, totalBytes=None)
+            # Restored on its own first, then merged in, as both snapshots can have files in there: the
+            # outer one's backups may leave out only some, or none, and run more or less often
+            alone = working.with_name(f'{working.name}-nested-{job["id"]}-{part}')
+            job['alone'] = str(alone)
+            restore_into(job, inside['rootEntry']['obj'], alone)
+            into = working / rel
+            # Merging it in changes the modified times of the folders it's in, so they're put back after.
+            # Ones that weren't restored, as the snapshot left them out, are made.
+            above = [p for p in into.parents[:len(rel.parts)] if p.is_dir()]
+            times = [(p, (p.stat().st_atime, p.stat().st_mtime)) for p in above]
+            into.parent.mkdir(parents=True, exist_ok=True)
+            move_into_place(alone, into, newest=True)
+            job.pop('alone')
+            for folder, folder_times in times:
+                os.utime(folder, folder_times)
         # Complete, so it can't be half done any more: what's left is moving it into place
         job.update(state='finishing', files=job['totalFiles'] or job['files'], bytes=job['totalBytes'] or job['bytes'])
         finished, working = working, None
@@ -920,29 +940,53 @@ def run_restore(job, snap, path, is_folder):
         # Restored completely but not moved into place, it's kept, so say where it is
         kept = f' (it\'s fully restored as {job["working"]})' if job['state'] == 'finishing' else ''
         job.update(state='failed', error=kopia_reason(e) + kept)
-        # A partial restore is no use, so it isn't left behind
-        if working and working.exists():
-            shutil.rmtree(working) if working.is_dir() else working.unlink()
+        # A partial restore is no use, so it isn't left behind, nor a nested location's restored on its own
+        for partial in [working, job.get('alone') and Path(job['alone'])]:
+            if partial and partial.exists():
+                shutil.rmtree(partial) if partial.is_dir() else partial.unlink()
     finally:
         job['finished'] = time.time()
 
 
-def move_into_place(finished, target):
+def restore_into(job, source, into):
+    """Have kopia restore something to a path, following its progress in the restore's record"""
+    # Progress lines end in carriage returns, which text mode reads as line ends
+    started = time.time()
+    process = subprocess.Popen(['kopia', 'restore', '--progress', source, str(into)], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+    last = ''
+    for line in process.stdout:
+        if match := PROGRESS.search(line):
+            files, size, unit, total_files, total, total_unit = match.groups()
+            job.update(files=min(int(files), int(total_files)), totalFiles=int(total_files),
+                       bytes=min(size_of(size, unit), size_of(total, total_unit)), totalBytes=size_of(total, total_unit))
+        elif line.strip():
+            last = line.strip()
+    log_command(process.args[1:], started, process.wait() and (last or f'exit code {process.returncode}'))
+    if process.returncode:
+        raise RuntimeError(last or f'kopia restore failed with exit code {process.returncode}')
+
+
+def move_into_place(finished, target, newest=False):
     """Move a completed restore to where it was going. A file replaces one already there in one step. A folder
     restored over an existing one has its files moved in, replacing those with the same names, and its folders'
-    modified times put back, as moving things into a folder changes them."""
+    modified times put back, as moving things into a folder changes them. Newest, as for a nested location's
+    snapshot merged into the restore of the folder it's in, keeps whichever of each file and folder was modified
+    later, the one there already if they're the same."""
     if not target.exists() or target.is_file():
         os.replace(finished, target)
         return
+    later = lambda moving, there: not newest or not there.exists() or moving.stat().st_mtime > there.stat().st_mtime
     folders = []
     for folder, _, files in os.walk(finished):
         inside = target / Path(folder).relative_to(finished)
+        # Its times as restored, before moving its files out changes them, or the ones there already
+        times = (Path(folder) if later(Path(folder), inside) else inside).stat()
         inside.mkdir(exist_ok=True)
-        # Its times as restored, before moving its files out changes them
-        times = Path(folder).stat()
         folders.append((inside, (times.st_atime, times.st_mtime)))
         for name in files:
-            os.replace(Path(folder) / name, inside / name)
+            if later(Path(folder) / name, inside / name):
+                os.replace(Path(folder) / name, inside / name)
     # Deepest first, as setting a folder's times doesn't change its parent's
     for inside, times in reversed(folders):
         os.utime(inside, times)
@@ -2331,7 +2375,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
             if self.path == '/api/restore':
-                return self.send_json(start_restore(body['snapshot'], body['path'], bool(body.get('folder'))))
+                return self.send_json(start_restore(body['snapshot'], body['path'], bool(body.get('folder')), body.get('nested') or []))
             if self.path == '/api/backup':
                 return self.send_json(start_backup(body['source']))
             if self.path == '/api/backup/cancel':
