@@ -141,13 +141,10 @@ def parse_ignore_rule(line):
 class KopiaIgnore:
     """Matches paths against kopia's ignore rules: the policy's, plus the ignore files on disk."""
 
-    def __init__(self, source, policy, read=None):
-        """policy is a future for the source's policy JSON, so it can load in the background. The ignore files
-        are read from disk, or with read(dir_parts, name), which gives an ignore file's text or None if there
-        isn't one, such as to read them from a snapshot."""
+    def __init__(self, source, policy):
+        """policy is a future for the source's policy JSON, so it can load in the background."""
         self.source = source
         self._policy = policy
-        self._read = read
         self._rules = {}
         self._dirs = {}
 
@@ -161,10 +158,6 @@ class KopiaIgnore:
             lines = [] if dir_parts else [(line, None) for line in files.get('ignore') or []]
             for name in files.get('ignoreDotFiles') or []:
                 path = os.path.join(self.source, *dir_parts, name)
-                if self._read:
-                    text = self._read(dir_parts, name)
-                    lines += [(line, path) for line in (text or '').lstrip('﻿').splitlines()]
-                    continue
                 try:
                     with open(path, encoding='utf-8-sig') as f:
                         lines += [(line, path) for line in f.read().splitlines()]

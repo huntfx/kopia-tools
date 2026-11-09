@@ -82,13 +82,14 @@ export async function restoreItem(snap, rel, folder, button = null) {
     button.textContent = 'Checking nested locations…';
   }
   const query = new URLSearchParams([['snapshot', snap.id], ['path', rel], ...restorable.map(n => ['nested', n.snap.id])]);
-  // If it can't be checked, they're all offered
+  // What each has that this snapshot hasn't got: all its files, some, or none. If it can't be checked, they're
+  // all offered, as having some.
   const adds = await fetch(`/api/nested-additions?${query}`).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
   if (button) {
     button.disabled = false;
     button.textContent = label;
   }
-  const offered = restorable.filter(n => adds[n.snap.id] !== false);
+  const offered = restorable.filter(n => adds[n.snap.id] !== 'none').map(n => ({ ...n, adds: adds[n.snap.id] }));
   if (!offered.length) return startRestore(snap, rel, folder, []);
   confirmRestore(snap, rel, offered, nested.length);
 }
@@ -120,10 +121,24 @@ export function nestedRestores(snap, rel) {
 function confirmRestore(snap, rel, restorable, total) {
   const loc = storage.find(l => l.snapshots.includes(snap));
   const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
-  const others = total - restorable.length;
-  // A checkbox for each one, and one above for all of them, showing when only some are ticked, and saying how many
-  const checks = new Map(restorable.map(n => [n, el('input', { type: 'checkbox', checked: true })]));
-  const include = el('input', { type: 'checkbox', checked: true });
+  // How many of them this snapshot has none of, some of, all of, or couldn't be checked
+  const howMany = adds => restorable.filter(n => n.adds === adds).length;
+  const [leftOut, extra, others] = [howMany('all'), howMany('some'), total - restorable.length];
+  const unknown = restorable.length - leftOut - extra;
+  const ofThem = (n, one, many) => `${total === 1 ? 'It' : `${n} of them`} ${n === 1 ? one : many}`;
+  const summary = [
+    leftOut && `${ofThem(leftOut, 'isn\'t', 'aren\'t')} in this snapshot at all. This may mean ${leftOut === 1 ? 'it was' : 'they were'} left out on purpose, so ${leftOut === 1 ? 'its own policy' : 'their own policies'} can set different rules.`,
+    extra && `${ofThem(extra, 'has', 'have')} extra files, but ${extra === 1 ? 'wasn\'t' : 'weren\'t'} left out altogether.`,
+    unknown && `${ofThem(unknown, 'couldn\'t', 'couldn\'t')} be checked.`,
+    others && `${ofThem(others, 'has', 'have')} nothing to add, so ${others === 1 ? 'isn\'t' : 'aren\'t'} shown.`,
+  ].filter(Boolean);
+  // A checkbox for each one, and one above for all of them, showing when only some are ticked, and saying how many.
+  // Ones this snapshot has none of are ticked, as they're left out of it to be backed up on their own; ones it has
+  // some of aren't, as what it hasn't got may only be files deleted before it or made since.
+  const checks = new Map(restorable.map(n => [n, el('input', { type: 'checkbox', checked: n.adds === 'all' })]));
+  // Said under each, unless it couldn't be checked
+  const added = { all: 'not in this snapshot at all', some: 'has extra files' };
+  const include = el('input', { type: 'checkbox' });
   const includeText = el('span', {});
   const picked = () => restorable.filter(n => checks.get(n).checked);
   const update = () => {
@@ -151,22 +166,21 @@ function confirmRestore(snap, rel, restorable, total) {
   const dialog = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
     el('h2', { id: 'confirm-title' }, `Restore ${name}?`),
     el('p', { class: 'what' }, el('b', {}, folder), `, ${formatFull(snap.time)} (${shortId(snap.id)})`),
-    others
-      ? el('p', {}, `${plural(total, 'location')} inside it are backed up on their own. `,
-        restorable.length === 1 ? 'This one has files this snapshot leaves out; ' : `These ${restorable.length} have files this snapshot leaves out; `,
-        `the other ${others === 1 ? 'one has' : `${others} have`} nothing to add.`)
-      : el('p', {}, `${plural(total, 'location')} inside it ${total === 1 ? 'is' : 'are'} backed up on ${total === 1 ? 'its' : 'their'} own, with files this snapshot leaves out.`),
+    el('p', {}, `${plural(total, 'nested location')} ${total === 1 ? 'was' : 'were'} also found inside it:`),
+    el('ul', { class: 'restore-summary' }, summary.map(line => el('li', {}, line))),
+    el('p', {}, `Including ${restorable.length === 1 ? 'the nested location' : 'the nested locations'} below is safe, and will only add extra files to the restore. It will not overwrite or delete any files.`),
     el('label', {
       class: 'field',
-      title: 'Restores the files this snapshot\'s ignore rules leave out from each one, from its last snapshot before this location\'s next one. Everything this snapshot has comes from it.',
+      title: 'Restores the files this snapshot hasn\'t got from each one, from its last snapshot before this location\'s next one. Everything this snapshot has comes from it. Ones left out of it altogether are ticked; ones it has some of the files from aren\'t, as the others may only be files deleted before it or made since.',
     }, include, includeText),
-    // Each one's path on a line of its own, as they can be long, with its snapshot under it
+    // Each one's path on a line of its own, as they can be long, with its snapshot under it, and how much of it this
+    // snapshot has
     el('ul', { class: 'nested-restores' }, restorable.map(n => el('li', {},
       el('label', { title: n.loc.path },
         checks.get(n),
         el('span', {},
           el('b', {}, `${n.rel}\\`),
-          el('div', { class: 'muted' }, `${formatFull(n.snap.time)} (${shortId(n.snap.id)})`)))))),
+          el('div', { class: 'muted' }, `${formatFull(n.snap.time)} (${shortId(n.snap.id)})`, added[n.adds] ? ` · ${added[n.adds]}` : '')))))),
     el('p', {}, 'Then pick a folder to put it in.'),
     el('div', { class: 'actions' }, cancel, go));
   dialog.addEventListener('close', () => dialog.remove());

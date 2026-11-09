@@ -860,7 +860,7 @@ def kopia_reason(error):
 def start_restore(snapshot_id, path, is_folder, nested=()):
     """Restore a file or folder from a snapshot in the background, returning its progress record. A folder can
     have snapshots of locations nested inside it restored into it too, for the files in them that the folder's
-    own snapshot leaves out, by its ignore rules, as when they're backed up on their own instead."""
+    own snapshot hasn't got, as when they're left out of it to be backed up on their own instead."""
     snap = repository.snapshots[snapshot_id]
     if being_deleted(snapshot_id):
         raise BusyError('That snapshot is being deleted')
@@ -912,15 +912,10 @@ def run_restore(job, snap, path, is_folder, nested=()):
             working = target.with_name(f'{target.name}.kopia-restoring-{job["id"]}')
         job.update(state='restoring', target=str(target), working=str(working))
         restore_into(job, source, working)
-        # What the outer snapshot leaves out, by its ignore rules as it has them, so they're there even if the ones
-        # on disk were lost, by paths inside its location
-        if nested:
-            ignore = snapshot_ignore(snap)
-            here = tuple(path.split('/')) if path else ()
         for part, (inside, rel) in enumerate(nested, 1):
             job.update(part=part, files=0, totalFiles=None, bytes=0, totalBytes=None)
-            # Restored on its own first, then only what the outer snapshot leaves out is moved in, as both can
-            # have files in there: anything the outer one has comes from it
+            # Restored on its own first, then only what the outer snapshot hasn't got is moved in, as both can have
+            # files in there: anything the outer one has comes from it
             alone = working.with_name(f'{working.name}-nested-{job["id"]}-{part}')
             job['alone'] = str(alone)
             restore_into(job, inside['rootEntry']['obj'], alone)
@@ -928,7 +923,7 @@ def run_restore(job, snap, path, is_folder, nested=()):
             # Moving things in changes the modified times of the folders it's in, so they're put back after
             above = [p for p in into.parents[:len(rel.parts)] if p.is_dir()]
             times = [(p, (p.stat().st_atime, p.stat().st_mtime)) for p in above]
-            move_left_out(alone, into, lambda p, is_dir: ignore.ignored([*here, *rel.parts, *p.parts], is_dir))
+            move_missing(alone, into)
             job.pop('alone')
             for folder, folder_times in times:
                 os.utime(folder, folder_times)
@@ -950,25 +945,6 @@ def run_restore(job, snap, path, is_folder, nested=()):
         job['finished'] = time.time()
 
 
-def snapshot_ignore(snap):
-    """A snapshot's ignore rules: its location's policy, and the ignore files in each folder as the snapshot has
-    them, so they're the ones that decided what it left out, and are there even if the files on disk are gone,
-    as after losing a drive. One the snapshot hasn't got, such as one its rules leave out, is read from disk if
-    it's there."""
-    source = snap['source']['path']
-    policy = pool.submit(lambda: json.loads(kopia('policy', 'show', source, '--json')))
-
-    def read(dir_parts, name):
-        obj = folder_object(snap['rootEntry']['obj'], dir_parts)
-        if obj is not None and any(e['n'] == name and e['t'] == 'f' for e in listing(obj)):
-            return kopia('show', f'{obj}/{name}')
-        try:
-            return Path(source, *dir_parts, name).read_text(encoding='utf-8-sig')
-        except OSError:
-            return None
-    return KopiaIgnore(source, policy, read)
-
-
 def folder_object(root, parts):
     """kopia's ID for a folder inside another, by the names of the folders on the way to it, or None if it
     isn't there"""
@@ -981,38 +957,38 @@ def folder_object(root, parts):
 
 
 def nested_additions(snapshot_id, path, nested_ids):
-    """Which snapshots of locations nested inside a folder being restored have anything to add to it, by ID:
-    files the folder's snapshot leaves out, by its ignore rules, as only those are worth offering. Any that
-    can't be checked are counted as having something, so they're still offered."""
+    """What snapshots of locations nested inside a folder being restored have to add to it, by ID: 'all' when the
+    folder's snapshot has none of the location's files, as when it's left out altogether, 'some' when it has some
+    but the nested snapshot has others too, and 'none' when the nested snapshot has nothing it hasn't got. Any
+    that can't be checked have 'some', so they're still offered."""
     snap = repository.snapshots[snapshot_id]
     here = path.split('/') if path else []
     folder = Path(snap['source']['path'], *here)
-    ignore = snapshot_ignore(snap)
 
     def adds(nested_id):
         try:
             inside = repository.snapshots[nested_id]
+            if not inside['rootEntry'].get('summ', {}).get('files', 1):
+                return 'none'
             parts = [*here, *Path(inside['source']['path']).relative_to(folder).parts]
-            there = folder_object(snap['rootEntry']['obj'], parts)
-            if there is None:
-                # Left out altogether, or not there for some other reason, which can't be told without going
-                # through all of it, so it's offered
-                return bool(inside['rootEntry'].get('summ', {}).get('files', 1))
-            if there == inside['rootEntry']['obj']:
-                return False
-            # Files only the nested snapshot has, of which any the outer one leaves out are worth having
-            return any((m := DIFF_FILE.match(line)) and m[1] == ADDED and ignore.ignored([*parts, *m[2].split('/')], False)
-                       for line in kopia('diff', there, inside['rootEntry']['obj']).splitlines())
+            above = folder_object(snap['rootEntry']['obj'], parts[:-1])
+            there = above and next((e for e in listing(above) if e['n'] == parts[-1] and e['t'] == 'd'), None)
+            if not there or not there['f']:
+                return 'all'
+            if there['o'] == inside['rootEntry']['obj']:
+                return 'none'
+            output = kopia('diff', there['o'], inside['rootEntry']['obj']).splitlines()
+            return 'some' if any((m := DIFF_FILE.match(line)) and m[1] == ADDED for line in output) else 'none'
         except (KeyError, ValueError, RuntimeError) as e:
             print(f'Couldn\'t check {nested_id} for anything to add: {kopia_reason(e)}', flush=True)
-            return True
+            return 'some'
     return dict(zip(nested_ids, pool.map(adds, nested_ids)))
 
 
-def move_left_out(finished, target, left_out):
-    """Move what a nested location's restore has that the outer one's snapshot left out, by left_out(path inside,
-    is_dir), into the outer one's restore, where it goes. Anything already there stays as it is, folders' modified
-    times too; folders it makes keep their times as restored."""
+def move_missing(finished, target):
+    """Move what a nested location's restore has that the outer one's hasn't got into it, where it goes, folders
+    and all. Anything already there stays as it is, folders' modified times too; folders it makes keep their times
+    as restored."""
     times = {}
 
     def make(rel):
@@ -1026,12 +1002,9 @@ def move_left_out(finished, target, left_out):
 
     for folder, _, files in os.walk(finished):
         rel = Path(folder).relative_to(finished)
-        # Folders it leaves out are made even if they're empty, as they're part of what's restored
-        if rel.parts and not (target / rel).exists() and left_out(rel, True):
-            make(rel)
+        make(rel)
         for name in files:
-            if not (target / rel / name).exists() and left_out(rel / name, False):
-                make(rel)
+            if not (target / rel / name).exists():
                 os.replace(Path(folder) / name, target / rel / name)
     # Deepest first, as setting a folder's times doesn't change its parent's
     for folder, folder_times in sorted(times.items(), key=lambda t: -len(t[0].parts)):
