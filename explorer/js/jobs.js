@@ -104,16 +104,35 @@ function confirmRestore(snap, rel, nested) {
   const loc = storage.find(l => l.snapshots.includes(snap));
   const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
   const restorable = nested.filter(n => n.snap);
+  // A checkbox for each one with a snapshot to restore, and one above for all of them, showing when only some are
+  // ticked, and saying how many
+  const checks = new Map(restorable.map(n => [n, el('input', { type: 'checkbox', checked: true })]));
   const include = el('input', { type: 'checkbox', checked: restorable.length > 0, disabled: !restorable.length });
-  // Only with them, as it's files only one of the two snapshots has that can be deleted since
-  const keepDeleted = el('input', { type: 'checkbox', disabled: !include.checked });
-  include.addEventListener('change', () => { keepDeleted.disabled = !include.checked; });
+  const includeText = el('span', {});
+  // Only with some, as it's files only one of the two snapshots has that can be deleted since
+  const keepDeleted = el('input', { type: 'checkbox' });
+  const picked = () => restorable.filter(n => checks.get(n).checked);
+  const update = () => {
+    const count = picked().length;
+    include.checked = count > 0;
+    include.indeterminate = count > 0 && count < restorable.length;
+    includeText.textContent = count && count < restorable.length
+      ? `Include ${count} of ${plural(restorable.length, 'nested location')}` : `Include ${plural(restorable.length, 'nested location')}`;
+    keepDeleted.disabled = !count;
+  };
+  include.addEventListener('change', () => {
+    for (const check of checks.values()) check.checked = include.checked;
+    update();
+  });
+  for (const check of checks.values()) check.addEventListener('change', update);
+  update();
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
   const go = el('button', {
     class: 'btn primary',
     onclick: () => {
       dialog.close();
-      startRestore(snap, rel, true, include.checked ? restorable : [], include.checked && keepDeleted.checked);
+      const chosen = picked();
+      startRestore(snap, rel, true, chosen, chosen.length > 0 && keepDeleted.checked);
     },
   }, 'Restore…');
   const name = `${folder.replace(/\\$/, '').split('\\').pop()}\\`;
@@ -124,11 +143,14 @@ function confirmRestore(snap, rel, nested) {
     el('label', {
       class: 'field',
       title: 'Restores each one into its place inside the folder, from its last snapshot before this location\'s next one. Where both snapshots have a file, the one modified later is kept. Files only the older snapshot has are kept too, unless the other location\'s snapshots show them deleted since.',
-    }, include, `Include ${plural(restorable.length, 'nested location')}`),
+    }, include, includeText),
     // Each one's path on a line of its own, as they can be long, with its snapshot under it
     el('ul', { class: 'nested-restores' }, nested.map(n => el('li', {},
-      el('b', {}, `${n.rel}\\`),
-      el('div', { class: 'muted' }, n.snap ? `${formatFull(n.snap.time)} (${shortId(n.snap.id)})` : 'No finished snapshot to restore')))),
+      el('label', { title: n.loc.path },
+        checks.get(n) || el('input', { type: 'checkbox', disabled: true }),
+        el('span', {},
+          el('b', {}, `${n.rel}\\`),
+          el('div', { class: 'muted' }, n.snap ? `${formatFull(n.snap.time)} (${shortId(n.snap.id)})` : 'No finished snapshot to restore')))))),
     el('label', {
       class: 'field',
       title: 'Restores files that only the older snapshot has, even where the other location\'s snapshots show them deleted since, such as to get absolutely everything back after a disaster',
