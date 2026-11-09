@@ -138,10 +138,10 @@ class NestedRestoreTest(Folders):
         outer = self.snapshot(self.outer)
         self.assertEqual(self.restore(outer, []), {'.kopiaignore': '/d\n', 'a.txt': 'a'})
 
-    def test_outer_copies_used(self):
-        """The outer location backs up d apart from its .iso files, and d is backed up more often. Everything the
-        outer snapshot has comes from it, even where d's snapshot has a newer copy, or has since lost a file; only
-        the .iso it hasn't got comes from d."""
+    def test_newest_copies_used(self):
+        """The outer location backs up d apart from its .iso files, and d is backed up more often. The .iso the
+        outer snapshot hasn't got comes from d, and so does d's newer copy of a file; a file d has since lost is
+        still restored from the outer snapshot."""
         write(self.outer / '.kopiaignore', '/d/*.iso\n')
         write(self.nested / 'old.txt', 'deleted after the outer snapshot')
         write(self.nested / 'big.iso', 'only d has this')
@@ -152,11 +152,22 @@ class NestedRestoreTest(Folders):
         nested = self.snapshot(self.nested)
         restored = self.restore(outer, [nested])
         self.assertEqual(restored, {'.kopiaignore': '/d/*.iso\n', 'd/old.txt': 'deleted after the outer snapshot',
-                                    'd/e.txt': 'as it was', 'd/big.iso': 'only d has this'})
+                                    'd/e.txt': 'changed since', 'd/big.iso': 'only d has this'})
+
+    def test_older_copies_not_used(self):
+        """Where the outer snapshot has a newer copy of a file than d's older snapshot, the outer one's is kept"""
+        write(self.outer / '.kopiaignore', '/d/*.iso\n')
+        write(self.nested / 'e.txt', 'as it was')
+        write(self.nested / 'big.iso', 'only d has this')
+        nested = self.snapshot(self.nested)
+        write(self.nested / 'e.txt', 'changed since')
+        outer = self.snapshot(self.outer)
+        self.assertEqual(self.restore(outer, [nested]), {'.kopiaignore': '/d/*.iso\n', 'd/e.txt': 'changed since',
+                                                         'd/big.iso': 'only d has this'})
 
     def test_file_type_left_out_everywhere(self):
         """The outer location leaves out every .abc file, anywhere in it, and d backs them up: those come from d,
-        wherever they are in it, with everything else from the outer snapshot, so d has only some files to add"""
+        wherever they are in it, along with its newer copy of a file, so d has only some files to add"""
         write(self.outer / '.kopiaignore', '*.abc\n')
         write(self.outer / 'top.abc', 'left out, and not in d')
         write(self.nested / 'e.txt', 'as it was')
@@ -168,7 +179,7 @@ class NestedRestoreTest(Folders):
         nested = self.snapshot(self.nested)
         self.known()
         self.assertEqual(ke.nested_additions(outer['id'], '', [nested['id']])[nested['id']], 'some')
-        self.assertEqual(self.restore(outer, [nested]), {'.kopiaignore': '*.abc\n', 'd/e.txt': 'as it was', 'd/x.abc': 'x',
+        self.assertEqual(self.restore(outer, [nested]), {'.kopiaignore': '*.abc\n', 'd/e.txt': 'changed since', 'd/x.abc': 'x',
                                                          'd/sub/y.abc': 'y', 'd/sub/f.txt': 'f'})
 
     def test_file_deleted_before_outer_snapshot(self):
@@ -246,18 +257,26 @@ class NestedAdditionsTest(Folders):
         self.assertEqual(self.adds(self.snapshot(self.outer), nested), 'none')
 
     def test_newer_copy(self):
-        """A newer copy of a file the outer snapshot has isn't anything to add, as its copy is used"""
+        """A newer copy of a file the outer snapshot has is something to add, as the newest copy is used"""
         write(self.nested / 'e.txt', 'as it was')
         outer = self.snapshot(self.outer)
         write(self.nested / 'e.txt', 'changed since')
-        self.assertEqual(self.adds(outer, self.snapshot(self.nested)), 'none')
+        self.assertEqual(self.adds(outer, self.snapshot(self.nested)), 'some')
+
+    def test_older_copy(self):
+        """An older copy of a file the outer snapshot has isn't anything to add, as the outer one's is used"""
+        write(self.nested / 'e.txt', 'as it was')
+        nested = self.snapshot(self.nested)
+        write(self.nested / 'e.txt', 'changed since')
+        self.assertEqual(self.adds(self.snapshot(self.outer), nested), 'none')
 
 
-class MoveMissingTest(unittest.TestCase):
-    """Moving what the outer location's restore hasn't got from a nested location's into it, on folders made here
-    rather than restored, as kopia gives the folders inside a snapshot modified times of its own"""
+class MoveNewerTest(unittest.TestCase):
+    """Moving what the outer location's restore hasn't got, or has older copies of, from a nested location's into
+    it, on folders made here rather than restored, as kopia gives the folders inside a snapshot modified times of
+    its own"""
 
-    def test_move_missing(self):
+    def test_move_newer(self):
         folder = Path(tempfile.mkdtemp(dir=work))
         outer, nested = folder / 'outer', folder / 'nested'
         base = 1_700_000_000
@@ -276,13 +295,18 @@ class MoveMissingTest(unittest.TestCase):
         make(nested / 'sub' / 'f.txt', 'nested only, in a folder only it has')
         make(nested / 'empty' / '.keep', 'x')
         (nested / 'empty' / '.keep').unlink()
+        make(outer / 'old.txt', 'outer, newer')
+        os.utime(outer / 'old.txt', (base + 99, base + 99))
+        make(nested / 'old.txt', 'nested')
         for path, mtime in [(outer / 'shared', base + 5), (nested / 'shared', base + 50), (nested / 'sub', base + 7),
                             (nested / 'empty', base + 8), (nested, base + 1), (outer, base + 10)]:
             os.utime(path, (mtime, mtime))
 
-        ke.move_missing(nested, outer)
+        ke.move_newer(nested, outer)
 
-        self.assertEqual(files_in(outer), {'e.txt': 'outer', 'shared/g.txt': 'outer', 'big.iso': 'nested only',
+        # The newer copy wins either way, and the outer one's when they're as old as each other
+        self.assertEqual(files_in(outer), {'e.txt': 'nested, newer', 'old.txt': 'outer, newer', 'shared/g.txt': 'outer',
+                                           'big.iso': 'nested only',
                                            'shared/h.txt': 'nested only, in a folder both have',
                                            'sub/f.txt': 'nested only, in a folder only it has'})
         # Folders the outer restore had keep their times, and ones made keep the nested restore's, empty ones too

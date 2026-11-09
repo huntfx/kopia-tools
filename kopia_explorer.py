@@ -44,7 +44,7 @@ from tkinter import filedialog, messagebox
 from urllib.parse import parse_qs, urlparse
 
 from kopia_docs import kopia_doc
-from snapshot_diff import (ADDED, DIFF_FILE, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, glob_to_regex, kopia, list_snapshots,
+from snapshot_diff import (ADDED, DIFF_CHANGED, DIFF_FILE, MODIFIED, REMOVED, KopiaIgnore, diff_snapshots, glob_to_regex, kopia, list_snapshots,
                            log_command, parse_ignore_rule)
 
 PAGE_DIR = Path(__file__).parent / 'explorer'
@@ -860,7 +860,8 @@ def kopia_reason(error):
 def start_restore(snapshot_id, path, is_folder, nested=()):
     """Restore a file or folder from a snapshot in the background, returning its progress record. A folder can
     have snapshots of locations nested inside it restored into it too, for the files in them that the folder's
-    own snapshot hasn't got, as when they're left out of it to be backed up on their own instead."""
+    own snapshot hasn't got, as when they're left out of it to be backed up on their own instead, and their copies
+    of files modified since."""
     snap = repository.snapshots[snapshot_id]
     if being_deleted(snapshot_id):
         raise BusyError('That snapshot is being deleted')
@@ -897,7 +898,8 @@ def run_restore(job, snap, path, is_folder, nested=()):
     """Pick where a restore goes, then run it, straight from kopia so it keeps its modified times and
     attributes, following kopia's progress. It's restored under a temporary name next to where it's going,
     so something half restored is never mistaken for the real thing, then moved into place once complete,
-    along with the files from any nested locations that its snapshot leaves out, each where it is inside it."""
+    along with the files from any nested locations that its snapshot leaves out or has older copies of, each where
+    it is inside it."""
     working = None
     try:
         source = f'{snap["rootEntry"]["obj"]}/{path}' if path else snap['rootEntry']['obj']
@@ -923,7 +925,7 @@ def run_restore(job, snap, path, is_folder, nested=()):
             # Moving things in changes the modified times of the folders it's in, so they're put back after
             above = [p for p in into.parents[:len(rel.parts)] if p.is_dir()]
             times = [(p, (p.stat().st_atime, p.stat().st_mtime)) for p in above]
-            move_missing(alone, into)
+            move_newer(alone, into)
             job.pop('alone')
             for folder, folder_times in times:
                 os.utime(folder, folder_times)
@@ -956,11 +958,34 @@ def folder_object(root, parts):
     return obj
 
 
+# kopia diff's line for something whose modified time differs, with the old time then the new one, in its own form,
+# like 2026-11-09 10:45:54.4464791 +0000 GMT
+WHEN = r'(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)(?:\.(\d+))? ([+-]\d{4}) \S+'
+TIMES_DIFFER = re.compile(rf'^\./(.*) modification times differ: {WHEN} {WHEN}$')
+
+
+def diff_time(seconds, fraction, zone):
+    """A time in kopia diff's form as a timestamp, with all of its fraction of a second"""
+    return datetime.strptime(f'{seconds} {zone}', '%Y-%m-%d %H:%M:%S %z').timestamp() + float(f'0.{fraction or 0}')
+
+
+def diff_adds(output):
+    """Whether a diff from a folder in one snapshot to the same folder in a nested location's has anything to add to
+    the first: a file it hasn't got, or a newer copy of one it has"""
+    changed = {m[1] for line in output if (m := DIFF_CHANGED.match(line))}
+    for line in output:
+        if (m := DIFF_FILE.match(line)) and m[1] == ADDED:
+            return True
+        if (m := TIMES_DIFFER.match(line)) and m[1] in changed and diff_time(*m.group(5, 6, 7)) > diff_time(*m.group(2, 3, 4)):
+            return True
+    return False
+
+
 def nested_additions(snapshot_id, path, nested_ids):
     """What snapshots of locations nested inside a folder being restored have to add to it, by ID: 'all' when the
     folder's snapshot has none of the location's files, as when it's left out altogether, 'some' when it has some
-    but the nested snapshot has others too, and 'none' when the nested snapshot has nothing it hasn't got. Any
-    that can't be checked have 'some', so they're still offered."""
+    but the nested snapshot has others too, or newer copies, and 'none' when the nested snapshot has nothing it
+    hasn't got, nor anything newer. Any that can't be checked have 'some', so they're still offered."""
     snap = repository.snapshots[snapshot_id]
     here = path.split('/') if path else []
     folder = Path(snap['source']['path'], *here)
@@ -977,18 +1002,17 @@ def nested_additions(snapshot_id, path, nested_ids):
                 return 'all'
             if there['o'] == inside['rootEntry']['obj']:
                 return 'none'
-            output = kopia('diff', there['o'], inside['rootEntry']['obj']).splitlines()
-            return 'some' if any((m := DIFF_FILE.match(line)) and m[1] == ADDED for line in output) else 'none'
+            return 'some' if diff_adds(kopia('diff', there['o'], inside['rootEntry']['obj']).splitlines()) else 'none'
         except (KeyError, ValueError, RuntimeError) as e:
             print(f'Couldn\'t check {nested_id} for anything to add: {kopia_reason(e)}', flush=True)
             return 'some'
     return dict(zip(nested_ids, pool.map(adds, nested_ids)))
 
 
-def move_missing(finished, target):
+def move_newer(finished, target):
     """Move what a nested location's restore has that the outer one's hasn't got into it, where it goes, folders
-    and all. Anything already there stays as it is, folders' modified times too; folders it makes keep their times
-    as restored."""
+    and all, and its copies of files modified more recently than the outer one's. Anything else already there
+    stays as it is, folders' modified times too; folders it makes keep their times as restored."""
     times = {}
 
     def make(rel):
@@ -1004,8 +1028,9 @@ def move_missing(finished, target):
         rel = Path(folder).relative_to(finished)
         make(rel)
         for name in files:
-            if not (target / rel / name).exists():
-                os.replace(Path(folder) / name, target / rel / name)
+            there = target / rel / name
+            if not there.exists() or (there.is_file() and (Path(folder) / name).stat().st_mtime > there.stat().st_mtime):
+                os.replace(Path(folder) / name, there)
     # Deepest first, as setting a folder's times doesn't change its parent's
     for folder, folder_times in sorted(times.items(), key=lambda t: -len(t[0].parts)):
         os.utime(folder, folder_times)

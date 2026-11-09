@@ -12,7 +12,7 @@ import { render } from './render.js';
 import { schedules } from './schedules.js';
 import { pageHidden, whenShown } from './shown.js';
 import { KEEP_KINDS } from './snapshots.js';
-import { navigate, writeHash } from './state.js';
+import { navigate, state, writeHash } from './state.js';
 import { applyJobs, followRenamed, latest, refreshStorage, snapshotsChanged, storage, unfinished } from './storage.js';
 
 // Restores and backups run on the server, and the panel at the bottom follows them. A restore asks where in
@@ -73,15 +73,17 @@ export async function restoreItem(snap, rel, folder, button = null) {
     jobsShown = true;
     return renderJobs();
   }
-  const nested = folder ? nestedRestores(snap, rel) : [];
-  const restorable = nested.filter(n => n.snap);
-  if (!restorable.length) return startRestore(snap, rel, folder, []);
+  // Each one as of the time the files are shown at, now unless one's picked at the top, and as of this snapshot
+  const nested = folder ? nestedRestores(snap, rel, state.asOf ? Date.parse(state.asOf) : Infinity) : [];
+  if (!nested.some(n => n.snap)) return startRestore(snap, rel, folder, []);
+  const times = { shown: nested, snapshot: nestedRestores(snap, rel, Date.parse(snap.time)) };
   const label = button?.textContent;
   if (button) {
     button.disabled = true;
     button.textContent = 'Checking nested locations…';
   }
-  const query = new URLSearchParams([['snapshot', snap.id], ['path', rel], ...restorable.map(n => ['nested', n.snap.id])]);
+  const ids = new Set(Object.values(times).flat().filter(n => n.snap).map(n => n.snap.id));
+  const query = new URLSearchParams([['snapshot', snap.id], ['path', rel], ...[...ids].map(id => ['nested', id])]);
   // What each has that this snapshot hasn't got: all its files, some, or none. If it can't be checked, they're
   // all offered, as having some.
   const adds = await fetch(`/api/nested-additions?${query}`).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
@@ -89,9 +91,19 @@ export async function restoreItem(snap, rel, folder, button = null) {
     button.disabled = false;
     button.textContent = label;
   }
-  const offered = restorable.filter(n => adds[n.snap.id] !== 'none').map(n => ({ ...n, adds: adds[n.snap.id] }));
-  if (!offered.length) return startRestore(snap, rel, folder, []);
-  confirmRestore(snap, rel, offered, nested.length);
+  // Ones with some to add are told apart by their last snapshot when this one was taken: with nothing to add, what
+  // the later one has is all created or modified since; with some, this snapshot likely ignores some of it. With
+  // none that old, it can't be told.
+  const then = new Map(times.snapshot.map(n => [n.loc.path, n.snap]));
+  const kind = n => {
+    const before = then.get(n.loc.path);
+    if (adds[n.snap.id] !== 'some' || !before || Date.parse(before.time) > Date.parse(snap.time)) return adds[n.snap.id];
+    return adds[before.id] === 'none' ? 'newer' : 'ignored';
+  };
+  const offers = Object.fromEntries(Object.entries(times).map(([time, list]) =>
+    [time, list.filter(n => n.snap && adds[n.snap.id] !== 'none').map(n => ({ ...n, adds: kind(n) }))]));
+  if (!offers.shown.length && !offers.snapshot.length) return startRestore(snap, rel, folder, []);
+  confirmRestore(snap, rel, offers, nested.length);
 }
 
 function startRestore(snap, rel, folder, nested) {
@@ -100,60 +112,103 @@ function startRestore(snap, rel, folder, nested) {
     { kind: 'restore', name: rel.split('/').pop() || 'this location', snapshotTime: snap.time });
 }
 
-// Locations nested inside a folder being restored, each with its last snapshot before the location's next one
-// after the folder's, as they're backed up on their own schedules: what it was like while that snapshot was the
-// latest, so the latest goes with the latest. With none that old, its oldest. { loc, rel, snap }, with snap null
-// if it has none finished.
-export function nestedRestores(snap, rel) {
+// Locations nested inside a folder being restored, each with its last snapshot at or before a time (in ms, Infinity
+// for its latest), as they're backed up on their own schedules. With none that old, its oldest. { loc, rel, snap },
+// with snap null if it has none finished.
+export function nestedRestores(snap, rel, until = Infinity) {
   const loc = storage.find(l => l.snapshots.includes(snap));
   const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
   const prefix = `${folder.replace(/\\$/, '')}\\`.toLowerCase();
-  const next = loc.snapshots.find(s => !s.incomplete && new Date(s.time) > new Date(snap.time));
   return storage.filter(l => l.path.toLowerCase().startsWith(prefix)).map(inside => {
     const finished = inside.snapshots.filter(s => !s.incomplete && !beingDeleted(s));
-    const until = finished.filter(s => !next || new Date(s.time) < new Date(next.time)).at(-1) || finished[0] || null;
-    return { loc: inside, rel: inside.path.slice(prefix.length).replace(/\\$/, ''), snap: until };
+    const then = finished.filter(s => Date.parse(s.time) <= until).at(-1) || finished[0] || null;
+    return { loc: inside, rel: inside.path.slice(prefix.length).replace(/\\$/, ''), snap: then };
   });
 }
 
-// Asking whether to restore the locations nested inside a folder too, listing which snapshot of each goes with it:
-// the ones with anything to add, of the total nested inside it, saying how many others have nothing to add
-function confirmRestore(snap, rel, restorable, total) {
+// Asking whether to restore the locations nested inside a folder too, listing which snapshot of each goes with it,
+// as of the time the files are shown at or as of this snapshot, picked at the top if they'd differ: the ones with
+// anything to add, of the total nested inside it, saying how many others have nothing to add
+function confirmRestore(snap, rel, offers, total) {
   const loc = storage.find(l => l.snapshots.includes(snap));
   const folder = rel ? `${loc.path.replace(/\\$/, '')}\\${rel.replaceAll('/', '\\')}` : loc.path;
-  // How many of them this snapshot has none of, some of, all of, or couldn't be checked
-  const howMany = adds => restorable.filter(n => n.adds === adds).length;
-  const [leftOut, extra, others] = [howMany('all'), howMany('some'), total - restorable.length];
-  const unknown = restorable.length - leftOut - extra;
-  const ofThem = (n, one, many) => `${total === 1 ? 'It' : `${n} of them`} ${n === 1 ? one : many}`;
-  const summary = [
-    leftOut && `${ofThem(leftOut, 'isn\'t', 'aren\'t')} in this snapshot at all. This may mean ${leftOut === 1 ? 'it was' : 'they were'} left out on purpose, so ${leftOut === 1 ? 'its own policy' : 'their own policies'} can set different rules.`,
-    extra && `${ofThem(extra, 'has', 'have')} extra files, but ${extra === 1 ? 'wasn\'t' : 'weren\'t'} left out altogether.`,
-    unknown && `${ofThem(unknown, 'couldn\'t', 'couldn\'t')} be checked.`,
-    others && `${ofThem(others, 'has', 'have')} nothing to add, so ${others === 1 ? 'isn\'t' : 'aren\'t'} shown.`,
-  ].filter(Boolean);
-  // A checkbox for each one, and one above for all of them, showing when only some are ticked, and saying how many.
-  // Ones this snapshot has none of are ticked, as they're left out of it to be backed up on their own; ones it has
-  // some of aren't, as what it hasn't got may only be files deleted before it or made since.
-  const checks = new Map(restorable.map(n => [n, el('input', { type: 'checkbox', checked: n.adds === 'all' })]));
+  let time = offers.shown.length ? 'shown' : 'snapshot';
+  // Ticked or unticked by hand, kept while switching between times. Otherwise ones this snapshot has none of are
+  // ticked, as they're left out of it to be backed up on their own; ones it has some of aren't, as what it hasn't
+  // got may only be files deleted before it or made since.
+  const chosen = new Map();
+  let checks = new Map();
   // Said under each, unless it couldn't be checked
-  const added = { all: 'not in this snapshot at all', some: 'has extra files' };
+  const added = { all: 'not in this snapshot at all', newer: 'only files changed since', ignored: 'files likely ignored', some: 'has extra files' };
+  // A checkbox for each one, and one above for all of them, showing when only some are ticked, and saying how many
   const include = el('input', { type: 'checkbox' });
   const includeText = el('span', {});
-  const picked = () => restorable.filter(n => checks.get(n).checked);
+  const picked = () => offers[time].filter(n => checks.get(n).checked);
   const update = () => {
+    const restorable = offers[time];
     const count = picked().length;
     include.checked = count > 0;
     include.indeterminate = count > 0 && count < restorable.length;
+    include.disabled = !restorable.length;
     includeText.textContent = count && count < restorable.length
       ? `Include ${count} of ${plural(restorable.length, 'nested location')}` : `Include ${plural(restorable.length, 'nested location')}`;
   };
   include.addEventListener('change', () => {
-    for (const check of checks.values()) check.checked = include.checked;
+    for (const [n, check] of checks) {
+      check.checked = include.checked;
+      chosen.set(n.loc.path, include.checked);
+    }
     update();
   });
-  for (const check of checks.values()) check.addEventListener('change', update);
-  update();
+  const summary = el('ul', { class: 'restore-summary' });
+  const safe = el('p', {});
+  const list = el('ul', { class: 'nested-restores' });
+  // Which of each one's snapshots, if as of the time the files are shown at and as of this snapshot differ
+  const same = offers.shown.map(n => n.snap.id).join() === offers.snapshot.map(n => n.snap.id).join();
+  const times = same ? null : [
+    [state.asOf ? formatFull(state.asOf) : 'Now', 'shown', state.asOf
+      ? 'Each one\'s last snapshot as of the time the files are shown at, picked at the top'
+      : 'Each one\'s latest snapshot, as the files are shown at the top'],
+    [formatFull(snap.time), 'snapshot', 'Each one\'s last snapshot when this one was taken, so it\'s all as it was then'],
+  ].map(([label, value, title]) => el('button', { type: 'button', title, onclick: () => { time = value; draw(); } }, label));
+  const draw = () => {
+    const restorable = offers[time];
+    for (const [i, value] of ['shown', 'snapshot'].entries()) times?.[i].setAttribute('aria-pressed', String(time === value));
+    // How many of them this snapshot has none of, some of (with what it hasn't got only changed since, likely
+    // ignored, or can't tell), all of, or couldn't be checked
+    const howMany = adds => restorable.filter(n => n.adds === adds).length;
+    const [leftOut, newer, ignored, extra, others] = [howMany('all'), howMany('newer'), howMany('ignored'), howMany('some'), total - restorable.length];
+    const unknown = restorable.length - leftOut - newer - ignored - extra;
+    const ofThem = (n, one, many) => `${total === 1 ? 'It' : `${n} of them`} ${n === 1 ? one : many}`;
+    summary.replaceChildren(...[
+      leftOut && `${ofThem(leftOut, 'isn\'t', 'aren\'t')} in this snapshot at all. This may mean ${leftOut === 1 ? 'it was' : 'they were'} left out on purpose, so ${leftOut === 1 ? 'its own policy' : 'their own policies'} can set different rules.`,
+      newer && `${ofThem(newer, 'only has', 'only have')} files created or modified after this snapshot was taken.`,
+      ignored && `${ofThem(ignored, 'has', 'have')} files that were likely ignored in this snapshot.`,
+      extra && `${ofThem(extra, 'has', 'have')} extra files.`,
+      unknown && `${ofThem(unknown, 'couldn\'t', 'couldn\'t')} be checked.`,
+      others && `${ofThem(others, 'has', 'have')} nothing to add, so ${others === 1 ? 'isn\'t' : 'aren\'t'} shown.`,
+    ].filter(Boolean).map(line => el('li', {}, line)));
+    safe.hidden = !restorable.length;
+    safe.textContent = `Including ${restorable.length === 1 ? 'the nested location' : 'the nested locations'} below is safe. It will only add files this snapshot hasn't got, or newer copies of ones it has, and will not delete any files.`;
+    checks = new Map(restorable.map(n => [n, el('input', {
+      type: 'checkbox',
+      checked: chosen.get(n.loc.path) ?? n.adds === 'all',
+      onchange: event => {
+        chosen.set(n.loc.path, event.currentTarget.checked);
+        update();
+      },
+    })]));
+    // Each one's path on a line of its own, as they can be long, with its snapshot under it, and how much of it this
+    // snapshot has
+    list.replaceChildren(...restorable.map(n => el('li', {},
+      el('label', { title: n.loc.path },
+        checks.get(n),
+        el('span', {},
+          el('b', {}, `${n.rel}\\`),
+          el('div', { class: 'muted' }, `${formatFull(n.snap.time)} (${shortId(n.snap.id)})`, added[n.adds] ? ` · ${added[n.adds]}` : ''))))));
+    update();
+  };
+  draw();
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
   const go = el('button', {
     class: 'btn primary',
@@ -167,21 +222,16 @@ function confirmRestore(snap, rel, restorable, total) {
     el('h2', { id: 'confirm-title' }, `Restore ${name}?`),
     el('p', { class: 'what' }, el('b', {}, folder), `, ${formatFull(snap.time)} (${shortId(snap.id)})`),
     el('p', {}, `${plural(total, 'nested location')} ${total === 1 ? 'was' : 'were'} also found inside it:`),
-    el('ul', { class: 'restore-summary' }, summary.map(line => el('li', {}, line))),
-    el('p', {}, `Including ${restorable.length === 1 ? 'the nested location' : 'the nested locations'} below is safe, and will only add extra files to the restore. It will not overwrite or delete any files.`),
+    times ? el('div', { class: 'field' }, 'Nested locations as of',
+      el('span', { class: 'chart-modes', role: 'group', 'aria-label': 'Nested locations as of' }, times)) : null,
+    summary,
+    safe,
     el('label', {
       class: 'field',
-      title: 'Restores the files this snapshot hasn\'t got from each one, from its last snapshot before this location\'s next one. Everything this snapshot has comes from it. Ones left out of it altogether are ticked; ones it has some of the files from aren\'t, as the others may only be files deleted before it or made since.',
+      title: `Restores the files this snapshot hasn't got from each one, from its last snapshot as of ${times ? 'the time picked above' : 'then'}, and its copies of files modified more recently than this snapshot's. Ones left out of it altogether are ticked; ones it has some of the files from aren't, as the others may only be files deleted before it or made since.`,
     }, include, includeText),
-    // Each one's path on a line of its own, as they can be long, with its snapshot under it, and how much of it this
-    // snapshot has
-    el('ul', { class: 'nested-restores' }, restorable.map(n => el('li', {},
-      el('label', { title: n.loc.path },
-        checks.get(n),
-        el('span', {},
-          el('b', {}, `${n.rel}\\`),
-          el('div', { class: 'muted' }, `${formatFull(n.snap.time)} (${shortId(n.snap.id)})`, added[n.adds] ? ` · ${added[n.adds]}` : '')))))),
-    el('p', {}, 'Then pick a folder to put it in.'),
+    list,
+    el('p', {}, 'Click Restore to choose the folder.'),
     el('div', { class: 'actions' }, cancel, go));
   dialog.addEventListener('close', () => dialog.remove());
   document.body.append(dialog);
