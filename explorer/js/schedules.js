@@ -287,7 +287,10 @@ export async function scheduleDialog(path, mode) {
       el('div', {},
         el('label', { class: 'field' }, 'How often', select),
         separate ? el('label', { class: 'field' }, now, 'Back up now') : null,
-        outer ? el('label', { class: 'field', title: `So backups of ${outer.path} use your settings in here` }, copySettings, 'Apply parent settings fix') : null,
+        outer ? el('label', {
+          class: 'field',
+          title: `Syncs settings from ${outer.path} into ${name.replace(/\\$/, '')}'s policy, working around a Kopia bug where child policies don't inherit from their parents`,
+        }, copySettings, 'Apply parent settings fix') : null,
         retention.fields),
       retention.preview),
     el('p', {}, 'KopiaUI picks up the change when it next refreshes, within 4 hours.'),
