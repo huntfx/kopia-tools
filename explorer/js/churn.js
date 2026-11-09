@@ -1,6 +1,6 @@
 // Where the changes happen: activity across every snapshot, by folder and file
 import { KIND_SYMBOL, kindCount } from './changes.js';
-import { api, notLoaded } from './data.js';
+import { api, notLoadedNote } from './data.js';
 import { inFilter, patterns } from './filter.js';
 import { appendAll, el, fillColour, formatFull, formatSize, formatTime, gradientPositions, gradientRgb, plural, timeAgo } from './format.js';
 import { asOfFor } from './snapshots.js';
@@ -72,7 +72,7 @@ export function renderChurn(loc) {
   const panel = el('section', { class: 'panel' });
   const churn = locationChurn(loc);
   if (!churn) {
-    panel.append(el('h2', {}, 'Where the changes happen'), el('p', { class: 'note' }, notLoaded('changes')));
+    panel.append(el('h2', {}, 'Where the changes happen'), notLoadedNote('changes'));
     return panel;
   }
 

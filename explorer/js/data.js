@@ -225,6 +225,10 @@ export function notLoaded(what) {
   return pending.size ? `Loading the ${what}…` : `The ${what} couldn't be loaded: ${failureReason() || 'no reason given'}`;
 }
 
+// The note in place of something not loaded, marked while it's loading, so redrawing knows the section it's in will
+// grow, and doesn't keep that one in place on screen
+export const notLoadedNote = what => el('p', { class: pending.size ? 'note loading' : 'note' }, notLoaded(what));
+
 // The repository, for tooltips: its description, where it is, and who's connected to it
 export function repositoryTitle() {
   const repo = DATA.repository;

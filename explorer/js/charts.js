@@ -1,5 +1,5 @@
 // Charts of size, or files, over time, stacked or overlaid
-import { api, notLoaded } from './data.js';
+import { api, notLoadedNote } from './data.js';
 import { el, formatFull, formatSize, plural, svgEl } from './format.js';
 import { toggleTypeFilter, typeHint, typeName } from './filetypes.js';
 import { filteredCounts, inFilter, matchingFiles, patterns } from './filter.js';
@@ -55,11 +55,11 @@ export function renderSizeChart(loc) {
     el('div', { class: 'chart-head' }, el('h2', {}, sizeHeading()), el('span', { class: 'chart-controls' }, sizeViews())), ...body);
   if (sizeByType) return renderTypesChart(loc, complete, panel);
   const listings = complete.map(snap => snapshotListing(snap, state.scope));
-  if (listings.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
+  if (listings.includes(undefined)) return panel(notLoadedNote('folder listings'));
   // With a filter, only files it lets through, and how much of them each folder had inside
   const inside = !patterns().length ? null
     : complete.map((snap, j) => (listings[j] === null ? {} : api.typesInside(folderObj(snap, state.scope), patterns(), state.scope)));
-  if (inside?.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('file types')));
+  if (inside?.includes(undefined)) return panel(notLoadedNote('file types'));
 
   // Each thing in it at each snapshot, holding until the next, then the same now
   const now = Date.now();
@@ -106,10 +106,10 @@ export function renderSizeChart(loc) {
 // adds its extension to the filter, or takes it out, like its row in the Contents box's File types view.
 function renderTypesChart(loc, complete, panel) {
   const objs = complete.map(snap => folderObj(snap, state.scope));
-  if (objs.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('folder listings')));
+  if (objs.includes(undefined)) return panel(notLoadedNote('folder listings'));
   // Not in a snapshot, it had nothing then
   const tallies = objs.map(obj => (obj === null ? {} : api.types(obj, patterns(), state.scope)));
-  if (tallies.includes(undefined)) return panel(el('p', { class: 'note' }, notLoaded('file types')));
+  if (tallies.includes(undefined)) return panel(notLoadedNote('file types'));
 
   const now = Date.now();
   const times = [...complete.map(s => Date.parse(s.time)), now];

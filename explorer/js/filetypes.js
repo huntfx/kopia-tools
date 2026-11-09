@@ -1,6 +1,6 @@
 // What kinds of file a folder holds: each type's files and size at a snapshot, counting everything inside it,
 // as another view of the Contents box. Double-clicking one adds it to the filter, or takes it out.
-import { api, notLoaded } from './data.js';
+import { api, notLoadedNote } from './data.js';
 import { hasPattern, matchingFiles, patterns, togglePattern } from './filter.js';
 import { el, formatSize, plural } from './format.js';
 import { state } from './state.js';
@@ -32,7 +32,7 @@ const typesPaging = newPaging();
 export function typesTable(selected, up, rerender) {
   const obj = folderObj(selected, state.scope);
   const tally = obj && api.types(obj, patterns(), state.scope);
-  if (!tally) return el('p', { class: 'note' }, notLoaded(obj ? 'file types' : 'folder listings'));
+  if (!tally) return notLoadedNote(obj ? 'file types' : 'folder listings');
   const types = Object.entries(tally).map(([extension, [files, size]]) => ({ extension, name: typeName(extension), files, size }));
   const total = types.reduce((sum, t) => sum + t.size, 0);
   const share = t => (total ? 100 * t.size / total : 0);

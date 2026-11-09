@@ -5,7 +5,7 @@ import { renderChurn } from './churn.js';
 import { typesTable } from './filetypes.js';
 import { filterControls, filteredCounts, inFilter, matchingFiles, patterns } from './filter.js';
 import { settingsStatus, settingsWarning } from './schedules.js';
-import { api, notKnown, notLoaded, pending } from './data.js';
+import { api, notKnown, notLoadedNote, pending } from './data.js';
 import { appendAll, el, formatFull, formatSize, plural, shortId, timeAgo } from './format.js';
 import { beingDeleted, beingPinned, confirmPin, mountButton, nestedRestores, restoreItem, showInExplorer } from './jobs.js';
 import { LAST_GOOD, failingWarning, lastGoodStatus } from './lastgood.js';
@@ -373,7 +373,7 @@ export function renderSnapshotContents(loc, selected) {
   if (entries === undefined) {
     // Not known: fall back to the locations nested inside, if there are any
     if (node && node.children.size && !state.scope && !pending.size) return renderContents(node);
-    appendAll(panel, head, el('p', { class: 'note' }, notLoaded('folder listings')));
+    appendAll(panel, head, notLoadedNote('folder listings'));
     return panel;
   }
   if (entries === null) {
@@ -400,7 +400,7 @@ export function renderSnapshotContents(loc, selected) {
   if (patterns().length) {
     inside = api.typesInside(folderObj(selected, state.scope), patterns(), state.scope);
     if (!inside) {
-      appendAll(panel, head, el('p', { class: 'note' }, notLoaded('file types')));
+      appendAll(panel, head, notLoadedNote('file types'));
       return panel;
     }
   }

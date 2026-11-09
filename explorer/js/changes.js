@@ -1,5 +1,5 @@
 // What changed between two snapshots, as a tree
-import { api, notLoaded } from './data.js';
+import { api, notLoadedNote } from './data.js';
 import { appendAll, changeRgb, el, formatFull, formatSize, gradientPositions, plural, shortId, signedSize, textColour, timeAgo } from './format.js';
 import { inFilter, matchingFiles, patterns } from './filter.js';
 import { openHistory } from './snapshots.js';
@@ -202,7 +202,7 @@ export function renderChanges(loc, selected) {
   const changes = diffBetween(loc, older, newer);
   if (!changes) {
     appendAll(panel, title(), el('div', { class: 'changes-head' }, el('div', { class: 'line' }, select)),
-      el('p', { class: 'note' }, notLoaded('changes')));
+      notLoadedNote('changes'));
     return panel;
   }
 
@@ -409,7 +409,8 @@ export function renderNode(original, sizePositions, whole = false) {
     : transient ? 'Only existed in between' : null;
   // Folders that only contain changes have no symbol or size of their own
   const rowClass = `${isFolder ? ' folder' : ''}${transient ? ' transient' : ''}${shownKind === 'd' ? ' date-only' : ''}${shownKind === 'i' ? ' ignored' : ''}`;
-  wrapper.append(el('div', { class: `node${rowClass}`, title: rowTitle },
+  // Its path, for redrawing to keep it in place on screen while more changes load around it
+  wrapper.append(el('div', { class: `node${rowClass}`, title: rowTitle, 'data-place': node.path || '/' },
     twisty, el('span', { class: `sym ${symClass || ''}` }, KIND_SYMBOL[shownKind] ?? ''), name,
     count('+'), count('-'), count('~'),
     el('span', { class: 'size' }, change ? formatSize(change.s) : ''), deltaCell));
