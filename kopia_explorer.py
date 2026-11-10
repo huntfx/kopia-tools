@@ -6,7 +6,8 @@ snapshots already taken.
 Runs a small local web server for the page in explorer/ (index.html, style.css and the modules in js/),
 fetching from kopia as you browse, and shows it in a window with pywebview (py -m pip install pywebview), or in a
 browser. Diffs, folder listings and how files are stored never change for a given snapshot, so they're cached on
-disk, in Kopia Explorer\\cache in the local app data folder (LOCALAPPDATA), where they last between restarts.
+disk, in Kopia Explorer\\cache in the local app data folder (LOCALAPPDATA), where they last between restarts, until
+no snapshot has them any more, which is checked once a day.
 
 Example:
     py kopia_explorer.py
@@ -75,14 +76,19 @@ class DiskCache:
 
     def get(self, key, compute):
         path = self.folder / f'{key}.json'
-        if path.exists():
+        # Gone by the time it's read, as cleaning the cache may clear it, it's worked out again
+        try:
             return self.read(path)
+        except FileNotFoundError:
+            pass
         with self.locks_lock:
             lock = self.locks.setdefault(key, threading.Lock())
         with lock:
             # Another request may have worked it out while this one waited
-            if path.exists():
+            try:
                 return self.read(path)
+            except FileNotFoundError:
+                pass
             value = compute()
             # Written to a temporary file of its own first, so a half-written file is never read back
             partial = path.with_name(f'{key}.{threading.get_ident()}.tmp')
@@ -586,8 +592,9 @@ def listing(obj):
 class FileTypes:
     """How many files of each type a folder has and how big they are, counting everything inside it:
     { extension: [files, bytes] }, by the folder's object ID, with '' for files without one. A folder with the
-    same ID never changes, so they're kept for good. kopia lists a whole tree in one go far faster than folder by
-    folder, so each tree listed tallies every folder in it, kept in one SQLite file as there are thousands.
+    same ID never changes, so they're kept until no snapshot has it. kopia lists a whole tree in one go far
+    faster than folder by folder, so each tree listed tallies every folder in it, kept in one SQLite file as there
+    are thousands.
     The same listing keeps what's directly in each folder, its files' names, sizes and object IDs and the folders
     in it, so the page's filter, counting only files whose paths match, is worked out from those without asking
     kopia again, and so is what removing ignored files from snapshots would remove."""
@@ -625,7 +632,10 @@ class FileTypes:
             return self.tally_matching(obj, key, name_matcher(key.split('\n')), below)
         # Folders listed before tallies were counted again only need counting from what's in them
         if self.read(obj) is None and self.entries(obj) is not None:
-            self.recount(obj)
+            try:
+                self.recount(obj)
+            except LookupError:
+                pass  # A folder in it has been cleared from the cache since, so it's listed again
         self.listed(obj, lambda: self.read(obj) is not None)
         return self.read(obj)
 
@@ -707,6 +717,8 @@ class FileTypes:
         def tally(obj):
             counts = {}
             entries = self.entries(obj)
+            if entries is None:
+                raise LookupError(obj)
             for name, size, _ in entries['f']:
                 found = counts.setdefault(extension_of(name), [0, 0])
                 found[0] += 1
@@ -2347,7 +2359,8 @@ class ChunkLists:
     """The contents each file's data is stored in, by its object ID: a small file's is the one its ID names, and a
     large file's (with an ID starting I) is split into parts of a few MB, listed in a content of their own, so it's
     that, then each part. Parts are shared by any file with the same data in them, such as other versions of the
-    same file with only some of it changed. An object never changes, so they're kept for good, in one SQLite file."""
+    same file with only some of it changed. An object never changes, so they're kept until no snapshot has it, in
+    one SQLite file."""
 
     def __init__(self):
         self.db = sqlite3.connect(CACHE_DIR / 'chunks.sqlite', check_same_thread=False)
@@ -2566,7 +2579,7 @@ class RemovalPlan:
     def refine(self):
         """Read every other large file staying anywhere for the parts it shares with the files ignored, for any renamed
         and changed, a slice at a time, so they're never all held at once. Only the first time takes long, as what's
-        read is kept for good. The figure only ever goes down, as more turns out to be used elsewhere."""
+        read is kept. The figure only ever goes down, as more turns out to be used elsewhere."""
         rest, step = sorted(self.rest), 2000
         if not self.everything:
             rest = []
@@ -2961,6 +2974,181 @@ def run_removal(job, plan, removals):
         job['finished'] = time.time()
 
 
+# The cache is kept between restarts, so it's cleared of what no snapshot needs any more once a day, noted by when this file
+# was last written, once the explorer hasn't been used for a couple of minutes, as it slows it down for a few seconds
+CLEAN_EVERY = 24 * 3600
+CLEANED_PATH = CACHE_DIR / 'cleaned'
+IDLE = 2 * 60
+cleaning = threading.Lock()
+# What the page asks for by itself every so often, to keep up, which isn't someone using it
+POLLED = {'/api/progress', '/api/jobs', '/api/kopiaui', '/api/actions', '/api/maintenance', '/api/schedules', '/api/storage'}
+last_used = time.time()  # When the page last asked for anything else, or the server started
+
+
+def used(path, polled=False):
+    global last_used
+    if not polled or path not in POLLED:
+        last_used = time.time()
+
+
+def removal_busy():
+    """Whether a removal check is reading the cache, or ignored files are being removed, which cleaning the cache waits
+    for, as it would only make them read again what it clears"""
+    return any(p.state == 'working' or (p.state == 'done' and not p.exact and not p.refine_error and not p.cancelled)
+               for p in list(removal_plans.values())) or any(j['kind'] == 'remove' and not j['finished'] for j in list(jobs.values()))
+
+
+def clean_cache_when_idle():
+    """Clean the cache in the background, once it's been a day, if the explorer's idle and nothing's reading the cache
+    in bulk; if not, it's tried again on the next check"""
+    try:
+        due = time.time() - CLEANED_PATH.stat().st_mtime >= CLEAN_EVERY
+    except OSError:
+        due = True
+    if due and time.time() - last_used >= IDLE and not removal_busy() and cleaning.acquire(blocking=False):
+        threading.Thread(target=clean_cache, daemon=True).start()
+
+
+def keep_cache_clean():
+    while True:
+        time.sleep(60)
+        clean_cache_when_idle()
+
+
+def clean_cache():
+    """Clear the cache of what no snapshot in the repository has any more, from any computer, such as ones deleted, or
+    saved again without ignored files: folders' file types and listings, large files' parts, and diffs and dates
+    changed between snapshots. What's still needed is found by following every snapshot from its top folder, through
+    what's cached of each folder, so only what's there is read, and it takes seconds. Anything cached once this starts
+    stays, as it may be for a snapshot made since, and anything cleared that turns out to be needed is only worked out
+    again. The databases are compacted once a lot of their space is unused."""
+    started, removed = time.time(), {}
+    try:
+        snapshots = list_snapshots('--all', include_incomplete=True)
+        if not snapshots:
+            return
+        # Rows added after now are left, as above
+        with file_types.db_lock:
+            last_folder, last_tally = (file_types.db.execute(f'SELECT MAX(rowid) FROM {table}').fetchone()[0] or 0 for table in ('folders', 'tallies'))
+        with chunk_lists.lock:
+            last_chunk = chunk_lists.db.execute('SELECT MAX(rowid) FROM chunks').fetchone()[0] or 0
+        folders, large = cached_from({s['rootEntry']['obj'] for s in snapshots})
+        sizes = cache_size()
+        steps = [
+            # Tallies are by folder too, so they go with them
+            ('folders', lambda: [prune_rows(file_types.db, file_types.db_lock, table, last, folders)
+                                 for table, last in (('tallies', last_tally), ('folders', last_folder))][-1]),
+            ('large files', lambda: prune_rows(chunk_lists.db, chunk_lists.lock, 'chunks', last_chunk, large)),
+            ('listings', lambda: prune_files(listing_cache, started, lambda key: key in folders)),
+        ]
+        # Snapshots saved again under new IDs since they were listed, such as ones pinned, have theirs moved to them
+        ids = {s['id'] for s in snapshots}
+        steps += [(name, lambda cache=cache: prune_files(cache, started, lambda key: set(key.split('-')) <= ids | set(repository.renames.values())))
+                  for name, cache in (('diffs', diff_cache), ('dates', dates_cache))]
+        for name, step in steps:
+            if removal_busy():
+                print('Stopped cleaning the cache, as a removal check started', flush=True)
+                return
+            removed[name] = step()
+        for db, lock in ((file_types.db, file_types.db_lock), (chunk_lists.db, chunk_lists.lock)):
+            compact(db, lock)
+        freed = sizes - cache_size()
+        print(f'Cleaned the cache in {time.time() - started:.0f}s, freeing {max(freed, 0) / 1e6:,.0f} MB, of what no snapshot '
+              'has any more: ' + ', '.join(f'{name} {count:,}' for name, count in removed.items()), flush=True)
+    except Exception as e:
+        if not isinstance(e, (RuntimeError, ValueError, OSError, sqlite3.Error)):
+            traceback.print_exc()
+        print(f'Couldn\'t clean the cache: {kopia_reason(e)}', flush=True)
+    finally:
+        # Noted even if it failed, so it isn't tried again every minute, unless it was stopped early
+        if not removal_busy():
+            try:
+                CLEANED_PATH.write_text(datetime.now().isoformat(timespec='seconds'), encoding='utf-8')
+            except OSError:
+                pass
+        cleaning.release()
+
+
+def cached_from(roots):
+    """Every folder in the snapshots with these top folders that's cached, and every large file in them: what's in each
+    folder comes from its file types, or the page's listing of it if it has none, which has no files' object IDs, but
+    whose folders may have file types. One with neither isn't followed, as what's below it is very unlikely to be
+    cached, and if it is, it's only listed again."""
+    folders, large, level = set(), set(), set(roots)
+    while level:
+        folders |= level
+        below = set()
+        for part in itertools.batched(sorted(level), 500):
+            with file_types.db_lock:
+                rows = dict(file_types.db.execute(f'SELECT obj, entries FROM folders WHERE obj IN ({",".join("?" * len(part))})', part).fetchall())
+            for obj in part:
+                if obj in rows:
+                    entries = json.loads(rows[obj])
+                    large.update(oid for _, _, oid in entries['f'] if oid.startswith('I'))
+                    below.update(child for _, child in entries['d'])
+                else:
+                    try:
+                        below.update(e['o'] for e in DiskCache.read(listing_cache.folder / f'{obj}.json') if e['t'] == 'd')
+                    except (OSError, ValueError):
+                        pass
+        level = below - folders
+    return folders, large
+
+
+def prune_rows(db, lock, table, last, keep):
+    """Delete a table's rows up to a row ID whose object isn't one to keep, a few thousand at a time, so nothing else
+    waits on the database for long, returning how many"""
+    gone, after = [], 0
+    while True:
+        with lock:
+            rows = db.execute(f'SELECT rowid, obj FROM {table} WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT 20000', (after, last)).fetchall()
+        if not rows:
+            break
+        gone += [(rowid,) for rowid, obj in rows if obj not in keep]
+        after = rows[-1][0]
+    for part in itertools.batched(gone, 5000):
+        with lock, db:
+            db.executemany(f'DELETE FROM {table} WHERE rowid = ?', part)
+    return len(gone)
+
+
+def prune_files(cache, before, wanted):
+    """Delete a disk cache's files from before a time whose key isn't wanted, and any left half written, returning how
+    many of the first"""
+    count = 0
+    for path in cache.folder.iterdir():
+        try:
+            if path.stat().st_mtime >= before:
+                continue
+            if path.suffix == '.tmp':
+                path.unlink()
+            elif path.suffix == '.json' and not wanted(path.stem):
+                path.unlink()
+                count += 1
+        except OSError:
+            pass
+    return count
+
+
+def compact(db, lock):
+    """Give a database's unused space back once it's over a quarter of it, as SQLite keeps it to reuse otherwise. This
+    rewrites the whole file, which takes a few seconds, while the cache waits."""
+    with lock:
+        free, pages = (db.execute(f'PRAGMA {pragma}').fetchone()[0] for pragma in ('freelist_count', 'page_count'))
+        if free > pages / 4:
+            db.execute('VACUUM')
+
+
+def cache_size():
+    total = 0
+    for path in CACHE_DIR.rglob('*'):
+        try:
+            total += path.stat().st_size if path.is_file() else 0
+        except OSError:
+            pass
+    return total
+
+
 def snapshot_actions():
     """Whether kopia runs the snapshot actions in policies here, which it only does once they're turned on in its
     config, which policies have any, and whether KopiaUI's server was started before the config last changed, so
@@ -3082,6 +3270,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         query = {key: values[0] for key, values in parse_qs(url.query).items()}
+        used(url.path, polled=True)
         try:
             if url.path in ('/', '/index.html'):
                 return self.send_file(PAGE_DIR / 'index.html', 'text/html; charset=utf-8')
@@ -3156,6 +3345,7 @@ class Handler(BaseHTTPRequestHandler):
         # asking first, which this server never allows, so other sites can't make it restore, back up or delete anything
         if self.headers.get('X-Kopia-Explorer') != '1':
             return self.send_error(403, 'Only the explorer page can do that')
+        used(self.path)
         try:
             body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
             if self.path == '/api/restore':
@@ -3318,6 +3508,7 @@ def main():
     repository.storage()
     threading.Thread(target=keep_copied_settings_up_to_date, daemon=True).start()
     threading.Thread(target=keep_checking_mounts, daemon=True).start()
+    threading.Thread(target=keep_cache_clean, daemon=True).start()
 
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     url = f'http://localhost:{args.port}/'
