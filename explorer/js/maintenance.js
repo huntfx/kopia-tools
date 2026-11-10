@@ -18,6 +18,9 @@ const TICK = 10 * 60 * 1000;
 // Null until it's been asked.
 let maintenance = null;
 
+// For saying whether removing files will free space, and where
+export const maintenanceInfo = () => maintenance;
+
 // The notice put off, until it would say something else
 let putOff = null;
 

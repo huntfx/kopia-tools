@@ -1,6 +1,7 @@
 """Browse kopia snapshots in a window of their own: backup locations, their snapshots, folder contents and file types, what
 changed between snapshots, and file histories, restore files and folders from any snapshot, back up a location
-now, delete snapshots, and set how often a folder is backed up.
+now, delete snapshots, set how often a folder is backed up, and remove what ignore rules leave out from the
+snapshots already taken.
 
 Runs a small local web server for the page in explorer/ (index.html, style.css and the modules in js/),
 fetching from kopia as you browse, and shows it in a window with pywebview (py -m pip install pywebview), or in a
@@ -186,6 +187,7 @@ class Repository:
         such as ignore rules in .kopiaignore files, and the repository's description. Diffs, listings and file
         types stay cached, as they never change for a given snapshot."""
         self.ignores.clear()
+        removal_plans.clear()
         self.policies_changed()
         self.info = self.read_info()
 
@@ -327,8 +329,8 @@ class Repository:
             newest = max((s for s in snaps if is_good(s)), key=lambda s: s['startTime'], default=None)
             if not pinned or not newest or pinned == [newest] or any(s['startTime'] > newest['startTime'] for s in pinned):
                 continue
-            # Not while the page is pinning or deleting one of them itself
-            if any(being_pinned(s['id']) or being_deleted(s['id']) for s in [newest, *pinned]):
+            # Not while the page is pinning or deleting one of them itself, or removing ignored files from them
+            if any(being_pinned(s['id']) or being_deleted(s['id']) for s in [newest, *pinned]) or being_rewritten(source):
                 continue
             old = [s for s in pinned if s is not newest]
             try:
@@ -584,16 +586,19 @@ class FileTypes:
     { extension: [files, bytes] }, by the folder's object ID, with '' for files without one. A folder with the
     same ID never changes, so they're kept for good. kopia lists a whole tree in one go far faster than folder by
     folder, so each tree listed tallies every folder in it, kept in one SQLite file as there are thousands.
-    The same listing keeps what's directly in each folder, its files' names and sizes and the folders in it, so
-    the page's filter, counting only files whose paths match, is worked out from those without asking kopia again."""
+    The same listing keeps what's directly in each folder, its files' names, sizes and object IDs and the folders
+    in it, so the page's filter, counting only files whose paths match, is worked out from those without asking
+    kopia again, and so is what removing ignored files from snapshots would remove."""
 
     def __init__(self):
         self.db = sqlite3.connect(CACHE_DIR / 'types.sqlite', check_same_thread=False)
-        # Tallies from before a name starting with a dot, like .gitignore, was its extension are counted again
-        if self.db.execute('PRAGMA user_version').fetchone()[0] < 1:
+        # Folders listed before their files' object IDs were kept are listed again, with their tallies, which are
+        # only counted once a folder's listed
+        if self.db.execute('PRAGMA user_version').fetchone()[0] < 2:
             with self.db:
                 self.db.execute('DROP TABLE IF EXISTS tallies')
-                self.db.execute('PRAGMA user_version = 1')
+                self.db.execute('DROP TABLE IF EXISTS folders')
+                self.db.execute('PRAGMA user_version = 2')
         self.db.execute('CREATE TABLE IF NOT EXISTS tallies (obj TEXT PRIMARY KEY, tally TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS folders (obj TEXT PRIMARY KEY, entries TEXT NOT NULL)')
         self.db_lock = threading.Lock()
@@ -648,7 +653,7 @@ class FileTypes:
         return json.loads(row[0]) if row else None
 
     def entries(self, obj):
-        """What's directly in a folder: { 'f': [[name, bytes], ...], 'd': [[name, object ID], ...] }"""
+        """What's directly in a folder: { 'f': [[name, bytes, object ID], ...], 'd': [[name, object ID], ...] }"""
         with self.memory_lock:
             found = self.folders.get(obj)
         if found is None:
@@ -677,7 +682,7 @@ class FileTypes:
             entries = self.entries(obj)
         tally = {}
         folders = f'/{path}/' if path else '/'
-        for name, size in entries['f']:
+        for name, size, _ in entries['f']:
             if matches(folders + name):
                 counts = tally.setdefault(extension_of(name), [0, 0])
                 counts[0] += 1
@@ -700,7 +705,7 @@ class FileTypes:
         def tally(obj):
             counts = {}
             entries = self.entries(obj)
-            for name, size in entries['f']:
+            for name, size, _ in entries['f']:
                 found = counts.setdefault(extension_of(name), [0, 0])
                 found[0] += 1
                 found[1] += size
@@ -733,7 +738,7 @@ class FileTypes:
             if not mode.startswith('-'):
                 continue
             size = int(size) if size.isdigit() else 0
-            entries.setdefault(parent, {'f': [], 'd': []})['f'].append([name, size])
+            entries.setdefault(parent, {'f': [], 'd': []})['f'].append([name, size, oid])
             extension = extension_of(name)
             names = path.split('/')
             for depth in range(len(names)):
@@ -1127,6 +1132,8 @@ def start_backup(source):
     running = next((j for j in jobs.values() if j['kind'] == 'backup' and j['source'] == source and not j['finished']), None)
     if running:
         raise BusyError(f'{source} is already being backed up')
+    if being_rewritten(source):
+        raise BusyError(f'Ignored files are being removed from the snapshots of {source}')
     job = {
         'id': next(job_ids), 'kind': 'backup', 'name': source, 'source': source, 'state': 'running',
         'files': 0, 'bytes': 0, 'uploaded': 0, 'estimated': None, 'percent': None, 'left': None, 'errors': 0,
@@ -1185,6 +1192,8 @@ def run_backup(job, process):
         job.update(state='failed', error=kopia_reason(e))
     finally:
         backup_processes.pop(job['id'], None)
+        # What removing ignored files would remove is worked out again, with the new snapshot
+        removal_plans.clear()
         job['finished'] = time.time()
 
 
@@ -1835,6 +1844,8 @@ def start_delete(snapshot_id):
         raise BusyError('That snapshot is already being deleted')
     if being_pinned(snapshot_id):
         raise BusyError('That snapshot is being pinned or unpinned')
+    if being_rewritten(snap['source']['path']):
+        raise BusyError('Ignored files are being removed from this location\'s snapshots')
     job = {
         'id': next(job_ids), 'kind': 'delete', 'name': snap['source']['path'], 'source': snap['source']['path'],
         'snapshot': snapshot_id, 'also': repository.folded.get(snapshot_id, []), 'snapshotTime': snap['startTime'], 'state': 'deleting', 'error': None,
@@ -1855,6 +1866,7 @@ def run_delete(job):
     except Exception as e:
         job.update(state='failed', error=kopia_reason(e))
     finally:
+        removal_plans.clear()
         job['finished'] = time.time()
 
 
@@ -1873,6 +1885,8 @@ def start_pin(snapshot_id, add, remove):
         raise BusyError('That snapshot is being deleted')
     if being_pinned(snapshot_id):
         raise BusyError('That snapshot is already being pinned or unpinned')
+    if being_rewritten(snap['source']['path']):
+        raise BusyError('Ignored files are being removed from this location\'s snapshots')
     add, remove = [p.strip() for p in add if p.strip()], [p.strip() for p in remove if p.strip()]
     if not add and not remove:
         raise ValueError('No pins to add or remove')
@@ -1893,6 +1907,7 @@ def run_pin(job):
     except Exception as e:
         job.update(state='failed', error=kopia_reason(e))
     finally:
+        removal_plans.clear()
         job['finished'] = time.time()
 
 
@@ -2147,6 +2162,7 @@ def set_global_ignore(rules, cache_dirs=None):
     if changes:
         change_policies('set', '--global', *changes)
     repository.ignores.clear()
+    removal_plans.clear()
     return global_ignore()
 
 
@@ -2187,7 +2203,7 @@ def rule_drops(obj, line):
         here, prefix = stack.pop()
         entries = file_types.entries(here) or {'f': [], 'd': []}
         if not dir_only:
-            for name, nbytes in entries['f']:
+            for name, nbytes, _ in entries['f']:
                 if regex.fullmatch(prefix + name):
                     files += 1
                     size += nbytes or 0
@@ -2263,7 +2279,632 @@ def set_ignore_file(path, content):
         raise ValueError(f'Couldn\'t {"delete" if not content.strip() else "write"} {IGNORE_FILE} in {path}: {e.strerror}')
     for source in [s for s in repository.ignores if s == path or (path.lower() + '\\').startswith(s.rstrip('\\').lower() + '\\')]:
         repository.ignores.pop(source, None)
+    removal_plans.clear()
     return ignore_file(path)
+
+
+# ---- Removing what ignore rules leave out from the snapshots already taken ----
+
+# kopia snapshot fix remove-files rewrites every snapshot of a location without the files and folders given by
+# object ID, wherever they are in it. Without --commit it only says what it would do: each one it would remove, the
+# first time it comes across it, by its path in the location. With it, each snapshot it changes is saved again under
+# a new ID, keeping its pins and description. It says all this as it goes, rather than as its output.
+WILL_REMOVE = re.compile(r'^will remove file (.*?)\s*$', re.M)
+REPLACED = re.compile(r'replaced manifest from ([0-9a-f]+) to ([0-9a-f]+)')
+# Room for arguments on one command line, which Windows limits to 32,767 characters
+COMMAND_ROOM = 30_000
+# kopia content list -c's line for each content: its ID, its size, then its size on disk, packed (compressed, if it
+# is, and encrypted)
+CONTENT_LINE = re.compile(r'^(\S+) length \d+ packed (\d+)')
+
+
+def kopia_said(*args):
+    """A kopia command's output, and what it said as it went, for commands that say what they're doing rather than
+    output it. Logged with only its first few arguments, as it can have hundreds of object IDs."""
+    started = time.time()
+    result = subprocess.run(['kopia', *args], capture_output=True, text=True, encoding='utf-8', errors='replace')
+    shown = [*args[:4], f'(and {len(args) - 4} more)'] if len(args) > 5 else args
+    log_command(shown, started, result.returncode and result.stderr.strip())
+    if result.returncode:
+        raise RuntimeError(f'kopia {" ".join(shown)} failed:\n{result.stderr.strip()}')
+    return result.stdout, result.stderr
+
+
+def command_batches(items, room=COMMAND_ROOM):
+    """Arguments in batches that each fit on a command line"""
+    batch, used = [], 0
+    for item in items:
+        if batch and used + len(item) + 1 > room:
+            yield batch
+            batch, used = [], 0
+        batch.append(item)
+        used += len(item) + 1
+    if batch:
+        yield batch
+
+
+def json_documents(text):
+    """Each JSON document in some text, one after another, as kopia content show gives them for several contents"""
+    decoder, found, at = json.JSONDecoder(), [], 0
+    while True:
+        while at < len(text) and text[at].isspace():
+            at += 1
+        if at >= len(text):
+            return found
+        document, at = decoder.raw_decode(text, at)
+        found.append(document)
+
+
+def content_id(obj):
+    """The content a small file's data is in, which its object ID names, apart from the Z older versions of kopia put
+    before the ID of one they compressed"""
+    return obj[1:] if obj.startswith('Z') else obj
+
+
+class ChunkLists:
+    """The contents each file's data is stored in, by its object ID: a small file's is the one its ID names, and a
+    large file's (with an ID starting I) is split into parts of a few MB, listed in a content of their own, so it's
+    that, then each part. Parts are shared by any file with the same data in them, such as other versions of the
+    same file with only some of it changed. An object never changes, so they're kept for good, in one SQLite file."""
+
+    def __init__(self):
+        self.db = sqlite3.connect(CACHE_DIR / 'chunks.sqlite', check_same_thread=False)
+        self.db.execute('CREATE TABLE IF NOT EXISTS chunks (obj TEXT PRIMARY KEY, chunks TEXT NOT NULL)')
+        self.lock = threading.Lock()
+
+    def get(self, objs, progress=None):
+        """{object ID: [content IDs]} for some files, asking kopia about the large ones not known yet in batches,
+        saying how many of those are done after each, if asked"""
+        found, large = {}, []
+        for obj in set(objs):
+            if obj.startswith('I'):
+                large.append(obj)
+            else:
+                found[obj] = [content_id(obj)]
+        with self.lock:
+            for i in range(0, len(large), 500):
+                part = large[i:i + 500]
+                rows = self.db.execute(f'SELECT obj, chunks FROM chunks WHERE obj IN ({",".join("?" * len(part))})', part).fetchall()
+                found.update((obj, json.loads(chunks)) for obj, chunks in rows)
+        missing = [obj for obj in large if obj not in found]
+        if not missing:
+            return found
+        lists = self.indexes([obj[1:] for obj in missing], progress)
+        rows = []
+        for obj in missing:
+            failed = []
+            found[obj] = sorted(set(self.expand(obj, lists, failed)))
+            # Kept only if it could all be read, so it's asked again next time if not
+            if not failed:
+                rows.append((obj, json.dumps(found[obj], separators=(',', ':'))))
+        with self.lock, self.db:
+            self.db.executemany('INSERT OR IGNORE INTO chunks VALUES (?, ?)', rows)
+        return found
+
+    def expand(self, obj, lists, failed):
+        """A file's contents, from the lists of large files' parts read so far, reading any more it needs, as a list
+        too big for one content is a large object itself, and noting any that couldn't be read"""
+        if not obj.startswith('I'):
+            return [content_id(obj)]
+        inner = obj[1:]
+        if inner not in lists:
+            lists.update(self.indexes([inner]))
+        if lists[inner] is None:
+            failed.append(inner)
+        found = self.expand(inner, lists, failed)
+        for entry in lists[inner] or []:
+            found += self.expand(entry['o'], lists, failed)
+        return found
+
+    def indexes(self, inners, progress=None):
+        """The entries of some large files' lists of parts, by the list's object ID, or None for one that couldn't
+        be read: a list in a content of its own is read with others, as many as fit on a command line; one that's a
+        large object, or compressed by an old version of kopia, is read as an object on its own"""
+        plain = [i for i in inners if not i.startswith(('I', 'Z'))]
+        batches = list(command_batches(plain))
+        found = {}
+        for done, batch in enumerate(batches, 1):
+            found.update(self.read_batch(batch))
+            if progress:
+                progress(done, len(batches))
+        for inner in [i for i in inners if i.startswith(('I', 'Z'))]:
+            try:
+                found[inner] = json.loads(kopia('show', inner)).get('entries') or []
+            except (RuntimeError, ValueError) as e:
+                print(f'Couldn\'t read the parts of {inner}: {kopia_reason(e)}', flush=True)
+                found[inner] = None
+        return found
+
+    def read_batch(self, batch):
+        """Lists read together, or if kopia can't read one of them, which stops it reading any, in halves until it's
+        found"""
+        try:
+            documents = json_documents(kopia_said('content', 'show', *batch)[0])
+            if len(documents) == len(batch):
+                return {inner: document.get('entries') or [] for inner, document in zip(batch, documents)}
+            error = f'{len(documents)} lists for {len(batch)} IDs'
+        except (RuntimeError, ValueError) as e:
+            error = kopia_reason(e)
+        if len(batch) == 1:
+            print(f'Couldn\'t read the parts of {batch[0]}: {error}', flush=True)
+            return {batch[0]: None}
+        half = len(batch) // 2
+        return {**self.read_batch(batch[:half]), **self.read_batch(batch[half:])}
+
+
+chunk_lists = ChunkLists()
+# Contents' sizes on disk, packed, by ID, for the ones asked about while the server runs
+packed_known = {}
+packed_lock = threading.Lock()
+
+
+def packed_sizes(ids):
+    """How much space each of some contents takes on disk, packed, by ID. kopia lists every content in one go, taking
+    about 15 seconds for 2 million, so it's only asked when one isn't known yet. One that isn't there, such as one
+    that's been deleted already, takes none."""
+    with packed_lock:
+        missing = set(ids) - packed_known.keys()
+        if missing:
+            started, last = time.time(), ''
+            with subprocess.Popen(['kopia', 'content', 'list', '-c'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, encoding='utf-8', errors='replace') as process:
+                for line in process.stdout:
+                    if match := CONTENT_LINE.match(line):
+                        if match[1] in missing:
+                            packed_known[match[1]] = int(match[2])
+                    elif line.strip():
+                        last = line.strip()
+            log_command(process.args[1:], started, process.returncode and (last or f'exit code {process.returncode}'))
+            if process.returncode:
+                raise RuntimeError(last or f'kopia content list failed with exit code {process.returncode}')
+            for cid in missing:
+                packed_known.setdefault(cid, 0)
+        return {cid: packed_known[cid] for cid in ids}
+
+
+class Cancelled(Exception):
+    """A check that's no longer wanted, as its dialog was closed or its choices changed"""
+
+
+# Ignored by a rule other than the ones being removed, so whatever it is stays
+OTHER_RULE = object()
+NOTHING = frozenset()
+
+
+class RemovalPlan:
+    """What removing the files a folder's .kopiaignore ignores, or the global policy's ignore rules, from the
+    snapshots of some locations would remove, worked out in the background, as it reads every snapshot in the
+    repository, then for any choice of those rules, straight away.
+
+    Each of those locations' snapshots is read for what each rule ignores in it now, from the folder down, going by
+    every ignore rule there is, so one brought back by a ! rule, or ignored by another rule instead, stays. Kopia
+    removes things by object ID, wherever they are in a location's snapshots, so anything that's also somewhere
+    that stays can't be removed. What would be freed is worked out from the contents the files' data is stored in,
+    as a file edited a little each time shares most of them between its versions: only those nothing else in the
+    repository uses would be freed. Something that stays elsewhere uses them if it's the same file, or a large file
+    with the same name, as other versions of a file share them; a file renamed and changed isn't noticed."""
+
+    def __init__(self, path, locations):
+        self.id = next(plan_ids)
+        self.path = path
+        self.locations = sorted(locations)
+        # The ignore file whose rules are removed, as kopia's rules name it, or None for the policy's
+        self.origin = None if path is None else os.path.normcase(str(Path(path) / IGNORE_FILE))
+        self.state, self.step, self.done, self.total, self.error = 'working', 'Starting', 0, 0, None
+        self.cancelled = False
+        self.snapshots = {}   # Location -> the IDs of its snapshots, as read
+        self.found = {}       # Location -> {object ID: {'dir': whether it's a folder, 'rules': {line: its paths}}} ignored
+        self.kept = {}        # Location -> the object IDs of everything else in its snapshots, which stays
+        self.held = {}        # Snapshot ID -> the object IDs of what's ignored in it
+        self.inside = {}      # Folder object ID -> ([(path inside it, object ID)] of its files, its folders' object IDs)
+        self.chunks = {}      # File object ID -> its contents, for every file ignored
+        self.shared = set()   # Contents of those that files staying elsewhere use too
+        self.packed = {}      # Content ID -> its size on disk, for those contents
+        self.rules = {}       # Line -> what removing only it would remove: {'files', 'bytes'}
+        self.kept_large = {}  # Large files' object IDs -> their names, lower-cased, for those staying in these locations
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def status(self):
+        return {'id': self.id, 'state': self.state, 'step': self.step, 'done': self.done, 'total': self.total,
+                'error': self.error, **({'rules': self.rules} if self.state == 'done' else {})}
+
+    def progress(self, step, done=0, total=0):
+        if self.cancelled:
+            raise Cancelled()
+        self.step, self.done, self.total = step, done, total
+
+    def run(self):
+        try:
+            everyone = list_snapshots('--all', include_incomplete=True)
+            ours = lambda s: (s['source'].get('host') == repository.info['host'] and s['source'].get('userName') == repository.info['user']
+                              and s['source']['path'] in self.locations)
+            by_location = {loc: [s for s in everyone if ours(s) and s['source']['path'] == loc] for loc in self.locations}
+            self.list_trees({s['rootEntry']['obj'] for snaps in by_location.values() for s in snaps}, 'Reading the snapshots')
+            for loc, snaps in by_location.items():
+                self.snapshots[loc] = sorted(s['id'] for s in snaps)
+                self.walk_location(loc, snaps)
+            objs = self.found_files()
+            self.chunks = chunk_lists.get(objs, lambda done, total: self.progress('Reading how large files are stored', done, total))
+            everything = set().union(*self.chunks.values()) if self.chunks else set()
+            # Everything else in the repository, from any computer
+            self.check_elsewhere([s for s in everyone if not ours(s)], objs, everything)
+            self.progress('Reading how much space they take')
+            self.packed = packed_sizes(everything)
+            self.rules = {line: {key: result[key] for key in ('files', 'bytes')}
+                          for line in sorted({line for found in self.found.values() for f in found.values() for line in f['rules']})
+                          for result in [self.evaluate([line])]}
+            self.state = 'done'
+        except Cancelled:
+            self.state = 'cancelled'
+        except Exception as e:
+            if not isinstance(e, (RuntimeError, ValueError, OSError)):
+                traceback.print_exc()
+            self.state, self.error = 'failed', kopia_reason(e)
+
+    def list_trees(self, roots, step):
+        """Have kopia list each snapshot's tree that isn't known yet, two at a time, as file types does"""
+        roots = sorted(roots)
+        self.progress(step, 0, len(roots))
+        with ThreadPoolExecutor(max_workers=2) as listing:
+            futures = [listing.submit(file_types.get, root) for root in roots]
+            try:
+                for done, future in enumerate(as_completed(futures), 1):
+                    future.result()
+                    self.progress(step, done, len(roots))
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+
+    @staticmethod
+    def entries(obj):
+        found = file_types.entries(obj)
+        if found is None:
+            file_types.listed(obj, lambda: file_types.entries(obj) is not None)
+            found = file_types.entries(obj) or {'f': [], 'd': []}
+        return found
+
+    def walk_location(self, loc, snaps):
+        """What the rules ignore in each of a location's snapshots, now, and everything else in them, which stays"""
+        rel = tuple(p.lower() for p in Path(self.path).relative_to(loc).parts) if self.path else ()
+        # Read afresh, so it goes by the ignore files as they are now
+        ignore = KopiaIgnore(loc, pool.submit(lambda: json.loads(kopia('policy', 'show', loc, '--json'))))
+        found, kept, memo, whole = {}, set(), {}, set()
+
+        def deciding(parts, is_dir):
+            rule = ignore.deciding(parts, is_dir)
+            if rule is None:
+                return None
+            line, origin = rule
+            return line if (origin and os.path.normcase(origin)) == self.origin else OTHER_RULE
+
+        def keep_file(oid, name):
+            kept.add(oid)
+            if oid.startswith('I'):
+                self.kept_large[oid] = name.lower()
+
+        def keep_all(obj):
+            # Everything in a folder stays, which none of the rules apply in
+            stack = [obj]
+            while stack:
+                here = stack.pop()
+                if here in whole:
+                    continue
+                whole.add(here)
+                entries = self.entries(here)
+                for name, _, oid in entries['f']:
+                    keep_file(oid, name)
+                for _, child in entries['d']:
+                    kept.add(child)
+                    stack.append(child)
+
+        def ignored(oid, is_dir, line, parts):
+            found.setdefault(oid, {'dir': is_dir, 'rules': {}})['rules'].setdefault(line, set()).add('/'.join(parts))
+            if is_dir:
+                self.contents(oid)
+
+        def walk(obj, parts, inside):
+            # What's ignored below a folder, by the rules from the folder down when inside it, or on the way there
+            key = (obj, parts)
+            if key in memo:
+                return memo[key]
+            held, entries = set(), self.entries(obj)
+            for name, _, oid in entries['f']:
+                line = deciding(parts + (name,), False) if inside else None
+                if line is None or line is OTHER_RULE:
+                    keep_file(oid, name)
+                else:
+                    ignored(oid, False, line, parts + (name,))
+                    held.add(oid)
+            for name, child in entries['d']:
+                here = parts + (name,)
+                if inside:
+                    line = deciding(here, True)
+                    if line is None:
+                        kept.add(child)
+                        held |= walk(child, here, True)
+                    elif line is OTHER_RULE:
+                        kept.add(child)
+                        keep_all(child)
+                    else:
+                        ignored(child, True, line, here)
+                        held.add(child)
+                elif name.lower() == rel[len(parts)]:
+                    kept.add(child)
+                    held |= walk(child, here, len(here) == len(rel))
+                else:
+                    kept.add(child)
+                    keep_all(child)
+            memo[key] = result = frozenset(held) if held else NOTHING
+            return result
+
+        for done, snap in enumerate(snaps, 1):
+            self.progress(f'Checking the snapshots of {loc}', done, len(snaps))
+            self.held[snap['id']] = walk(snap['rootEntry']['obj'], (), not rel)
+        self.found[loc], self.kept[loc] = found, kept
+
+    def contents(self, obj):
+        """Every file in a folder, with its path inside it, and every folder in it, worked out once"""
+        if obj not in self.inside:
+            files, folders, stack = [], set(), [(obj, '')]
+            while stack:
+                here, prefix = stack.pop()
+                entries = self.entries(here)
+                files += [(prefix + name, oid) for name, _, oid in entries['f']]
+                for name, child in entries['d']:
+                    folders.add(child)
+                    stack.append((child, f'{prefix}{name}/'))
+            self.inside[obj] = (files, folders)
+        return self.inside[obj]
+
+    def files_of(self, oid, entry):
+        """The object IDs of the files something ignored is, or has in it"""
+        return [o for _, o in self.inside[oid][0]] if entry['dir'] else [oid]
+
+    def found_files(self):
+        return {o for found in self.found.values() for oid, entry in found.items() for o in self.files_of(oid, entry)}
+
+    def check_elsewhere(self, others, objs, everything):
+        """Which contents of the files ignored something staying uses too: in these locations, what's not ignored,
+        and everything in every other snapshot in the repository, which is read for it. The same file uses them all;
+        a large file with the same name is read for which parts it shares, as other versions of a file do; and a small
+        file is a content itself, which may be one of them."""
+        names = {path.rsplit('/', 1)[-1].lower() for found in self.found.values() for oid, entry in found.items()
+                 for path in ([p for paths in entry['rules'].values() for p in paths] if not entry['dir'] else
+                              [inner for inner, _ in self.inside[oid][0]])}
+        same, alike, small = set(), set(), set()
+
+        def check(oid, name):
+            if oid in objs:
+                same.add(oid)
+            elif oid.startswith('I'):
+                if name in names:
+                    alike.add(oid)
+            elif content_id(oid) in everything:
+                small.add(content_id(oid))
+
+        for kept in self.kept.values():
+            for oid in kept:
+                check(oid, self.kept_large.get(oid))
+        roots = {s['rootEntry']['obj'] for s in others}
+        self.list_trees(roots, 'Reading the other locations\' snapshots')
+        seen = set()
+        for done, root in enumerate(sorted(roots), 1):
+            self.progress('Checking the other locations\' snapshots', done, len(roots))
+            stack = [root]
+            while stack:
+                here = stack.pop()
+                if here in seen:
+                    continue
+                seen.add(here)
+                entries = self.entries(here)
+                for name, _, oid in entries['f']:
+                    check(oid, name.lower())
+                stack += [child for _, child in entries['d']]
+        found = chunk_lists.get(alike - objs, lambda done, total: self.progress('Reading how files elsewhere are stored', done, total))
+        shared = set(small)
+        for oid in same:
+            shared.update(self.chunks[oid])
+        for chunks in found.values():
+            shared.update(c for c in chunks if c in everything)
+        self.shared = shared
+
+    def evaluate(self, rules):
+        """What removing the files some of the rules ignore would remove: how many files, by their paths, from how
+        many snapshots, how much space they take, and how much of that would be freed; and how many files can't be
+        removed, as the same file is somewhere that stays. For each location, the object IDs to remove, and the paths
+        kopia should come across them at, for checking its dry run."""
+        rules = set(rules)
+        removed_files, removed_paths, skipped_paths, staying, removals, counts = set(), set(), set(), set(), {}, []
+        full = lambda loc, path: os.path.normcase(os.path.join(loc, *path.split('/')))
+
+        def paths_of(loc, oid, entry):
+            paths = {p for found in entry['rules'].values() for p in found}
+            if not entry['dir']:
+                return {full(loc, p) for p in paths}
+            return {full(loc, f'{p}/{inner}') for p in paths for inner, _ in self.inside[oid][0]}
+
+        for loc in self.locations:
+            found, kept = self.found[loc], self.kept[loc]
+            wanted = {oid for oid, entry in found.items() if entry['rules'].keys() <= rules}
+            removing = set(wanted)
+            # Anything that's also somewhere staying can't be removed, which may leave more staying
+            while True:
+                stays = set()
+                for oid in found.keys() - removing:
+                    if found[oid]['dir']:
+                        files, folders = self.inside[oid]
+                        stays.update(o for _, o in files)
+                        stays |= folders
+                blocked = {oid for oid in removing if oid in kept or oid in stays}
+                if not blocked:
+                    break
+                removing -= blocked
+            expected = set()
+            for oid in removing:
+                entry = found[oid]
+                expected.update(p for paths in entry['rules'].values() for p in paths)
+                removed_paths |= paths_of(loc, oid, entry)
+                removed_files.update(self.files_of(oid, entry))
+            for oid in wanted - removing:
+                skipped_paths |= paths_of(loc, oid, found[oid])
+            for oid in found.keys() - removing:
+                staying.update(self.files_of(oid, found[oid]))
+            snapshots = sum(1 for i in self.snapshots[loc] if self.held.get(i, NOTHING) & removing)
+            removals[loc] = (removing, expected)
+            counts.append({'path': loc, 'snapshots': snapshots})
+        chunks = set().union(*(self.chunks[o] for o in removed_files)) if removed_files else set()
+        shared = self.shared.union(*(self.chunks[o] for o in staying)) if staying else self.shared
+        return {
+            'files': len(removed_paths), 'skipped': len(skipped_paths - removed_paths),
+            'bytes': sum(self.packed.get(c, 0) for c in chunks), 'freed': sum(self.packed.get(c, 0) for c in chunks - shared),
+            'snapshots': sum(c['snapshots'] for c in counts), 'locations': counts, 'removals': removals,
+        }
+
+
+removal_plans = {}       # The latest few, by ID
+plan_ids = itertools.count(1)
+KEPT_PLANS = 3
+
+
+def removable_from(path):
+    """The locations whose snapshots the files a folder's .kopiaignore ignores can be removed from: the ones it's in,
+    or is, as each reads it when backing up; or for the global policy's ignore rules (path None), the locations that
+    go by them, rather than having a list of their own"""
+    if path is None:
+        policies = repository.policies()
+        return sorted(s for s in repository.sources
+                      if first_files_setting(policy_chain(s), policies, 'ignore')[1] in (None, 'the global policy'))
+    ignore_location(path)
+    folder = path.rstrip('\\').lower() + '\\'
+    return sorted(s for s in repository.sources if folder.startswith(s.rstrip('\\').lower() + '\\'))
+
+
+def plan_removal(path, locations):
+    """Start working out what removing ignored files from some locations' snapshots would remove, or carry on with
+    the same one already started"""
+    allowed = removable_from(path)
+    if not locations or any(loc not in allowed for loc in locations):
+        raise ValueError('Those aren\'t locations these rules apply in')
+    for plan in removal_plans.values():
+        if plan.path == path and plan.locations == sorted(locations) and plan.state in ('working', 'done') and not plan.cancelled:
+            return plan.status()
+    plan = RemovalPlan(path, locations)
+    removal_plans[plan.id] = plan
+    for old in sorted(removal_plans)[:-KEPT_PLANS]:
+        removal_plans.pop(old).cancelled = True
+    return plan.status()
+
+
+def removal_plan(plan_id):
+    plan = removal_plans.get(int(plan_id))
+    if not plan:
+        raise ValueError('That check has expired, so it needs doing again')
+    return plan
+
+
+def removal_result(plan_id, rules):
+    """What removing the files some rules ignore would remove, once worked out, for the page"""
+    plan = removal_plan(plan_id)
+    if plan.state != 'done':
+        raise BusyError('It\'s still being worked out')
+    result = plan.evaluate(rules)
+    del result['removals']
+    return result
+
+
+def cancel_plan(plan_id):
+    plan = removal_plans.pop(int(plan_id), None)
+    if plan:
+        plan.cancelled = True
+    return {}
+
+
+def being_rewritten(source):
+    """Whether ignored files are being removed from a location's snapshots, which gives the ones changed new IDs"""
+    return any(j['kind'] == 'remove' and source in j['locations'] and not j['finished'] for j in jobs.values())
+
+
+def location_snapshots(loc):
+    """The IDs of a location's snapshots, every one, as kopia has them now"""
+    return sorted(s['id'] for s in list_snapshots(loc, include_incomplete=True) if s['source']['path'] == loc)
+
+
+def start_removal(plan_id, rules):
+    """Remove the files some ignore rules ignore from the snapshots of the locations they were worked out for, in
+    the background, returning its progress record. Not while any of those locations is being backed up, or has a
+    snapshot being deleted or pinned, as those would be working on snapshots this saves again under new IDs."""
+    plan = removal_plan(plan_id)
+    if plan.state != 'done':
+        raise BusyError('It\'s still being worked out')
+    result = plan.evaluate(rules)
+    if not result['files']:
+        raise ValueError('There\'s nothing to remove')
+    if any(j['kind'] == 'remove' and not j['finished'] for j in jobs.values()):
+        raise BusyError('Ignored files are already being removed')
+    for loc in plan.locations:
+        if any(j['kind'] == 'backup' and j['source'] == loc and not j['finished'] for j in jobs.values()) \
+                or any(repository.snapshots.get(i, {}).get('source', {}).get('path') == loc for i in repository.live):
+            raise BusyError(f'{loc} is being backed up')
+        if any(j['kind'] in ('delete', 'pin') and j['source'] == loc and not j['finished'] for j in jobs.values()):
+            raise BusyError(f'A snapshot of {loc} is being deleted, pinned or unpinned')
+    job = {
+        'id': next(job_ids), 'kind': 'remove', 'name': plan.path and str(Path(plan.path) / IGNORE_FILE),
+        'locations': plan.locations, 'rules': sorted(set(rules)), 'files': result['files'], 'bytes': result['bytes'], 'freed': result['freed'],
+        'snapshots': result['snapshots'], 'state': 'checking', 'part': 0, 'parts': 0, 'renamed': {},
+        'error': None, 'started': time.time(), 'finished': None,
+    }
+    jobs[job['id']] = job
+    threading.Thread(target=run_removal, args=(job, plan, result['removals']), daemon=True).start()
+    return job
+
+
+def run_removal(job, plan, removals):
+    """Have kopia check what it would remove first, for every location, and only if that's just what was worked out,
+    remove it, in as many goes as it takes to fit the object IDs on its command line. A location whose snapshots
+    have changed since it was worked out isn't touched, as it may have the same files somewhere they should stay."""
+    original = {}  # Each snapshot's ID now -> its ID before
+    try:
+        todo = [(loc, sorted(removing), expected) for loc, (removing, expected) in removals.items() if removing]
+        batches = {loc: list(command_batches([f'--object-id={oid}' for oid in removing])) for loc, removing, _ in todo}
+        job['parts'] = sum(len(b) for b in batches.values())
+        for loc, _, expected in todo:
+            if location_snapshots(loc) != plan.snapshots[loc]:
+                raise ValueError(f'The snapshots of {loc} have changed since this was worked out, so check again')
+            for batch in batches[loc]:
+                _, said = kopia_said('snapshot', 'fix', 'remove-files', f'--source={loc}', *batch)
+                stray = sorted({p.replace('\\', '/').strip('/') for p in WILL_REMOVE.findall(said)} - expected)
+                if stray:
+                    raise ValueError(f'Kopia would also remove {stray[0]} from {loc}, which wasn\'t expected, so nothing was removed')
+        job['state'] = 'removing'
+        for loc, _, _ in todo:
+            for batch in batches[loc]:
+                now = {original.get(i, i): i for i in location_snapshots(loc)}
+                if sorted(now) != plan.snapshots[loc]:
+                    raise ValueError(f'The snapshots of {loc} changed while removing, so check again to finish')
+                _, said = kopia_said('snapshot', 'fix', 'remove-files', f'--source={loc}', *batch, '--commit')
+                for old, new in REPLACED.findall(said):
+                    original[new] = original.pop(old, old)
+                job['part'] += 1
+        job['state'] = 'done'
+    except Exception as e:
+        job.update(state='failed', error=kopia_reason(e))
+    finally:
+        # Followed to their new IDs, as far as it got, by the page too
+        job['renamed'] = {before: now for now, before in original.items() if before != now}
+        for before, now in job['renamed'].items():
+            repository.snapshots.pop(before, None)
+            for old, new in list(repository.renames.items()):
+                if new == before:
+                    repository.renames[old] = now
+            repository.renames[before] = now
+        for loc in plan.locations:
+            try:
+                repository.snapshots.update((s['id'], s) for s in list_snapshots(loc, include_incomplete=True))
+            except RuntimeError:
+                pass
+        removal_plans.clear()
+        job['finished'] = time.time()
 
 
 def snapshot_actions():
@@ -2431,6 +3072,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(kopia_doc(query['page']))
             if url.path == '/api/ignore-file':
                 return self.send_json(ignore_file(query['path']))
+            if url.path == '/api/removal/plan':
+                return self.send_json(removal_plan(query['id']).status())
             if url.path == '/api/actions':
                 return self.send_json(snapshot_actions())
             if url.path == '/api/maintenance':
@@ -2502,6 +3145,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(set_global_ignore(body['rules'], body.get('cacheDirs')))
             if self.path == '/api/ignore-file':
                 return self.send_json(set_ignore_file(body['path'], body['content']))
+            if self.path == '/api/removal/plan':
+                return self.send_json(plan_removal(body.get('path'), body['locations']))
+            if self.path == '/api/removal/evaluate':
+                return self.send_json(removal_result(body['id'], body['rules']))
+            if self.path == '/api/removal/cancel':
+                return self.send_json(cancel_plan(body['id']))
+            if self.path == '/api/removal/start':
+                return self.send_json(start_removal(body['id'], body['rules']))
             if self.path == '/api/location-actions':
                 return self.send_json(set_location_actions(body['path'], body.get('before'), body.get('after')))
             if self.path == '/api/forget':

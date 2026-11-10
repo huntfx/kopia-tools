@@ -195,6 +195,12 @@ class KopiaIgnore:
                     found = rule
         return found
 
+    def deciding(self, parts, is_dir):
+        """The rule that ignores a path itself, as (the rule's line, the ignore file it's in or None for the policy),
+        or None if nothing does, not counting the folders it's in, which whoever asks has checked already"""
+        rule = self._rule(tuple(parts), is_dir)
+        return (rule[3], rule[4]) if rule and not rule[0] else None
+
     def why(self, parts, is_dir):
         """Why a path is ignored, as (the rule's line, the ignore file it's in or None for the policy), from the
         outermost ignored folder it's in, or itself; None if it isn't ignored."""

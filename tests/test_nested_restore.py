@@ -48,6 +48,8 @@ def setUpModule():
     tempfile.tempdir = None
     subprocess.run(['kopia', 'repository', 'create', 'filesystem', f'--path={work / "repository"}', '--no-persist-credentials'],
                    check=True, capture_output=True)
+    # Imported afresh, as another test module run first leaves it connected to its own repository, with its pools shut
+    sys.modules.pop('kopia_explorer', None)
     import kopia_explorer
     ke = kopia_explorer
     # Where to restore to is a fixed folder, rather than asked in a folder picker

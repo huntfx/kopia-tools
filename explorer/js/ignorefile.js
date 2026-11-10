@@ -6,6 +6,7 @@
 import { DATA, api, redrawSoon } from './data.js';
 import { docsDialog } from './docs.js';
 import { el, formatSize, plural } from './format.js';
+import { canRemove, offerRemoval, removeLink } from './removal.js';
 import { storage } from './storage.js';
 
 // From the server, by lower-cased folder path: what's in the file, whether it's there and whether the folder's
@@ -57,7 +58,16 @@ export function ignoreLine(path) {
   return el('div', { class: 'schedule' },
     file.exists ? el('span', { title }, `${plural(rules.length, 'rule')} in ${NAME}`) : el('span', { class: 'muted', title }, `No ${NAME}`),
     file.exists && !file.read ? el('span', { class: 'warn', title: `The policy here doesn't read ${file.name} files, so Kopia won't use it` }, 'Not read') : null,
-    change);
+    change,
+    file.exists && file.read && canRemove(path, rules) ? removeLink(path, rules) : null);
+}
+
+// After new rules are saved, removing what they leave out of the latest snapshots from the snapshots already taken
+// is offered, for the rules a check found something for
+function offerNew(path, before, after) {
+  const was = new Set(before);
+  const added = after.filter(line => !was.has(line) && !line.startsWith('!') && (drops.get(dropKey(path, line))?.files || drops.get(dropKey(path, line))?.folders));
+  if (added.length) offerRemoval(path, after, added, path ? [] : global?.replaced || []);
 }
 
 // Kopia's page about .kopiaignore, over the editor, so what's typed stays as it is
@@ -80,6 +90,9 @@ const ruleList = (summary, lines, word = 'rule') => el('details', { class: 'othe
 const drops = new Map();
 
 const dropKey = (path, line) => `${path ?? ''}\n${line}`;
+
+// Once ignored files have been removed from snapshots, the latest ones no longer have what was found
+export const forgetRuleChecks = () => drops.clear();
 
 // What a rule would leave out, in words
 function dropText(found, global) {
@@ -176,6 +189,7 @@ function ignoreDialog(path) {
       const key = path.toLowerCase();
       for (const other of [...files.keys()].filter(k => k.startsWith(`${key.replace(/\\$/, '')}\\`))) files.delete(other);
       files.set(key, saved);
+      if (saved.read) offerNew(path, rulesIn(file.content), rulesIn(saved.content));
       const inside = l => (`${key}\\`).startsWith(`${l.path.replace(/\\$/, '').toLowerCase()}\\`);
       const ids = new Set(storage.filter(inside).flatMap(l => l.snapshots.map(s => s.id)));
       for (const diff of Object.keys(DATA.diffs).filter(k => k.split('..').some(id => ids.has(id)))) delete DATA.diffs[diff];
@@ -266,7 +280,8 @@ export function globalIgnoreLine() {
     `\n${CACHE_DIRS} ${global.cacheDirs ? 'will be excluded from backups' : 'will be backed up'}`].filter(Boolean).join('\n');
   return el('div', { class: 'schedule' },
     el('span', { title }, global.rules.length ? plural(global.rules.length, 'global ignore rule') : 'No global ignore rules'),
-    change);
+    change,
+    canRemove(null, global.rules, global.replaced) ? removeLink(null, global.rules, global.replaced) : null);
 }
 
 // Edit the global policy's ignore rules. Kopia keeps them sorted, so there can't be comments, which it would keep
@@ -295,6 +310,7 @@ function globalIgnoreDialog() {
         save.disabled = cancel.disabled = false;
         return;
       }
+      offerNew(null, global?.rules || [], saved.rules);
       global = saved;
       files.clear();
       for (const diff of Object.keys(DATA.diffs)) delete DATA.diffs[diff];

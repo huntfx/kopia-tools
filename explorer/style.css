@@ -500,6 +500,21 @@ th[aria-sort] { color: var(--ink); }
 .docs .docs-body th, .docs .docs-body td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
 .docs .docs-body th { color: var(--ink); background: var(--surface-2); }
 .docs .docs-version { margin-right: auto; align-self: center; font-size: 0.8rem; color: var(--muted); }
+/* Removing what ignore rules leave out from the snapshots already taken: each rule with what it alone would remove,
+   then the locations to remove from, each ticked or not, then what it all adds up to */
+.confirm.removal { width: min(600px, calc(100vw - 32px)); }
+.removal-list { list-style: none; margin: 0 0 10px; padding: 0; font-size: 0.85rem; color: var(--ink-2); max-height: 200px; overflow-y: auto; }
+.removal-list li + li { border-top: 1px solid var(--line); }
+.removal-list label { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 10px; padding: 4px 0; }
+.removal-list.locations label { grid-template-columns: auto minmax(0, 1fr); overflow-wrap: anywhere; color: var(--ink); }
+.removal-list input { margin: 2px 0 0; }
+.removal-list .rule { font-family: var(--font-data); color: var(--ink); overflow-wrap: anywhere; }
+.removal .other-rules { margin: 0 0 10px; font-size: 0.85rem; color: var(--ink-2); }
+.removal .other-rules summary { cursor: pointer; }
+.removal .other-rules .removal-list { margin: 6px 0 0; }
+.removal-summary { min-height: 3em; }
+.confirm .removal-summary p.muted { color: var(--muted); }
+.removal-summary .loading-bar { margin: 0 0 8px; }
 .ignore-file .other-rules { margin: 0 0 10px; font-size: 0.85rem; color: var(--ink-2); }
 .ignore-file .other-rules summary { cursor: pointer; overflow-wrap: anywhere; }
 .ignore-file .other-rules pre { margin: 6px 0 0; max-height: 180px; overflow-y: auto; font: 0.78rem var(--font-data); color: var(--ink-2); }

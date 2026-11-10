@@ -1,13 +1,15 @@
-// Restores, backups, deletes and settings changes, which run on the server, and the panel at the bottom that
-// follows them
+// Restores, backups, deletes, settings changes and removing ignored files, which run on the server, and the panel at
+// the bottom that follows them
 import { actionsNotice } from './actions.js';
-import { api, redrawSoon } from './data.js';
+import { DATA, api, redrawSoon } from './data.js';
 import { loadFixes, renderFixes } from './fixes.js';
 import { el, formatFull, formatSize, formatTime, listOf, plural, shortId } from './format.js';
+import { forgetRuleChecks } from './ignorefile.js';
 import { kopiaUINotice } from './kopiaui.js';
 import { maintenanceNotice } from './maintenance.js';
 import { renderMounts } from './mounts.js';
 import { LAST_GOOD, failingNotice } from './lastgood.js';
+import { removalNotice, removalRules } from './removal.js';
 import { render } from './render.js';
 import { schedules } from './schedules.js';
 import { pageHidden, whenShown } from './shown.js';
@@ -27,10 +29,11 @@ export let jobPolling = null;
 export let jobsUnreachable = false;  // The server stopped answering while following them
 
 // Still going: choosing where, restoring, moving the finished restore into place, backing up or changing
-// settings, cancelling, deleting a snapshot, finding the locations whose settings to change, waiting for
-// another settings change to finish, or a folder mounted as a drive, or being mounted or unmounted
+// settings, cancelling, deleting a snapshot, finding the locations whose settings to change or checking what Kopia
+// will remove, waiting for another settings change to finish, or a folder mounted as a drive, or being mounted or
+// unmounted, or removing ignored files
 export const jobActive = j => ['picking', 'restoring', 'finishing', 'running', 'cancelling', 'deleting', 'checking', 'waiting',
-  'mounting', 'mounted', 'unmounting'].includes(j.state);
+  'mounting', 'mounted', 'unmounting', 'removing'].includes(j.state);
 
 // Going, and changing, so followed: not a folder that's just mounted, which stays that way until it's unmounted
 const jobMoving = j => jobActive(j) && j.state !== 'mounted';
@@ -315,6 +318,12 @@ export async function unmount(job) {
   followJobs();
 }
 
+// Remove the files some ignore rules ignore from the snapshots already taken, as worked out in its dialog
+export function removeIgnored(id, rules, job) {
+  jobsShown = true;
+  startJob('/api/removal/start', { id, rules }, { kind: 'remove', rules, ...job }).then(render);
+}
+
 // Back up a location now, or a folder inside one on its own, which makes it a location of its own
 export function backUp(path) {
   jobsShown = true;
@@ -495,8 +504,18 @@ export function followJobs() {
       return;
     }
     const ended = kind => list.some(j => j.kind === kind && !jobActive(j) && jobList.some(o => o.id === j.id && jobActive(o)));
-    // A backup that's just ended has made a snapshot, even if cancelled, and a delete has removed one
-    const snapshotsEnded = ended('backup') || ended('delete');
+    // A backup that's just ended has made a snapshot, even if cancelled, a delete has removed one, and removing
+    // ignored files has saved them again under new IDs
+    const snapshotsEnded = ended('backup') || ended('delete') || ended('remove');
+    // Those have changed, so what was loaded for them isn't followed to their new IDs but loaded again, and what
+    // new ignore rules would leave out of the latest snapshots is checked again
+    for (const j of list.filter(j => j.kind === 'remove' && !jobActive(j) && jobList.some(o => o.id === j.id && jobActive(o)))) {
+      const old = new Set(Object.keys(j.renamed || {}));
+      for (const cache of [DATA.diffs, DATA.dates]) {
+        for (const key of Object.keys(cache).filter(k => k.split('..').some(id => old.has(id)))) delete cache[key];
+      }
+      forgetRuleChecks();
+    }
     const settingsEnded = ended('settings');
     const pinsEnded = ended('pin');
     const pinsDone = list.filter(j => j.kind === 'pin' && j.state === 'done' && jobList.some(o => o.id === j.id && jobActive(o)));
@@ -542,6 +561,7 @@ export function renderJobs() {
     if (r.kind === 'pin') return pinItem(r);
     if (r.kind === 'mount') return mountItem(r);
     if (r.kind === 'settings') return settingsItems(r);
+    if (r.kind === 'remove') return removeItem(r);
     const percent = r.totalBytes ? 100 * r.bytes / r.totalBytes : 0;
     // With nested locations, each is restored after it in turn, with a progress bar of its own
     const parts = r.nested?.length ? r.nested.length + 1 : 0;
@@ -574,8 +594,8 @@ export function renderJobs() {
   const going = kind => of(kind).filter(jobActive).length;
   const pinsGoing = pinning => of('pin').filter(j => jobActive(j) && !!j.add.length === pinning).length;
   const active = jobList.filter(jobActive).length;
-  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['mount', 'mounts'], ['delete', 'deletions'], ['pin', 'pins'], ['settings', 'parent settings fixes']]
-    .filter(([kind]) => of(kind).length).map(([, name]) => name);
+  const kinds = [['backup', 'backups'], ['restore', 'restores'], ['mount', 'mounts'], ['delete', 'deletions'], ['pin', 'pins'], ['settings', 'parent settings fixes'],
+    ['remove', 'removals of ignored files']].filter(([kind]) => of(kind).length).map(([, name]) => name);
   const listed = listOf(kinds);
   const settingsJob = of('settings').find(jobActive);
   const heading = [
@@ -587,6 +607,7 @@ export function renderJobs() {
     pinsGoing(false) && `Unpinning ${plural(pinsGoing(false), 'snapshot')}`,
     settingsJob && `${settingsJob.undo ? 'Removing parent settings fix' : 'Applying parent settings fix'}${settingsJob.items.length
       ? ` (${settingsJob.items.filter(i => ['done', 'failed'].includes(i.state)).length} of ${settingsJob.items.length})` : ''}`,
+    going('remove') && 'Removing ignored files',
   ].filter(Boolean).join(' · ') || `${listed[0].toUpperCase()}${listed.slice(1)} (${jobList.length})`;
   panel.replaceChildren(
     el('div', { class: 'jobs-head' },
@@ -612,7 +633,7 @@ export function renderJobs() {
 // so it isn't announced again.
 export function renderNotice() {
   const notice = document.getElementById('notice');
-  const parts = [kopiaUINotice(), actionsNotice(), settingsNotice(), failingNotice(), maintenanceNotice()].filter(Boolean).map(part => el('div', {}, part));
+  const parts = [kopiaUINotice(), actionsNotice(), settingsNotice(), failingNotice(), maintenanceNotice(), removalNotice()].filter(Boolean).map(part => el('div', {}, part));
   const fresh = el('section', {}, parts);
   notice.hidden = !parts.length;
   if (fresh.innerHTML !== notice.innerHTML) notice.replaceChildren(...parts);
@@ -672,6 +693,28 @@ export function deleteItem(j) {
   return el('li', { class: `${j.state}${jobActive(j) ? ' active' : ''}` },
     el('div', { class: 'what' }, el('span', { class: 'muted' }, 'Snapshot of '), el('b', {}, j.source),
       el('span', { class: 'muted' }, `, ${formatFull(j.snapshotTime)}`)),
+    status);
+}
+
+// Ignored files being removed from snapshots, in the panel at the bottom: Kopia checks what it will remove first,
+// then removes it, in as many goes as it takes to fit everything on its command line
+export function removeItem(j) {
+  const where = j.locations?.length === 1 ? j.locations[0] : plural(j.locations?.length || 0, 'location');
+  const percent = j.parts ? 100 * j.part / j.parts : 0;
+  const status = {
+    checking: () => el('div', { class: 'status muted' }, 'Checking what Kopia will remove…'),
+    removing: () => el('div', { class: 'status' },
+      el('span', { class: 'bar' }, el('span', { class: 'fill', style: `display:block;width:${percent}%` })),
+      j.parts > 1 ? `Removing… ${j.part} of ${j.parts}` : 'Removing…'),
+    done: () => el('div', {
+      class: 'status',
+      title: j.freed ? `Roughly ${formatSize(j.freed)} of space will be freed by maintenance` : 'No space will be freed, as these files are all in other snapshots too',
+    }, el('span', { class: 'c-added' }, '✓ Removed'), ` ${plural(j.files, 'file')} (${formatSize(j.bytes)}) from ${plural(j.snapshots, 'snapshot')}`),
+    failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
+  }[j.state]();
+  return el('li', { class: `${j.state}${jobActive(j) ? ' active' : ''}`, title: j.rules?.length ? removalRules(j) : null },
+    el('div', { class: 'what' }, el('span', { class: 'muted' }, 'Ignored files in '),
+      el('b', { title: j.locations?.length > 1 ? j.locations.join('\n') : null }, where)),
     status);
 }
 
