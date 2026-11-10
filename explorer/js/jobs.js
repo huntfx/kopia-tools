@@ -708,7 +708,7 @@ export function removeItem(j) {
       j.parts > 1 ? `Removing… ${j.part} of ${j.parts}` : 'Removing…'),
     done: () => el('div', {
       class: 'status',
-      title: j.freed ? `Roughly ${formatSize(j.freed)} of space will be freed by maintenance` : 'No space will be freed, as these files are all in other snapshots too',
+      title: j.freed ? `${j.exact ? '' : 'Roughly '}${formatSize(j.freed)} of space will be freed by maintenance` : 'No space will be freed, as these files are all in other snapshots too',
     }, el('span', { class: 'c-added' }, '✓ Removed'), ` ${plural(j.files, 'file')} (${formatSize(j.bytes)}) from ${plural(j.snapshots, 'snapshot')}`),
     failed: () => el('div', { class: 'status c-removed' }, `Failed: ${j.error}`),
   }[j.state]();

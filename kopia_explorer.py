@@ -2487,7 +2487,9 @@ class RemovalPlan:
     that stays can't be removed. What would be freed is worked out from the contents the files' data is stored in,
     as a file edited a little each time shares most of them between its versions: only those nothing else in the
     repository uses would be freed. Something that stays elsewhere uses them if it's the same file, or a large file
-    with the same name, as other versions of a file share them; a file renamed and changed isn't noticed."""
+    with the same name, as other versions of a file share them, which is enough for an estimate; then every other
+    large file is read too, for any renamed and changed, which can take minutes the first time, after which the figure
+    is exact."""
 
     def __init__(self, path, locations):
         self.id = next(plan_ids)
@@ -2513,11 +2515,17 @@ class RemovalPlan:
         self.packed = {}      # Content ID -> its size on disk, for those contents
         self.rules = {}       # Rule -> what removing only it would remove: {'files', 'bytes'}
         self.kept_large = {}  # Large files' object IDs -> their names, lower-cased, for those staying in these locations
+        self.everything = set()  # The contents of every file ignored
+        self.rest = set()     # Large files staying anywhere, not the same as one ignored and with another name
+        # Once it's done, whether every large file staying has been read, how many have so far, and why it stopped if
+        # it couldn't finish, in which case the figure stays an estimate
+        self.exact, self.checked, self.refine_error = False, 0, None
         threading.Thread(target=self.run, daemon=True).start()
 
     def status(self):
         return {'id': self.id, 'state': self.state, 'step': self.step, 'done': self.done, 'total': self.total,
-                'error': self.error, **({'rules': self.rules} if self.state == 'done' else {})}
+                'error': self.error, 'exact': self.exact, 'checked': self.checked, 'checking': len(self.rest),
+                'refineError': self.refine_error, **({'rules': self.rules} if self.state == 'done' else {})}
 
     def progress(self, step, done=0, total=0):
         if self.cancelled:
@@ -2536,21 +2544,48 @@ class RemovalPlan:
                 self.walk_location(loc, snaps)
             objs = self.found_files()
             self.chunks = chunk_lists.get(objs, lambda done, total: self.progress('Reading how large files are stored', done, total))
-            everything = set().union(*self.chunks.values()) if self.chunks else set()
+            self.everything = set().union(*self.chunks.values()) if self.chunks else set()
             # Everything else in the repository, from any computer
-            self.check_elsewhere([s for s in everyone if not ours(s)], objs, everything)
+            self.check_elsewhere([s for s in everyone if not ours(s)], objs, self.everything)
             self.progress('Reading how much space they take')
-            self.packed = packed_sizes(everything)
+            self.packed = packed_sizes(self.everything)
             self.rules = {line: {key: result[key] for key in ('files', 'bytes')}
                           for line in sorted({line for found in self.found.values() for f in found.values() for line in f['rules']})
                           for result in [self.evaluate([line])]}
             self.state = 'done'
         except Cancelled:
             self.state = 'cancelled'
+            return
         except Exception as e:
             if not isinstance(e, (RuntimeError, ValueError, OSError)):
                 traceback.print_exc()
             self.state, self.error = 'failed', kopia_reason(e)
+            return
+        self.refine()
+
+    def refine(self):
+        """Read every other large file staying anywhere for the parts it shares with the files ignored, for any renamed
+        and changed, a slice at a time, so they're never all held at once. Only the first time takes long, as what's
+        read is kept for good. The figure only ever goes down, as more turns out to be used elsewhere."""
+        rest, step = sorted(self.rest), 2000
+        if not self.everything:
+            rest = []
+        try:
+            for start in range(0, len(rest), step):
+                if self.cancelled:
+                    return
+                shared = set()
+                for chunks in chunk_lists.get(rest[start:start + step]).values():
+                    shared.update(c for c in chunks if c in self.everything)
+                # Replaced in one go, as the page may be asking for the numbers meanwhile
+                if not shared <= self.shared:
+                    self.shared = self.shared | shared
+                self.checked = min(start + step, len(rest))
+            self.exact = True
+        except Exception as e:
+            if not isinstance(e, (RuntimeError, ValueError, OSError)):
+                traceback.print_exc()
+            self.refine_error = kopia_reason(e)
 
     def list_trees(self, roots, step):
         """Have kopia list each snapshot's tree that isn't known yet, two at a time, as file types does"""
@@ -2680,19 +2715,18 @@ class RemovalPlan:
     def check_elsewhere(self, others, objs, everything):
         """Which contents of the files ignored something staying uses too: in these locations, what's not ignored,
         and everything in every other snapshot in the repository, which is read for it. The same file uses them all;
-        a large file with the same name is read for which parts it shares, as other versions of a file do; and a small
-        file is a content itself, which may be one of them."""
+        a large file with the same name is read for which parts it shares, as other versions of a file do, and the
+        other large files are kept to read after; and a small file is a content itself, which may be one of them."""
         names = {path.rsplit('/', 1)[-1].lower() for found in self.found.values() for oid, entry in found.items()
                  for path in ([p for paths in entry['rules'].values() for p in paths] if not entry['dir'] else
                               [inner for inner, _ in self.inside[oid][0]])}
-        same, alike, small = set(), set(), set()
+        same, alike, small, rest = set(), set(), set(), set()
 
         def check(oid, name):
             if oid in objs:
                 same.add(oid)
             elif oid.startswith('I'):
-                if name in names:
-                    alike.add(oid)
+                (alike if name in names else rest).add(oid)
             elif content_id(oid) in everything:
                 small.add(content_id(oid))
 
@@ -2721,6 +2755,7 @@ class RemovalPlan:
         for chunks in found.values():
             shared.update(c for c in chunks if c in everything)
         self.shared = shared
+        self.rest = rest - alike
 
     def evaluate(self, rules):
         """What removing the files some of the rules ignore would remove: how many files, by their paths, from how
@@ -2868,6 +2903,8 @@ def start_removal(plan_id, rules):
     job = {
         'id': next(job_ids), 'kind': 'remove', 'name': name,
         'locations': plan.locations, 'rules': sorted(set(rules)), 'files': result['files'], 'bytes': result['bytes'], 'freed': result['freed'],
+        # Whether what's freed was exact, or still the estimate, when it was started
+        'exact': plan.exact,
         'snapshots': result['snapshots'], 'state': 'checking', 'part': 0, 'parts': 0, 'renamed': {},
         'error': None, 'started': time.time(), 'finished': None,
     }

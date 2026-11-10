@@ -220,6 +220,30 @@ class RemoveIgnoredTest(unittest.TestCase):
         self.assertGreater(result['bytes'], 40 * MB)
         self.assertLess(result['freed'], result['bytes'] * 0.4)
 
+    def test_renamed_copies_found_once_exact(self):
+        """A large file renamed and changed elsewhere isn't noticed by the estimate, but is once every large file's
+        been read, which only ever lowers what's freed"""
+        other = work / 'sources' / f'{self._testMethodName}-other'
+        data = os.urandom(40 * MB)
+        write(self.src / 'junk' / 'data.bin', data)
+        write(other / 'renamed.bin', data[:-1000] + os.urandom(1000))
+        self.snapshot(self.src)
+        self.snapshot(other)
+        write(self.src / '.kopiaignore', 'junk/\n')
+        plan = self.plan(self.src, [self.src])
+        deadline = time.time() + 120
+        while not plan.exact and not plan.refine_error and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(plan.exact, plan.refine_error)
+        self.assertEqual(plan.status()['checked'], plan.status()['checking'])
+        # It has another name, so only reading every large file found it
+        root = ke.list_snapshots(str(other))[0]['rootEntry']['obj']
+        renamed = next(line.split()[5] for line in ke.kopia('ls', '-l', '-o', root).splitlines() if line.endswith('renamed.bin'))
+        self.assertIn(renamed, plan.rest)
+        result = plan.evaluate(['file:junk/'])
+        self.assertGreater(result['bytes'], 40 * MB)
+        self.assertLess(result['freed'], result['bytes'] * 0.4)
+
     def test_global_rules(self):
         """The global policy's rules apply from the top of each location going by them"""
         write(self.src / 'old.bak', 'b')

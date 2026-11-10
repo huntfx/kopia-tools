@@ -93,6 +93,7 @@ export function removalDialog({ path, groups, picked = null, replaced = [] }) {
   let failed = null;    // Why it couldn't be worked out
   let polling = null;
   let asking = 0;       // Answers to older questions are ignored
+  let added = null;     // What the numbers were last asked for: the plan, and whether its figure was exact then
   const ruleBoxes = new Map(keys.map(key => [key, el('input', { type: 'checkbox', checked: (picked || keys).includes(key), onchange: () => evaluate() })]));
   const locationBoxes = new Map(locations.map(loc => [loc, el('input', { type: 'checkbox', checked: ticked.includes(loc), onchange: () => start() })]));
   const tickedRules = () => keys.filter(key => ruleBoxes.get(key).checked);
@@ -185,19 +186,26 @@ export function removalDialog({ path, groups, picked = null, replaced = [] }) {
       if (asked !== asking) return;
       plan = found;
       if (plan.state === 'working') return draw();
+      // Once it's worked out, it carries on reading every large file, for renamed copies, which only lowers what's
+      // freed, so it's followed until that's done, and the numbers asked for again then
+      if (plan.state === 'done') {
+        if (plan.exact || plan.refineError) stopPolling();
+        return added === `${plan.id}:${plan.exact}` ? draw() : evaluate(!!added?.startsWith(`${plan.id}:`));
+      }
       stopPolling();
       if (plan.state === 'failed') failed = `Couldn't work it out: ${plan.error}`;
-      if (plan.state === 'done') return evaluate();
       draw();
     };
     check();
     polling = setInterval(check, 500);
   }
 
-  // The numbers for the rules ticked, once it's worked out
-  async function evaluate() {
-    result = null;
+  // The numbers for the rules ticked, once it's worked out, keeping the ones shown meanwhile when it's only the same
+  // rules again with the figure now exact
+  async function evaluate(keep = false) {
+    if (!keep || plan?.state !== 'done' || !tickedRules().length) result = null;
     if (plan?.state !== 'done' || !tickedRules().length) return draw();
+    added = `${plan.id}:${plan.exact}`;
     const asked = asking;
     const rulesAsked = tickedRules().join('\n');
     draw();
@@ -219,6 +227,15 @@ export function removalDialog({ path, groups, picked = null, replaced = [] }) {
     return where.length === 1 ? el('b', {}, where[0].path)
       : el('b', { title: where.map(l => `${l.path} (${plural(l.snapshots, 'snapshot')})`).join('\n') }, plural(where.length, 'location'));
   };
+
+  // While every other large file is read for parts the files share with renamed copies of them, which may lower the
+  // figure, how far it's got; or if it couldn't finish, that the figure may be a little high
+  function refiningLine() {
+    if (plan.refineError) return el('p', { class: 'muted' }, `Couldn't check for renamed copies, so this may be a little high: ${plan.refineError}`);
+    if (plan.exact) return null;
+    return el('p', { class: 'muted' }, 'Checking renamed copies…',
+      plan.checking ? ` ${plan.checked.toLocaleString('en-GB')} of ${plural(plan.checking, 'large file')}` : '');
+  }
 
   // Whether maintenance will free it, and where it runs, as it only runs on the PC that owns it
   function maintenanceLine() {
@@ -254,7 +271,10 @@ export function removalDialog({ path, groups, picked = null, replaced = [] }) {
       parts = [
         el('p', {}, `This will remove ${plural(result.files, 'file')} (${formatSize(result.bytes)}) from ${plural(result.snapshots, 'snapshot')} of `, whereText(result), '.'),
         result.freed
-          ? [el('p', {}, `Roughly ${formatSize(result.freed)} of space will be freed by maintenance.`), maintenanceLine()]
+          // Roughly, until every large file's been read; even then, Kopia stores data in packs of many files' parts,
+          // and only frees a pack once little of it's still used, which the tooltip says
+          ? [el('p', { title: 'Kopia keeps data in pack files, and maintenance frees a pack once little of it is still used, so a little may stay until then' },
+            `${plan.exact ? '' : 'Roughly '}${formatSize(result.freed)} of space will be freed by maintenance.`), refiningLine(), maintenanceLine()]
           : el('p', {}, 'No space will be freed, as these files are all in other snapshots too.'),
       ];
     }
