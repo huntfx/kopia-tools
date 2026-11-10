@@ -5,8 +5,8 @@ snapshots already taken.
 
 Runs a small local web server for the page in explorer/ (index.html, style.css and the modules in js/),
 fetching from kopia as you browse, and shows it in a window with pywebview (py -m pip install pywebview), or in a
-browser. Diffs and folder listings never change for a given snapshot, so they're cached on disk, in
-kopia-explorer in the temp folder (TEMP).
+browser. Diffs, folder listings and how files are stored never change for a given snapshot, so they're cached on
+disk, in Kopia Explorer\\cache in the local app data folder (LOCALAPPDATA), where they last between restarts.
 
 Example:
     py kopia_explorer.py
@@ -30,7 +30,6 @@ import sqlite3
 import string
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tkinter
@@ -49,8 +48,11 @@ from snapshot_diff import (ADDED, DIFF_CHANGED, DIFF_FILE, MODIFIED, REMOVED, Ko
                            log_command, parse_ignore_rule)
 
 PAGE_DIR = Path(__file__).parent / 'explorer'
-# In the temp folder, as it can be thrown away and can get big
-CACHE_DIR = Path(tempfile.gettempdir()) / 'kopia-explorer'
+# The explorer's own folder in the local app data folder, which has the window's settings, and its cache, which can
+# get big, but is kept there rather than in the temp folder, as reading every snapshot again takes minutes
+APP_DATA = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'Kopia Explorer'
+CACHE_DIR = APP_DATA / 'cache'
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 SYMBOL = {ADDED: '+', REMOVED: '-', MODIFIED: '~'}
 
 pool = ThreadPoolExecutor(max_workers=8)
@@ -3236,8 +3238,7 @@ def show_window(url):
     # Brought back to how it was: maximised, if it was, or not
     window.events.restored += lambda: minimised(False)
     window.events.maximized += lambda: minimised(False)
-    storage = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'Kopia Explorer'
-    webview.start(private_mode=False, storage_path=str(storage))
+    webview.start(private_mode=False, storage_path=str(APP_DATA))
 
 
 def main():

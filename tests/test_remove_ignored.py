@@ -36,8 +36,9 @@ def setUpModule():
         'KOPIA_CACHE_DIRECTORY': str(work / 'cache'),
         'KOPIA_LOG_DIR': str(work / 'logs'),
         'KOPIA_CHECK_FOR_UPDATES': 'false',
-        # The explorer's caches go in the temporary folder too
         'TEMP': str(work / 'temp'), 'TMP': str(work / 'temp'),
+        # The explorer's caches go in the temporary folder too
+        'LOCALAPPDATA': str(work / 'appdata'),
     }
     for name, value in env.items():
         saved_env[name] = os.environ.get(name)
