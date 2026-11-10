@@ -1,6 +1,8 @@
 // Removing the files ignore rules leave out from the snapshots already taken, so the space they use can be freed: a
-// folder's .kopiaignore rules, from the snapshots of the locations it's in, or the global policy's, from the
-// locations going by them. The server works out what each rule would remove, reading every snapshot in the
+// folder's .kopiaignore rules, from the snapshots of the locations it's in, and for a location's own folder, the
+// rules in the policy it goes by, from its own snapshots, unless they're the global policy's; or the global policy's,
+// from the locations going by them. Rules come in groups by where they're from, each rule known by its group's kind
+// and its line, as file:line or policy:line. The server works out what each rule would remove, reading every snapshot in the
 // repository, which can take a few minutes the first time, then for the rules ticked, how many files go from how many
 // snapshots, how much space they take, and how much of that maintenance would free, as files staying elsewhere may
 // use the same data. Kopia removes them, which can't be undone, followed in the panel at the bottom. After new rules
@@ -17,30 +19,35 @@ const NAME = 'Remove from older snapshots';
 // The lines that ignore something, as ! lines only bring things back
 const ignoring = rules => [...new Set(rules.map(line => line.trim()).filter(line => line && !line.startsWith('#') && !line.startsWith('!')))];
 
+// A rule's line, without the kind of group it's from
+export const ruleLine = key => key.slice(key.indexOf(':') + 1);
+
 const inside = (path, loc) => `${path.replace(/\\$/, '').toLowerCase()}\\`.startsWith(`${loc.path.replace(/\\$/, '').toLowerCase()}\\`);
 
 // The locations with snapshots the rules could be removed from, and the ones ticked to start with: for a folder's
-// .kopiaignore, the locations it's in, with the nearest ticked, as that's the one it's for; for the global rules,
-// the locations without a list of their own, none ticked, so each is picked on purpose
-function locationsFor(path, replaced) {
+// .kopiaignore, the locations it's in, with the nearest ticked, as that's the one it's for, or with only its policy's
+// rules, only its own; for the global rules, the locations without a list of their own, none ticked, so each is
+// picked on purpose
+function locationsFor(path, groups, replaced) {
   if (path) {
-    const found = storage.filter(l => inside(path, l)).sort((a, b) => b.path.length - a.path.length);
+    const found = storage.filter(l => inside(path, l) && (groups.some(g => g.kind === 'file') || l.path.toLowerCase() === path.toLowerCase()))
+      .sort((a, b) => b.path.length - a.path.length);
     return { locations: found.filter(l => l.snapshots.length).map(l => l.path), ticked: found[0]?.snapshots.length ? [found[0].path] : [] };
   }
   return { locations: storage.filter(l => l.snapshots.length && !replaced.includes(l.path)).map(l => l.path), ticked: [] };
 }
 
 // Whether there's anywhere to remove some rules from, for showing the link
-export function canRemove(path, rules, replaced = []) {
-  return ignoring(rules).length > 0 && locationsFor(path, replaced).locations.length > 0;
+export function canRemove(path, groups, replaced = []) {
+  return groups.some(g => ignoring(g.rules).length) && locationsFor(path, groups, replaced).locations.length > 0;
 }
 
-// The link beside an ignore file's Change…, for a folder's (path) or the global rules (path null, with the locations
-// that have a list of their own)
-export function removeLink(path, rules, replaced = []) {
+// The link beside an ignore file's Change…, for a folder's rules (path) or the global ones (path null, with the
+// locations that have a list of their own), each group as { kind, label, rules }
+export function removeLink(path, groups, replaced = []) {
   return el('button', {
     class: 'linklike', title: 'Remove the files these rules ignore from the snapshots already taken',
-    onclick: () => removalDialog({ path, rules, replaced }),
+    onclick: () => removalDialog({ path, groups, replaced }),
   }, `${NAME}…`);
 }
 
@@ -49,21 +56,21 @@ export function removeLink(path, rules, replaced = []) {
 let offer = null;
 
 // New rules saved, of all the rules there now, that leave out files the latest snapshots have
-export function offerRemoval(path, rules, added, replaced = []) {
-  offer = { path, rules, added, replaced };
+export function offerRemoval(path, groups, added, replaced = []) {
+  offer = { path, groups, added, replaced };
   renderNotice();
 }
 
 export function removalNotice() {
   if (!offer) return null;
-  const { path, rules, added, replaced } = offer;
+  const { path, groups, added, replaced } = offer;
   const where = path ? `${path.replace(/\\$/, '')}\\.kopiaignore` : 'the global ignore rules';
   return [
     el('h2', {}, 'Ignored files still in snapshots'),
     el('p', {}, 'Snapshots taken before you changed ', el('b', {}, where), ' still have the files ',
-      el('span', { title: added.join('\n') }, added.length === 1 ? 'the new rule' : `the ${added.length} new rules`), added.length === 1 ? ' ignores.' : ' ignore.'),
+      el('span', { title: added.map(ruleLine).join('\n') }, added.length === 1 ? 'the new rule' : `the ${added.length} new rules`), added.length === 1 ? ' ignores.' : ' ignore.'),
     el('div', { class: 'actions' },
-      el('button', { class: 'btn', onclick: () => removalDialog({ path, rules, picked: added, replaced }) }, `${NAME}…`),
+      el('button', { class: 'btn', onclick: () => removalDialog({ path, groups, picked: added, replaced }) }, `${NAME}…`),
       el('button', { class: 'linklike', onclick: () => { offer = null; renderNotice(); } }, 'Not now')),
   ];
 }
@@ -73,39 +80,51 @@ export function removalNotice() {
 // What removing the files the ticked rules ignore from the ticked locations' snapshots would do, worked out while it's
 // open: ticking other locations works it out again, which the server does in the background, said as it goes;
 // ticking other rules only asks for the numbers again. Removing starts it in the panel at the bottom.
-export function removalDialog({ path, rules, picked = null, replaced = [] }) {
+export function removalDialog({ path, groups, picked = null, replaced = [] }) {
   if (document.querySelector('dialog.removal')) return;
   if (!maintenanceInfo()) checkMaintenance().then(() => draw());
-  const lines = ignoring(rules);
-  const bringsBack = rules.some(line => line.trim().startsWith('!'));
-  const { locations, ticked } = locationsFor(path, replaced);
+  // Each group's rules that ignore something, by key, keeping only the groups with any
+  const shown = groups.map(g => ({ ...g, keys: ignoring(g.rules).map(line => `${g.kind}:${line}`) })).filter(g => g.keys.length);
+  const keys = shown.flatMap(g => g.keys);
+  const bringsBack = groups.some(g => g.rules.some(line => line.trim().startsWith('!')));
+  const { locations, ticked } = locationsFor(path, groups, replaced);
   let plan = null;      // From the server: how working it out is getting on, then what each rule would remove alone
   let result = null;    // What the ticked rules would remove
   let failed = null;    // Why it couldn't be worked out
   let polling = null;
   let asking = 0;       // Answers to older questions are ignored
-  const ruleBoxes = new Map(lines.map(line => [line, el('input', { type: 'checkbox', checked: (picked || lines).includes(line), onchange: () => evaluate() })]));
+  const ruleBoxes = new Map(keys.map(key => [key, el('input', { type: 'checkbox', checked: (picked || keys).includes(key), onchange: () => evaluate() })]));
   const locationBoxes = new Map(locations.map(loc => [loc, el('input', { type: 'checkbox', checked: ticked.includes(loc), onchange: () => start() })]));
-  const tickedRules = () => lines.filter(line => ruleBoxes.get(line).checked);
+  const tickedRules = () => keys.filter(key => ruleBoxes.get(key).checked);
   const tickedLocations = () => locations.filter(loc => locationBoxes.get(loc).checked);
-  const notes = new Map(lines.map(line => [line, el('span', { class: 'note' })]));
-  const ruleItem = line => el('li', {}, el('label', {}, ruleBoxes.get(line), el('span', { class: 'rule' }, line), notes.get(line)));
-  // In the order they're in until it's worked out, then the ones that found something, biggest first, with the rest
-  // folded away under them, as a long list can have only a few
+  const notes = new Map(keys.map(key => [key, el('span', { class: 'note' })]));
+  const ruleItem = key => el('li', {}, el('label', {}, ruleBoxes.get(key), el('span', { class: 'rule' }, ruleLine(key)), notes.get(key)));
+  // Each group's rules in the order they're in until it's worked out, then the ones that found something, biggest
+  // first, with the rest folded away under them, as a long list can have only a few. With more than one group, each
+  // is headed by where its rules are from; a policy's only apply to its own location's snapshots, which is said when
+  // others can be ticked.
   const ruleList = el('div', {});
   let rulesShown = null;
+  const groupRules = g => {
+    if (plan?.state !== 'done') return [el('ul', { class: 'removal-list' }, g.keys.map(ruleItem))];
+    const found = g.keys.filter(key => plan.rules[key]?.files).sort((a, b) => plan.rules[b].bytes - plan.rules[a].bytes);
+    const none = g.keys.filter(key => !plan.rules[key]?.files);
+    return [
+      found.length ? el('ul', { class: 'removal-list' }, found.map(ruleItem)) : null,
+      none.length ? el('details', { class: 'other-rules' }, el('summary', {}, `Nothing in the snapshots (${plural(none.length, 'rule')})`),
+        el('ul', { class: 'removal-list' }, none.map(ruleItem))) : null,
+    ];
+  };
   const drawRules = () => {
     const done = plan?.state === 'done' ? plan.id : null;
     if (rulesShown === done && ruleList.firstChild) return;
     rulesShown = done;
-    if (!done) return ruleList.replaceChildren(el('ul', { class: 'removal-list' }, lines.map(ruleItem)));
-    const found = lines.filter(line => plan.rules[line]?.files).sort((a, b) => plan.rules[b].bytes - plan.rules[a].bytes);
-    const none = lines.filter(line => !plan.rules[line]?.files);
-    ruleList.replaceChildren(...[
-      found.length ? el('ul', { class: 'removal-list' }, found.map(ruleItem)) : null,
-      none.length ? el('details', { class: 'other-rules' }, el('summary', {}, `Nothing in the snapshots (${plural(none.length, 'rule')})`),
-        el('ul', { class: 'removal-list' }, none.map(ruleItem))) : null,
-    ].filter(Boolean));
+    ruleList.replaceChildren(...shown.flatMap(g => [
+      // The folder's path is above, so the file's name is enough
+      shown.length > 1 ? el('h3', {}, `In ${g.kind === 'file' ? '.kopiaignore' : `${g.label[0].toLowerCase()}${g.label.slice(1)}`}`) : null,
+      shown.length > 1 && g.kind === 'policy' && path && locations.length > 1 ? el('p', { class: 'muted' }, `These are only removed from the snapshots of ${path}.`) : null,
+      ...groupRules(g),
+    ]).filter(Boolean));
   };
   const summary = el('div', { class: 'removal-summary', role: 'status' });
   const cancel = el('button', { class: 'btn', onclick: () => dialog.close() }, 'Cancel');
@@ -113,10 +132,13 @@ export function removalDialog({ path, rules, picked = null, replaced = [] }) {
     class: 'btn danger', disabled: true,
     onclick: () => {
       const where = result.locations.filter(l => l.snapshots).map(l => l.path);
+      // Where they're from, as the server says it
+      const from = shown.filter(g => g.keys.some(key => ruleBoxes.get(key).checked))
+        .map(g => (g.kind === 'file' ? g.label : path ? `the policy ${path} goes by` : 'the global ignore rules'));
       dialog.close();
       offer = null;
       renderNotice();
-      removeIgnored(plan.id, tickedRules(), { name: path ? `${path.replace(/\\$/, '')}\\.kopiaignore` : null, locations: where });
+      removeIgnored(plan.id, tickedRules(), { name: listOf(from), locations: where });
     },
   }, 'Remove');
 
@@ -210,9 +232,9 @@ export function removalDialog({ path, rules, picked = null, replaced = [] }) {
   function draw() {
     if (!dialog.isConnected) return;
     drawRules();
-    for (const line of lines) {
-      const alone = plan?.state === 'done' && plan.rules[line];
-      notes.get(line).textContent = alone?.files ? `${plural(alone.files, 'file')} (${formatSize(alone.bytes)})` : '';
+    for (const key of keys) {
+      const alone = plan?.state === 'done' && plan.rules[key];
+      notes.get(key).textContent = alone?.files ? `${plural(alone.files, 'file')} (${formatSize(alone.bytes)})` : '';
     }
     const working = plan?.state === 'working' || (tickedLocations().length && !plan && !failed);
     let parts;
@@ -245,7 +267,7 @@ export function removalDialog({ path, rules, picked = null, replaced = [] }) {
 
   const dialog = el('dialog', { class: 'confirm removal', 'aria-labelledby': 'removal-title' },
     el('h2', { id: 'removal-title' }, `${NAME}?`),
-    el('p', { class: 'what' }, el('b', {}, path ? `${path.replace(/\\$/, '')}\\.kopiaignore` : 'Global policy')),
+    el('p', { class: 'what' }, el('b', {}, shown.length === 1 ? shown[0].label : path)),
     el('p', {}, 'Removes the files these rules ignore from the snapshots already taken, so the space they use can be freed.',
       bringsBack ? ' Anything a ! rule brings back stays.' : ''),
     ruleList,
@@ -269,4 +291,4 @@ export function removalDialog({ path, rules, picked = null, replaced = [] }) {
 }
 
 // What a removal in the panel at the bottom is of, in words, for its tooltip: the rules, and where they're from
-export const removalRules = j => `${listOf(j.rules)}, from ${j.name || 'the global ignore rules'}`;
+export const removalRules = j => `${listOf(j.rules.map(ruleLine))}, from ${j.name}`;

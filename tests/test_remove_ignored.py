@@ -131,14 +131,14 @@ class RemoveIgnoredTest(unittest.TestCase):
         self.snapshot(self.src)
         write(self.src / '.kopiaignore', 'junk/\n')
         plan = self.plan(self.src, [self.src])
-        result = plan.evaluate(['junk/'])
+        result = plan.evaluate(['file:junk/'])
         self.assertEqual((result['files'], result['snapshots'], result['skipped']), (2, 2, 0))
         self.assertGreater(result['bytes'], 24 * MB)
         self.assertLess(result['freed'], result['bytes'])
         self.assertGreater(result['freed'], 24 * MB)
-        self.assertEqual(plan.rules['junk/']['files'], 2)
+        self.assertEqual(plan.rules['file:junk/']['files'], 2)
 
-        job = self.remove(plan, ['junk/'])
+        job = self.remove(plan, ['file:junk/'])
         self.assertEqual(job['state'], 'done', job['error'])
         self.assertEqual(len(job['renamed']), 2)
         for paths in self.paths(self.src):
@@ -155,9 +155,9 @@ class RemoveIgnoredTest(unittest.TestCase):
         self.snapshot(self.src)
         write(self.src / '.kopiaignore', '*.tmp\n')
         plan = self.plan(self.src, [self.src])
-        result = plan.evaluate(['*.tmp'])
+        result = plan.evaluate(['file:*.tmp'])
         self.assertEqual((result['files'], result['skipped']), (1, 1))
-        job = self.remove(plan, ['*.tmp'])
+        job = self.remove(plan, ['file:*.tmp'])
         self.assertEqual(job['state'], 'done', job['error'])
         self.assertEqual(self.paths(self.src), [{'keep', 'keep/b.txt', 'x.tmp'}])
 
@@ -169,8 +169,8 @@ class RemoveIgnoredTest(unittest.TestCase):
         self.snapshot(self.src)
         write(self.src / '.kopiaignore', '*.log\n!keep.log\n')
         plan = self.plan(self.src, [self.src])
-        self.assertEqual(plan.evaluate(['*.log'])['files'], 1)
-        job = self.remove(plan, ['*.log'])
+        self.assertEqual(plan.evaluate(['file:*.log'])['files'], 1)
+        job = self.remove(plan, ['file:*.log'])
         self.assertEqual(job['state'], 'done', job['error'])
         self.assertEqual(self.paths(self.src), [{'keep.log', 'notes.txt'}])
 
@@ -181,9 +181,9 @@ class RemoveIgnoredTest(unittest.TestCase):
         self.snapshot(self.src)
         write(self.src / '.kopiaignore', '*.tmp\n*.bak\n')
         plan = self.plan(self.src, [self.src])
-        self.assertEqual(plan.evaluate(['*.tmp'])['files'], 1)
-        self.assertEqual(plan.evaluate(['*.tmp', '*.bak'])['files'], 2)
-        job = self.remove(plan, ['*.bak'])
+        self.assertEqual(plan.evaluate(['file:*.tmp'])['files'], 1)
+        self.assertEqual(plan.evaluate(['file:*.tmp', 'file:*.bak'])['files'], 2)
+        job = self.remove(plan, ['file:*.bak'])
         self.assertEqual(job['state'], 'done', job['error'])
         self.assertEqual(self.paths(self.src), [{'a.tmp'}])
 
@@ -198,10 +198,10 @@ class RemoveIgnoredTest(unittest.TestCase):
         write(inner / '.kopiaignore', 'big.bin\n')
         ke.repository.storage()
         self.assertEqual(ke.removable_from(str(inner)), sorted([str(self.src), str(inner)]))
-        alone = self.plan(inner, [inner]).evaluate(['big.bin'])
+        alone = self.plan(inner, [inner]).evaluate(['file:big.bin'])
         self.assertEqual((alone['files'], alone['snapshots']), (1, 1))
         self.assertEqual(alone['freed'], 0)
-        both = self.plan(inner, [self.src, inner]).evaluate(['big.bin'])
+        both = self.plan(inner, [self.src, inner]).evaluate(['file:big.bin'])
         self.assertEqual((both['files'], both['snapshots']), (1, 2))
         self.assertGreater(both['freed'], 12 * MB)
 
@@ -215,7 +215,7 @@ class RemoveIgnoredTest(unittest.TestCase):
         self.snapshot(self.src)
         self.snapshot(other)
         write(self.src / '.kopiaignore', 'junk/\n')
-        result = self.plan(self.src, [self.src]).evaluate(['junk/'])
+        result = self.plan(self.src, [self.src]).evaluate(['file:junk/'])
         self.assertEqual(result['files'], 1)
         self.assertGreater(result['bytes'], 40 * MB)
         self.assertLess(result['freed'], result['bytes'] * 0.4)
@@ -229,12 +229,36 @@ class RemoveIgnoredTest(unittest.TestCase):
         ke.set_global_ignore(['*.bak'])
         try:
             plan = self.plan(None, [self.src])
-            self.assertEqual(plan.evaluate(['*.bak'])['files'], 2)
-            job = self.remove(plan, ['*.bak'])
+            self.assertEqual(plan.evaluate(['policy:*.bak'])['files'], 2)
+            job = self.remove(plan, ['policy:*.bak'])
             self.assertEqual(job['state'], 'done', job['error'])
             self.assertEqual(self.paths(self.src), [{'keep.txt', 'sub'}])
         finally:
             ke.set_global_ignore([])
+
+    def test_policy_rules(self):
+        """A location's own policy's rules apply from its top, along with its .kopiaignore's, each picked on its
+        own; a location inside it goes by them too, but they only count for the location whose folder it is"""
+        inner = self.src / 'd'
+        write(self.src / 'old.bak', 'b')
+        write(self.src / 'notes.tmp', 't')
+        write(inner / 'older.bak', 'c')
+        write(inner / 'keep.txt', 'k')
+        self.snapshot(self.src)
+        self.snapshot(inner)
+        write(self.src / '.kopiaignore', '*.tmp\n')
+        ke.change_policies('set', str(self.src), '--add-ignore=*.bak')
+        plan = self.plan(self.src, [self.src])
+        self.assertEqual(plan.evaluate(['policy:*.bak'])['files'], 2)
+        self.assertEqual(plan.evaluate(['file:*.tmp'])['files'], 1)
+        self.assertEqual(plan.evaluate(['file:*.bak'])['files'], 0)
+        # d has no list of its own, so goes by the one above it, but that's only removed from d's own snapshots
+        nested = self.plan(inner, [self.src, inner]).evaluate(['policy:*.bak'])
+        self.assertEqual((nested['files'], nested['snapshots']), (1, 1))
+        job = self.remove(plan, ['policy:*.bak', 'file:*.tmp'])
+        self.assertEqual(job['state'], 'done', job['error'])
+        self.assertEqual(job['name'], f'{self.src}\\.kopiaignore and the policy {self.src} goes by')
+        self.assertEqual(self.paths(self.src), [{'d', 'd/keep.txt'}])
 
     def test_refused_once_snapshots_change(self):
         """A snapshot made since it was worked out may have the same files somewhere they should stay, so nothing's
@@ -245,7 +269,7 @@ class RemoveIgnoredTest(unittest.TestCase):
         plan = self.plan(self.src, [self.src])
         write(self.src / 'b.txt', 'b')
         self.snapshot(self.src)
-        job = self.remove(plan, ['*.tmp'])
+        job = self.remove(plan, ['file:*.tmp'])
         self.assertEqual(job['state'], 'failed')
         self.assertIn('changed', job['error'])
         self.assertEqual(self.paths(self.src)[0], {'a.tmp'})

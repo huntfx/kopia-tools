@@ -2476,7 +2476,10 @@ NOTHING = frozenset()
 class RemovalPlan:
     """What removing the files a folder's .kopiaignore ignores, or the global policy's ignore rules, from the
     snapshots of some locations would remove, worked out in the background, as it reads every snapshot in the
-    repository, then for any choice of those rules, straight away.
+    repository, then for any choice of those rules, straight away. For a location's own folder, the ignore rules in
+    the policy it goes by are included too, unless they're the global policy's, which only apply in its own
+    snapshots, as a location around it goes by its own. Each rule is known by where it's from and its line, as
+    file:line for the .kopiaignore and policy:line for the policy.
 
     Each of those locations' snapshots is read for what each rule ignores in it now, from the folder down, going by
     every ignore rule there is, so one brought back by a ! rule, or ignored by another rule instead, stays. Kopia
@@ -2490,19 +2493,25 @@ class RemovalPlan:
         self.id = next(plan_ids)
         self.path = path
         self.locations = sorted(locations)
-        # The ignore file whose rules are removed, as kopia's rules name it, or None for the policy's
+        # The ignore file whose rules are removed, as kopia's rules name it, or None for only the policy's
         self.origin = None if path is None else os.path.normcase(str(Path(path) / IGNORE_FILE))
+        # The locations whose policy's rules are removed too: for the global rules, every one, as they all go by them,
+        # and for a location's own folder, that location, unless its rules are the global policy's
+        policies = repository.policies()
+        self.policy_in = set(self.locations) if path is None else {
+            loc for loc in self.locations if loc.lower() == path.lower()
+            and first_files_setting(policy_chain(loc), policies, 'ignore')[1] not in (None, 'the global policy')}
         self.state, self.step, self.done, self.total, self.error = 'working', 'Starting', 0, 0, None
         self.cancelled = False
         self.snapshots = {}   # Location -> the IDs of its snapshots, as read
-        self.found = {}       # Location -> {object ID: {'dir': whether it's a folder, 'rules': {line: its paths}}} ignored
+        self.found = {}       # Location -> {object ID: {'dir': whether it's a folder, 'rules': {rule: its paths}}} ignored
         self.kept = {}        # Location -> the object IDs of everything else in its snapshots, which stays
         self.held = {}        # Snapshot ID -> the object IDs of what's ignored in it
         self.inside = {}      # Folder object ID -> ([(path inside it, object ID)] of its files, its folders' object IDs)
         self.chunks = {}      # File object ID -> its contents, for every file ignored
         self.shared = set()   # Contents of those that files staying elsewhere use too
         self.packed = {}      # Content ID -> its size on disk, for those contents
-        self.rules = {}       # Line -> what removing only it would remove: {'files', 'bytes'}
+        self.rules = {}       # Rule -> what removing only it would remove: {'files', 'bytes'}
         self.kept_large = {}  # Large files' object IDs -> their names, lower-cased, for those staying in these locations
         threading.Thread(target=self.run, daemon=True).start()
 
@@ -2578,7 +2587,9 @@ class RemovalPlan:
             if rule is None:
                 return None
             line, origin = rule
-            return line if (origin and os.path.normcase(origin)) == self.origin else OTHER_RULE
+            if origin is None:
+                return f'policy:{line}' if loc in self.policy_in else OTHER_RULE
+            return f'file:{line}' if self.origin and os.path.normcase(origin) == self.origin else OTHER_RULE
 
         def keep_file(oid, name):
             kept.add(oid)
@@ -2850,8 +2861,12 @@ def start_removal(plan_id, rules):
             raise BusyError(f'{loc} is being backed up')
         if any(j['kind'] in ('delete', 'pin') and j['source'] == loc and not j['finished'] for j in jobs.values()):
             raise BusyError(f'A snapshot of {loc} is being deleted, pinned or unpinned')
+    # Where the rules are from, in words
+    kinds = {rule.split(':', 1)[0] for rule in rules}
+    name = ' and '.join([*([str(Path(plan.path) / IGNORE_FILE)] if 'file' in kinds else []),
+                         *(['the global ignore rules' if plan.path is None else f'the policy {plan.path} goes by'] if 'policy' in kinds else [])])
     job = {
-        'id': next(job_ids), 'kind': 'remove', 'name': plan.path and str(Path(plan.path) / IGNORE_FILE),
+        'id': next(job_ids), 'kind': 'remove', 'name': name,
         'locations': plan.locations, 'rules': sorted(set(rules)), 'files': result['files'], 'bytes': result['bytes'], 'freed': result['freed'],
         'snapshots': result['snapshots'], 'state': 'checking', 'part': 0, 'parts': 0, 'renamed': {},
         'error': None, 'started': time.time(), 'finished': None,

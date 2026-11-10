@@ -59,15 +59,30 @@ export function ignoreLine(path) {
     file.exists ? el('span', { title }, `${plural(rules.length, 'rule')} in ${NAME}`) : el('span', { class: 'muted', title }, `No ${NAME}`),
     file.exists && !file.read ? el('span', { class: 'warn', title: `The policy here doesn't read ${file.name} files, so Kopia won't use it` }, 'Not read') : null,
     change,
-    file.exists && file.read && canRemove(path, rules) ? removeLink(path, rules) : null);
+    canRemove(path, removalGroups(path, file)) ? removeLink(path, removalGroups(path, file)) : null);
 }
+
+// The rules what's ignored can be removed from snapshots by, for a folder: its .kopiaignore's, if kopia reads it, and
+// for a location's own folder, the rules in the policy it goes by, unless they're the global policy's, which the PC's
+// page has
+function removalGroups(path, file) {
+  return [
+    file.exists && file.read ? { kind: 'file', label: `${path.replace(/\\$/, '')}\\${NAME}`, rules: rulesIn(file.content) } : null,
+    file.location.toLowerCase() === path.toLowerCase() && file.policyRules.length && file.policyFrom && file.policyFrom !== 'the global policy'
+      ? { kind: 'policy', label: file.policyFrom.toLowerCase() === path.toLowerCase() ? 'Its own policy' : `The policy for ${file.policyFrom}`, rules: file.policyRules } : null,
+  ].filter(Boolean);
+}
+
+// The global policy's rules, as a group to remove what they ignore by
+const globalGroups = rules => [{ kind: 'policy', label: 'Global policy', rules }];
 
 // After new rules are saved, removing what they leave out of the latest snapshots from the snapshots already taken
 // is offered, for the rules a check found something for
-function offerNew(path, before, after) {
+function offerNew(path, before, groups) {
   const was = new Set(before);
+  const after = groups.find(g => g.kind === (path ? 'file' : 'policy'))?.rules || [];
   const added = after.filter(line => !was.has(line) && !line.startsWith('!') && (drops.get(dropKey(path, line))?.files || drops.get(dropKey(path, line))?.folders));
-  if (added.length) offerRemoval(path, after, added, path ? [] : global?.replaced || []);
+  if (added.length) offerRemoval(path, groups, added.map(line => `${path ? 'file' : 'policy'}:${line}`), path ? [] : global?.replaced || []);
 }
 
 // Kopia's page about .kopiaignore, over the editor, so what's typed stays as it is
@@ -189,7 +204,7 @@ function ignoreDialog(path) {
       const key = path.toLowerCase();
       for (const other of [...files.keys()].filter(k => k.startsWith(`${key.replace(/\\$/, '')}\\`))) files.delete(other);
       files.set(key, saved);
-      if (saved.read) offerNew(path, rulesIn(file.content), rulesIn(saved.content));
+      if (saved.read) offerNew(path, rulesIn(file.content), removalGroups(path, saved));
       const inside = l => (`${key}\\`).startsWith(`${l.path.replace(/\\$/, '').toLowerCase()}\\`);
       const ids = new Set(storage.filter(inside).flatMap(l => l.snapshots.map(s => s.id)));
       for (const diff of Object.keys(DATA.diffs).filter(k => k.split('..').some(id => ids.has(id)))) delete DATA.diffs[diff];
@@ -281,7 +296,7 @@ export function globalIgnoreLine() {
   return el('div', { class: 'schedule' },
     el('span', { title }, global.rules.length ? plural(global.rules.length, 'global ignore rule') : 'No global ignore rules'),
     change,
-    canRemove(null, global.rules, global.replaced) ? removeLink(null, global.rules, global.replaced) : null);
+    canRemove(null, globalGroups(global.rules), global.replaced) ? removeLink(null, globalGroups(global.rules), global.replaced) : null);
 }
 
 // Edit the global policy's ignore rules. Kopia keeps them sorted, so there can't be comments, which it would keep
@@ -310,7 +325,7 @@ function globalIgnoreDialog() {
         save.disabled = cancel.disabled = false;
         return;
       }
-      offerNew(null, global?.rules || [], saved.rules);
+      offerNew(null, global?.rules || [], globalGroups(saved.rules));
       global = saved;
       files.clear();
       for (const diff of Object.keys(DATA.diffs)) delete DATA.diffs[diff];

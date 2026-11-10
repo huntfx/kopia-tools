@@ -509,6 +509,8 @@ th[aria-sort] { color: var(--ink); }
 .removal-list.locations label { grid-template-columns: auto minmax(0, 1fr); overflow-wrap: anywhere; color: var(--ink); }
 .removal-list input { margin: 2px 0 0; }
 .removal-list .rule { font-family: var(--font-data); color: var(--ink); overflow-wrap: anywhere; }
+/* Not in capitals, like other headings, as it names a file or folder */
+.removal h3 { margin: 14px 0 4px; font-size: 0.85rem; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
 .removal .other-rules { margin: 0 0 10px; font-size: 0.85rem; color: var(--ink-2); }
 .removal .other-rules summary { cursor: pointer; }
 .removal .other-rules .removal-list { margin: 6px 0 0; }
